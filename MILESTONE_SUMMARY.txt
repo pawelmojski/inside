@@ -1,0 +1,165 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║            🎉 JUMPHOST PROJECT - MILESTONE v1.0 ACHIEVED 🎉              ║
+║                                                                           ║
+║                        Production Release - 2026-01-04                    ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+📦 COMPLETE PACKAGE CONTENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Git Repository (4 commits, 1 tag)
+   📂 /opt/jumphost/.git
+   🏷️  Tag: v1.0
+   📝 Full commit history with detailed messages
+
+✅ Complete Archive (with Git)
+   📦 /opt/jumphost-v1.0-COMPLETE-20260104_121009.tar.gz (159KB)
+   📋 Includes: source code, git history, documentation, migrations
+   🚫 Excludes: venv, logs, __pycache__
+
+✅ Source Archive (without Git)
+   📦 /opt/jumphost-v1.0-20260104_120754.tar.gz (145KB)
+   📋 Includes: source code, documentation
+   🚫 Excludes: .git, venv, logs
+
+✅ Modified PyRDP Backup
+   📄 /opt/jumphost/pyrdp_mitm_py_MODIFIED_v1.0_20260104.py (7.6KB)
+   🔧 Modified: venv/lib/python3.13/site-packages/pyrdp/core/mitm.py
+   ⚙️  Changes: V2 access control + destination IP extraction
+
+✅ Working SSH Proxy Backup
+   📄 /opt/jumphost/src/proxy/ssh_proxy.py.working_backup_20260104_113741 (21KB)
+   🔧 Includes: Login forwarding + agent forwarding fixes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 PRODUCTION STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Component          Status     Port    PID      Log
+─────────────────  ─────────  ──────  ───────  ─────────────────────────────
+SSH Proxy          🟢 RUNNING  22     dynamic  /var/log/jumphost/ssh/
+RDP Proxy          🟢 RUNNING  3389   dynamic  /var/log/jumphost/rdp_proxy.log
+PostgreSQL         🟢 RUNNING  5432   system   /var/log/postgresql/
+Access Control V2  🟢 ACTIVE   -      -        Database-driven
+
+Production User:   p.mojski (3 source IPs, 3 policies)
+Test Results:      13/13 scenarios PASSED ✅
+Last Tested:       2026-01-04 12:01
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 KEY FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Flexible Access Control V2
+   • Multiple source IPs per user
+   • Server groups with N:M relationships
+   • Group/Server/Service-level permissions
+   • Protocol filtering (SSH, RDP, both)
+   • SSH login restrictions
+   • Temporal access with TTL
+
+✅ SSH Proxy
+   • Transparent authentication (agent forwarding + password)
+   • PTY, SCP, SFTP support
+   • Session recording (asciinema format)
+   • Dynamic backend routing
+
+✅ RDP Proxy
+   • PyRDP MITM with full protocol support
+   • Session recording (PyRDP format)
+   • TLS support, channel redirection
+   • Smart card support
+
+✅ Infrastructure
+   • PostgreSQL database with JSONB
+   • Alembic migrations (version control)
+   • CLI management tools
+   • Audit logging
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 CRITICAL FIXES IMPLEMENTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  SSH Login Forwarding Fix
+    Problem: Backend auth used DB username instead of client's SSH login
+    Solution: Store ssh_login in handler, use for backend authentication
+    File: src/proxy/ssh_proxy.py
+    Impact: Critical - SSH now works with any username
+
+2️⃣  RDP Destination IP Extraction Fix
+    Problem: Cannot determine backend when listening on 0.0.0.0
+    Solution: Extract dest_ip from socket.getsockname() in connectionMade()
+    File: venv/lib/python3.13/site-packages/pyrdp/core/mitm.py
+    Impact: Critical - RDP now routes to correct backend
+
+3️⃣  RDP Graceful Denied Connections
+    Problem: KeyError on statCounter when closing denied connections
+    Solution: Call original_connectionMade() first, close asynchronously
+    File: venv/lib/python3.13/site-packages/pyrdp/core/mitm.py
+    Impact: Clean error handling, no stack traces
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ README.md                        - Project overview & quick start
+✅ MILESTONE_v1.0.md                - Release notes & achievements
+✅ FLEXIBLE_ACCESS_CONTROL_V2.md    - V2 system documentation
+✅ ROADMAP.md                       - Project status & technical details
+✅ DEPLOYMENT.md                    - Deployment & rollback guide
+✅ DOCUMENTATION.md                 - General project documentation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fresh Deployment:
+  cd /opt
+  tar xzf jumphost-v1.0-COMPLETE-20260104_121009.tar.gz
+  cd jumphost
+  # Follow DEPLOYMENT.md
+
+Rollback SSH Proxy:
+  cd /opt/jumphost/src/proxy
+  cp ssh_proxy.py.working_backup_20260104_113741 ssh_proxy.py
+  sudo pkill -f ssh_proxy.py && sudo python3 ssh_proxy.py &
+
+Rollback RDP Proxy:
+  cd /opt/jumphost
+  cp pyrdp_mitm_py_MODIFIED_v1.0_20260104.py \
+     venv/lib/python3.13/site-packages/pyrdp/core/mitm.py
+  sudo pkill -f pyrdp-mitm && sudo nohup ./venv/bin/pyrdp-mitm ... &
+
+View Git History:
+  cd /opt/jumphost
+  git log --oneline --graph
+  git show v1.0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 STATISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Development Time:        4 days (2026-01-01 to 2026-01-04)
+Lines of Code:           ~3500 Python, ~500 SQL
+Files Modified:          15 core files, 1 external dependency
+Git Commits:             4 commits
+Database Tables:         11 total (6 legacy + 5 V2)
+Test Scenarios:          13/13 PASSED ✅
+Critical Bugs Fixed:     3 (SSH login, RDP dest_ip, denied connections)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👨‍💻 CREDITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Developer:               Paweł Mojski (p.mojski@ideosoftware.com)
+Organization:            IDEO Software
+Release Date:            2026-01-04
+Version:                 1.0
+License:                 Proprietary - Internal Use Only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎊 ACHIEVEMENT UNLOCKED: From Zero to Production in 4 Days! 🎊
+
