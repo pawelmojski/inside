@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Logs
+logs/
+*.log
+nohup.out
+
+# Database
+*.db
+*.sqlite3
+
+# SSH keys
+ssh_host_key
+ssh_host_key.pub
+*.pem
+*.key
+
+# Certificates
+certs/*.crt
+certs/*.key
+
+# Session recordings
+/var/log/jumphost/
+
+# PyRDP recordings
+rdp_recordings/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
