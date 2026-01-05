@@ -308,6 +308,28 @@ class Session(Base):
     )
 
 
+class MP4ConversionQueue(Base):
+    """MP4 conversion queue for RDP session recordings."""
+    __tablename__ = "mp4_conversion_queue"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(255), unique=True, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default='pending', index=True)  # pending, converting, completed, failed
+    progress = Column(Integer, default=0)  # Current progress count
+    total = Column(Integer, default=0)  # Total items to process
+    eta_seconds = Column(Integer)  # Estimated time remaining
+    priority = Column(Integer, default=0, index=True)  # Higher = processed first
+    mp4_path = Column(Text)  # Path to converted MP4 file
+    error_msg = Column(Text)  # Error message if failed
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'converting', 'completed', 'failed')", name="check_conversion_status"),
+    )
+
+
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)

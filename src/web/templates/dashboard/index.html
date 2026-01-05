@@ -131,7 +131,7 @@
             <div class="card-body">
                 {% if active_sessions %}
                 <div class="table-responsive">
-                    <table class="table table-sm mb-0">
+                    <table class="table table-sm mb-0" id="activeSessionsTable">
                         <thead>
                             <tr>
                                 <th>Protocol</th>
@@ -141,9 +141,11 @@
                                 <th>Source IP</th>
                                 <th>SSH Agent</th>
                                 <th>Started</th>
+                                <th>Duration</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="activeSessionsBody">
                             {% for session in active_sessions[:5] %}
                             <tr>
                                 <td><span class="badge bg-{{ 'primary' if session.protocol == 'SSH' else 'success' }}">{{ session.protocol }}</span></td>
@@ -162,14 +164,91 @@
                                         <span class="text-muted">-</span>
                                     {% endif %}
                                 </td>
-                                <td>{{ session.started|timeago }}</td>
+                                <td>
+                                    <span title="{{ session.started.strftime('%d-%m-%Y %H:%M:%S') }}">
+                                        {{ session.started|timeago }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-warning text-dark">LIVE</span>
+                                </td>
+                                <td>
+                                    <a href="{{ url_for('sessions.view', session_id=session.id) }}" class="btn btn-sm btn-outline-primary" title="View Details">
+                                        <i class="bi bi-eye"></i>
+                                    </a>
+                                    {% if session.protocol == 'SSH' %}
+                                        <a href="{{ url_for('sessions.view', session_id=session.id) }}#live" class="btn btn-sm btn-outline-success" title="Live View">
+                                            <i class="bi bi-broadcast"></i>
+                                        </a>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
                 {% else %}
-                <p class="text-muted mb-0">No active sessions</p>
+                <p class="text-muted mb-0" id="noActiveSessionsMsg">No active sessions</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Recent Sessions -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Recent Sessions (Last 10 Closed)</h5>
+                <a href="{{ url_for('sessions.index') }}" class="btn btn-sm btn-light">View All</a>
+            </div>
+            <div class="card-body">
+                {% if recent_sessions %}
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover">
+                        <thead>
+                            <tr>
+                                <th>Protocol</th>
+                                <th>User</th>
+                                <th>Server</th>
+                                <th>Started</th>
+                                <th>Duration</th>
+                                <th>Ended</th>
+                                <th>Recording</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for session in recent_sessions[:10] %}
+                            <tr>
+                                <td><span class="badge bg-{{ 'primary' if session.protocol == 'SSH' else 'success' }}">{{ session.protocol }}</span></td>
+                                <td>{{ session.user }}</td>
+                                <td><strong>{{ session.server }}</strong></td>
+                                <td>
+                                    <span title="{{ session.started.strftime('%d-%m-%Y %H:%M:%S') if session.started else '' }}">
+                                        {{ session.started|timeago if session.started else '-' }}
+                                    </span>
+                                </td>
+                                <td>{{ session.duration }}</td>
+                                <td>
+                                    <span title="{{ session.ended.strftime('%d-%m-%Y %H:%M:%S') if session.ended else '' }}">
+                                        {{ session.ended|timeago if session.ended else '-' }}
+                                    </span>
+                                </td>
+                                <td class="text-center">
+                                    {% if session.has_recording %}
+                                        <a href="{{ url_for('sessions.view', session_id=session.session_id) }}" class="btn btn-sm btn-outline-primary" title="View Details">
+                                            <i class="bi bi-eye"></i>
+                                        </a>
+                                    {% else %}
+                                        <span class="text-muted">-</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted mb-0">No recent sessions</p>
                 {% endif %}
             </div>
         </div>
@@ -262,7 +341,11 @@
                                     {% if log.details %} - {{ log.details }}{% endif %}
                                 </p>
                             </div>
-                            <small class="text-muted">{{ log.timestamp|timeago }}</small>
+                            <small class="text-muted">
+                                <span title="{{ log.timestamp.strftime('%d-%m-%Y %H:%M:%S') if log.timestamp else '' }}">
+                                    {{ log.timestamp|timeago }}
+                                </span>
+                            </small>
                         </div>
                     </div>
                     {% endfor %}
@@ -325,5 +408,101 @@ function showCopiedFeedback(element) {
         element.classList.add('bg-success');
     }, 1500);
 }
+
+// Auto-refresh dashboard stats and active sessions
+function refreshDashboard() {
+    // Refresh statistics
+    fetch('/api/stats')
+        .then(response => response.json())
+        .then(data => {
+            // Update stats cards
+            document.querySelector('#todayConnections').textContent = data.today_connections || '0';
+            
+            const deniedEl = document.querySelector('#todayDenied');
+            if (deniedEl) deniedEl.textContent = data.today_denied || '0';
+            
+            const successRateEl = document.querySelector('#successRate');
+            if (successRateEl) successRateEl.textContent = (data.success_rate || '0') + '%';
+        })
+        .catch(err => console.error('Failed to refresh stats:', err));
+    
+    // Refresh active sessions
+    fetch('/api/active-sessions')
+        .then(response => response.json())
+        .then(data => {
+            const tbody = document.querySelector('#activeSessionsBody');
+            if (!tbody || !data.sessions) return;
+            
+            if (data.sessions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="text-muted">No active sessions</td></tr>';
+                return;
+            }
+            
+            // Update table rows
+            let html = '';
+            data.sessions.slice(0, 5).forEach(session => {
+                const protocolBadge = session.protocol === 'SSH' ? 'primary' : 'success';
+                const sshAgentIcon = session.ssh_agent === true ? '<span class="text-success">✓</span>' : 
+                                    session.ssh_agent === false ? '<span class="text-danger">✗</span>' : 
+                                    '<span class="text-muted">-</span>';
+                
+                const startedDate = session.started ? new Date(session.started) : null;
+                const startedDisplay = startedDate ? timeAgo(startedDate) : '-';
+                const startedTitle = startedDate ? startedDate.toLocaleString() : '';
+                
+                html += `
+                    <tr>
+                        <td><span class="badge bg-${protocolBadge}">${session.protocol}</span></td>
+                        <td>${session.user}</td>
+                        <td><strong>${session.server}</strong></td>
+                        <td><code>${session.backend_ip}</code></td>
+                        <td><code>${session.source_ip}</code></td>
+                        <td class="text-center">${sshAgentIcon}</td>
+                        <td><span title="${startedTitle}">${startedDisplay}</span></td>
+                        <td><span class="badge bg-warning text-dark">LIVE</span></td>
+                        <td>
+                            <a href="/sessions/${session.id}" class="btn btn-sm btn-outline-primary" title="View Details">
+                                <i class="bi bi-eye"></i>
+                            </a>
+                            ${session.protocol === 'SSH' ? `
+                            <a href="/sessions/${session.id}#live" class="btn btn-sm btn-outline-success" title="Live View">
+                                <i class="bi bi-broadcast"></i>
+                            </a>
+                            ` : ''}
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            tbody.innerHTML = html;
+        })
+        .catch(err => console.error('Failed to refresh active sessions:', err));
+}
+
+// Simple timeAgo function
+function timeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+}
+
+// Refresh every 5 seconds
+setInterval(refreshDashboard, 5000);
+
+// Initial refresh after 1 second
+setTimeout(refreshDashboard, 1000);
+
+// Clear server-rendered tbody on page load (will be replaced by AJAX)
+document.addEventListener('DOMContentLoaded', function() {
+    const tbody = document.querySelector('#activeSessionsBody');
+    if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center"><em>Loading...</em></td></tr>';
+    }
+});
+
+
 </script>
 {% endblock %}

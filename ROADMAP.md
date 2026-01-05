@@ -1,13 +1,34 @@
 # Jump Host Project - Roadmap & TODO
 
+## Current Status: v1.3 (RDP MP4 Conversion) - January 2026 ✅
+
+**Operational Services:**
+- ✅ SSH Proxy: `0.0.0.0:22` (systemd: jumphost-ssh-proxy.service)
+- ✅ RDP Proxy: `0.0.0.0:3389` (systemd: jumphost-rdp-proxy.service)  
+- ✅ Flask Web: `0.0.0.0:5000` (systemd: jumphost-flask.service)
+- ✅ MP4 Workers: 2 instances (systemd: jumphost-mp4-converter@1/2.service) 🎯 NEW
+- ✅ PostgreSQL: Access Control V2 with policy-based authorization
+- ✅ Session Monitoring: Real-time tracking with live view (SSH + RDP MP4)
+- ✅ Auto-Refresh Dashboard: 5-second updates via AJAX
+- ✅ RDP MP4 Conversion: Background queue with progress tracking 🎯 NEW
+
+**Recent Milestones:**
+- v1.3: RDP MP4 Conversion System (January 2026) ✅ COMPLETED
+- v1.2-dev: RDP Session Viewer (January 2026) ✅ COMPLETED
+- v1.1: Session History & Live View (January 2026) ✅ COMPLETED
+- v1.0: Access Control V2 with Flexible Policies (December 2025)
+- v0.9: Real-time Session Tracking with UTMP/WTMP (December 2025)
+
 ## Project Vision
 
 Stworzenie kompletnego SSH/RDP jump hosta z:
-- Uwierzytelnianiem przez FreeIPA
-- Czasowym przydzielaniem dostępów
-- Mapowaniem użytkowników per source IP
-- Nagrywaniem sesji
-- Dynamicznym zarządzaniem pulą IP (10.0.160.128/25)
+- ✅ Uwierzytelnianiem per source IP (DONE)
+- ✅ Czasowym przydzielaniem dostępów (DONE)
+- ✅ Mapowaniem użytkowników per source IP (DONE - multiple IPs supported)
+- ✅ Nagrywaniem sesji (DONE - SSH JSONL, RDP .pyrdp)
+- ✅ Live view sesji (DONE - 2s polling for SSH)
+- ⏳ Dynamicznym zarządzaniem pulą IP (PARTIAL - manual allocation)
+- ⏳ Integracją z FreeIPA (TODO)
 
 ## Architecture Goal
 
@@ -20,16 +41,411 @@ Jump Host extracts:
     - Source IP: 100.64.0.X (identifies user)
     - Destination IP: 10.0.160.150 (identifies backend server)
     ↓
-Access Control:
-    - User from source IP has grant to backend?
-    - Grant still valid (temporal)?
+Access Control V2:
+    - User from source IP has policy grant to backend?
+    - Policy scope: group/server/service level?
+    - Policy still valid (temporal)?
+    - Protocol allowed (ssh/rdp/both)?
+    - SSH login allowed (if SSH)?
     ↓
 Proxy forwards to backend:
     - SSH: 10.30.0.200:22
     - RDP: 10.30.0.140:3389
     ↓
-Session recorded to disk
+Session recorded to disk (JSONL for SSH, .pyrdp for RDP)
+Session tracked in database (real-time monitoring)
+Live view available in web GUI
 ```
+
+---
+
+## ✅ COMPLETED: v1.1 - Session Monitoring & Live View (January 2026)
+
+### 🎯 Major Features Delivered
+
+#### 1. Session History & Live View System
+- **Session List**: `/sessions/` with filtering by protocol, status, user, server
+- **Session Detail**: Full metadata display with 14 fields
+- **Live SSH Viewer**: Real-time log streaming with 2-second polling
+- **Terminal UI**: Dark theme with color-coded events, search, client/server filters
+- **Recording Format**: JSONL (JSON Lines) for streaming writes
+- **Performance**: LRU cache (maxsize=100) for session parser optimization
+- **Download**: Support for SSH .log and RDP .pyrdp files
+
+#### 2. Dashboard Auto-Refresh
+- **Active Sessions Table**: Auto-updates every 5 seconds via AJAX
+- **Statistics Cards**: Today's connections, denied, success rate
+- **API Endpoints**: `/api/stats`, `/api/active-sessions`
+- **Recent Sessions Widget**: Shows last 10 closed sessions with Started/Duration/Ended
+- **Tooltips**: European date format (dd-mm-yyyy hh:mm:ss) on all "ago" timestamps
+
+#### 3. Systemd Service Integration
+- **jumphost-flask.service**: Flask web app (port 5000, user: p.mojski)
+- **jumphost-ssh-proxy.service**: SSH proxy (port 22, user: root)
+- **jumphost-rdp-proxy.service**: PyRDP MITM direct (port 3389, user: root)
+- **Centralized Logs**: `/var/log/jumphost/{flask,ssh_proxy,rdp_mitm}.log`
+- **Logrotate**: Daily rotation, 14-30 days retention
+- **Auto-Restart**: All services configured with `Restart=always`
+
+#### 4. Architecture Simplification
+- **RDP**: Direct PyRDP MITM on 0.0.0.0:3389 (removed rdp_guard.py, rdp_wrapper.sh)
+- **Logs**: Unified structure in /var/log/jumphost/
+- **Service Management**: Full systemd integration with enable/disable/restart
+
+#### 5. Live Recording System
+- **SSH**: JSONL format - writes each event immediately to disk
+- **Performance**: File opened in append mode, flushed after each write
+- **Compatibility**: Parser handles both JSONL (streaming) and old JSON format
+- **Live View**: Browser polls `/sessions/<id>/live?after=<timestamp>` every 2s
+- **Cache Invalidation**: LRU cache uses (file_path, mtime) as key
+
+### 📁 New Files Created
+- `/opt/jumphost/src/web/blueprints/sessions.py` - Session history & live view blueprint
+- `/opt/jumphost/src/web/templates/sessions/index.html` - Session list with filters
+- `/opt/jumphost/src/web/templates/sessions/view.html` - Session detail + live viewer
+- `/etc/systemd/system/jumphost-flask.service` - Flask systemd service
+- `/etc/systemd/system/jumphost-ssh-proxy.service` - SSH proxy systemd service
+- `/etc/systemd/system/jumphost-rdp-proxy.service` - RDP proxy systemd service
+- `/etc/logrotate.d/jumphost` - Log rotation configuration
+
+### 🗑️ Deprecated/Removed
+- `src/proxy/rdp_guard.py` - No longer used (direct PyRDP MITM now)
+- `src/proxy/rdp_wrapper.sh` - No longer used
+- `src/proxy/rdp_proxy.py` - Deprecated Python wrapper
+
+### 📊 Testing Results
+- **Dashboard Refresh**: ✅ 5-second auto-update working
+- **Live SSH View**: ✅ 2-second polling with new events
+- **Session History**: ✅ Filtering by protocol/status/user/server
+- **Recording Download**: ✅ SSH .log and RDP .pyrdp files
+- **Systemd Services**: ✅ All 3 services running with auto-restart
+- **Performance**: ✅ LRU cache eliminates repeated parsing
+
+### 🐛 Issues Fixed
+- Fixed API endpoint returning dict instead of Session objects
+- Fixed dashboard auto-refresh selector (added #activeSessionsBody ID)
+- Fixed Recent Sessions missing "Started" column
+- Added tooltips with dd-mm-yyyy format to all timestamps
+- Fixed JSONL recording to write immediately (not at session end)
+- Fixed Flask becoming slow (added caching)
+
+---
+
+## ✅ COMPLETED: v1.3 - RDP MP4 Conversion System (January 2026)
+
+### 🎯 Goal: Web-based RDP Session Video Playback
+
+**Challenge Solved**: RDP recordings (.pyrdp files) required desktop Qt player. Implemented web-based MP4 conversion with background workers.
+
+### ✅ Delivered Features
+
+#### 1. Background Worker Queue System
+- **Workers**: 2 systemd services (`jumphost-mp4-converter@1.service`, `@2.service`)
+- **Queue**: SQLite `mp4_conversion_queue` table with status tracking
+- **Concurrency**: Maximum 2 simultaneous conversions, 10 pending jobs
+- **Polling**: Workers check database every 5 seconds
+- **Priority**: "Rush" button to move jobs to front of queue
+- **Resource Limits**: 150% CPU, 2GB RAM per worker
+- **Logs**: `/var/log/jumphost/mp4-converter-worker{1,2}.log`
+- **Auto-restart**: Systemd restarts on failure
+
+#### 2. PyRDP MP4 Conversion
+- **Environment**: Separate venv at `/opt/jumphost/venv-pyrdp-converter/`
+- **Dependencies**: PySide6 + av + pyrdp-mitm
+- **FPS**: 10 frames per second (quality/speed balance)
+- **Storage**: `/var/log/jumphost/rdp_recordings/mp4_cache/`
+- **Format**: H.264 MP4 with audio support
+- **Performance**: ~15s for 1.8MB file, ~40s for 3.5MB file
+- **Patches Applied**:
+  - RDP version enum: Added `RDP10_12 = 0x80011` support
+  - Python 3.13 fix: `BinaryIO` import in FileMapping.py
+  - FPS override: Modified `convert/utils.py` to pass fps=10
+
+#### 3. Progress Tracking & ETA
+- **Real-time Updates**: Parses pyrdp-convert output via regex
+- **Progress Bar**: Shows X of Y frames with percentage
+- **ETA Calculation**: Based on elapsed time and frames processed
+- **Queue Position**: Shows position for pending jobs
+- **Status Badge**: Updates color (secondary/warning/primary/success/danger)
+- **Polling Interval**: Frontend checks every 2 seconds
+
+#### 4. Web UI Components
+- **Convert Button**: Queues new conversion job (max 10 pending)
+- **Progress Display**: Live progress bar with ETA countdown
+- **Video Player**: HTML5 `<video>` with controls
+- **Download Button**: Direct MP4 download link
+- **Delete Button**: Remove MP4 from cache (known permission issue)
+- **Priority Button**: Move job to front of queue
+- **Retry Button**: Requeue failed conversions
+- **4 Status Sections**: not-converted, converting, failed, completed
+
+#### 5. API Endpoints
+- `POST /sessions/<id>/convert` - Queue conversion (returns position)
+- `GET /sessions/<id>/convert-status` - Get status/progress/eta
+- `POST /sessions/<id>/convert/priority` - Move to front of queue
+- `GET /sessions/<id>/mp4/stream` - Stream MP4 with range support
+- `DELETE /sessions/<id>/mp4` - Delete MP4 cache file
+
+#### 6. Database Schema
+```sql
+CREATE TABLE mp4_conversion_queue (
+    id INTEGER PRIMARY KEY,
+    session_id VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',  -- pending/converting/completed/failed
+    progress INTEGER DEFAULT 0,
+    total INTEGER DEFAULT 0,
+    eta_seconds INTEGER,
+    priority INTEGER DEFAULT 0,
+    mp4_path TEXT,
+    error_msg TEXT,
+    created_at TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP
+);
+CREATE INDEX idx_status ON mp4_conversion_queue(status);
+CREATE INDEX idx_priority ON mp4_conversion_queue(priority);
+CREATE INDEX idx_created_at ON mp4_conversion_queue(created_at);
+```
+
+### 📁 New Files Created
+- `/opt/jumphost/src/core/mp4_converter.py` - Worker process with queue management
+- `/opt/jumphost/venv-pyrdp-converter/` - Separate Python environment with PySide6
+- `/etc/systemd/system/jumphost-mp4-converter@.service` - Systemd template
+- `/var/log/jumphost/rdp_recordings/mp4_cache/` - MP4 output directory
+- Database migration: Added `mp4_conversion_queue` table
+
+### 🔧 Modified Files
+- `src/core/database.py` - Added `MP4ConversionQueue` model
+- `src/web/blueprints/sessions.py` - Added 5 MP4 endpoints
+- `src/web/templates/sessions/view.html` - Added conversion UI
+- `src/web/static/js/custom.js` - Disabled global alert auto-hide
+- `venv-pyrdp-converter/lib/python3.13/site-packages/pyrdp/enum/rdp.py` - RDP version fix
+- `venv-pyrdp-converter/lib/python3.13/site-packages/pyrdp/convert/utils.py` - FPS=10
+
+### 📊 Testing Results
+- **Small file** (1.8MB .pyrdp): ~15s conversion → 180KB MP4 ✅
+- **Medium file** (3.5MB .pyrdp): ~40s conversion → 725KB MP4 ✅
+- **Progress tracking**: Real-time updates with accurate ETA ✅
+- **Video streaming**: HTML5 player with seek support ✅
+- **Queue system**: FIFO + priority working correctly ✅
+- **Priority rush**: Moves job to front immediately ✅
+- **Concurrent workers**: Both workers process jobs simultaneously ✅
+- **Video playback**: `video.load()` fix enables immediate playback ✅
+
+### 🐛 Critical Bugs Fixed
+1. **Global Alert Auto-hide**: `custom.js` was hiding all `.alert` elements after 5s
+   - Impact: Content disappeared on sessions, users, groups pages
+   - Fix: Commented out entire auto-hide block
+   - Result: All alerts stay visible unless manually closed
+
+2. **Video Not Playing**: Video player loaded but didn't start playback
+   - Root cause: Browser didn't load source when section became visible
+   - Fix: Added `video.load()` call when status='completed'
+   - Result: Video plays immediately after conversion
+
+3. **Wrong Video URL**: Relative path `/sessions/<id>/mp4/stream` failed
+   - Fix: Changed to `url_for('sessions.stream_mp4', session_id=...)`
+   - Result: Proper absolute URL generation
+
+### ⚠️ Known Issues
+- **Delete MP4 Permission**: Flask runs as p.mojski, workers as root
+  - Files owned by root, Flask can't delete
+  - Workaround: Admin manual cleanup or chown mp4_cache/ to p.mojski
+- **datetime.utcnow() Warnings**: 3 deprecation warnings in Python 3.13
+  - Non-critical, functionality works correctly
+  - TODO: Replace with `datetime.now(datetime.UTC)`
+
+### 💡 Design Decisions
+- **FPS=10**: Balance between quality and speed (3x faster than realtime)
+- **2 Workers**: Optimal for VM resources, prevents overload
+- **10 Pending Max**: Reasonable queue size, prevents spam
+- **2s Polling**: Fast enough for live feel, not too aggressive
+- **Separate venv**: Isolates PySide6 dependencies from main app
+- **File Glob**: pyrdp-convert adds prefix to filename, use pattern matching
+
+---
+
+---
+
+## 📋 NEXT: v1.4 - Enhancements & Optimizations (Backlog)
+
+### 🎯 Potential Features
+
+#### 1. MP4 System Improvements
+- [ ] Fix delete MP4 permission issue (chown mp4_cache to p.mojski)
+- [ ] Replace datetime.utcnow() with datetime.now(datetime.UTC) (Python 3.13)
+- [ ] Configurable FPS per conversion (ENV variable or UI setting)
+- [ ] Auto-cleanup old MP4 files (retention policy)
+- [ ] WebSocket/SSE for real-time progress (reduce polling)
+- [ ] Conversion metrics dashboard (avg time, success rate)
+
+#### 2. Session Monitoring
+- [ ] SSH session video recording (ttyrec/asciinema format)
+- [ ] Session playback speed controls (0.5x, 1x, 2x)
+- [ ] Search within session transcripts
+- [ ] Export session reports (PDF/JSON)
+
+#### 3. Access Control
+- [ ] FreeIPA integration (user sync + authentication)
+- [ ] Multi-factor authentication (TOTP)
+- [ ] Emergency access requests (approval workflow)
+- [ ] Role-based access control (RBAC)
+- [ ] IP whitelist/blacklist per user
+
+#### 4. Performance & Scaling
+- [ ] Redis cache for session state
+- [ ] Connection pooling for database
+- [ ] Load balancing across multiple jump hosts
+- [ ] Separate SSH proxy instances per backend
+
+#### 5. Monitoring & Alerting
+- [ ] Prometheus metrics export
+- [ ] Grafana dashboards
+- [ ] Email/Slack alerts for denied access
+- [ ] Long session warnings
+- [ ] Resource usage monitoring
+
+---
+
+## 🗑️ DEPRECATED: v1.2 - RDP Session Viewer (Completed as v1.3)
+
+This section moved to v1.3 - RDP MP4 Conversion System.
+
+**Original Goal**: Web-based RDP session replay  
+**Status**: ✅ COMPLETED in v1.3 with full MP4 conversion pipeline
+
+### Historical Notes (v1.2-dev)
+- RDP Recording Metadata Extraction ✅
+- Web Interface - Basic Info Display ✅
+- JSON conversion with caching ✅
+- MP4 conversion blocked by CPU (resolved in v1.3) ✅
+
+---
+
+## 🔄 OLD CONTEXT: v1.2 - RDP Session Viewer (January 2026) - COMPLETED, MOVED TO v1.3
+
+### 🎯 Goal: Web-based RDP Session Replay
+
+**Challenge**: RDP recordings (.pyrdp files) require desktop Qt player for full video replay. Need web-based solution for security audit.
+
+**Current Status**: Backend infrastructure complete, waiting for VM CPU upgrade for MP4 conversion.
+
+### ✅ Completed Work
+
+#### 1. RDP Recording Metadata Extraction
+- **JSON Conversion**: `pyrdp-convert -f json` integration
+- **Caching System**: `/var/log/jumphost/rdp_recordings/json_cache/`
+- **Metadata Parsing**: Host, resolution, username, domain, duration
+- **Event Counting**: Keyboard keystrokes, mouse events
+- **Function**: `get_rdp_recording_info()` in sessions.py
+
+#### 2. Web Interface - Basic Info Display
+- **Session Summary Card**: Host, resolution, duration, event statistics
+- **Download Support**: .pyrdp file download button
+- **Playback Instructions**: How to use pyrdp-player locally
+- **Fallback UI**: If JSON conversion fails, show basic file info
+- **Template**: Updated `templates/sessions/view.html`
+
+#### 3. API Endpoints
+- **Route**: `/sessions/<id>/rdp-events` - Returns converted JSON
+- **Validation**: Checks protocol is RDP, session exists, recording available
+- **Error Handling**: 404/500 with error messages
+
+### ⏸️ Blocked: MP4 Video Conversion
+
+**Issue**: PyRDP MP4 export requires:
+- PySide6 (Qt for Python)
+- CPU instructions: ssse3, sse4.1, sse4.2, popcnt
+- Current VM CPU: "Common KVM processor" (basic, missing required flags)
+
+**Solution Path**:
+1. ✅ Created separate venv: `/opt/jumphost/venv-pyrdp-converter/`
+2. ✅ Installed: PySide6 + av + pyrdp-mitm
+3. ❌ **BLOCKED**: CPU doesn't support SSSE3/SSE4 (Qt requirement)
+4. 🔜 **NEXT**: Proxmox VM CPU upgrade to `host` type
+
+**Proxmox Configuration Needed**:
+```bash
+# VM Configuration (GUI or /etc/pve/qemu-server/XXX.conf):
+cpu: host
+# OR specific flags:
+cpu: kvm64,flags=+ssse3;+sse4.1;+sse4.2;+popcnt
+```
+
+### 📋 After CPU Upgrade - TODO
+
+1. **Test MP4 Conversion**:
+   ```bash
+   source /opt/jumphost/venv-pyrdp-converter/bin/activate
+   pyrdp-convert -f mp4 -o /tmp/test.mp4 /var/log/jumphost/rdp_recordings/replays/recording.pyrdp
+   ```
+
+2. **Implement MP4 Generation**:
+   - Background job queue (Celery or simple subprocess)
+   - Convert .pyrdp → .mp4 on-demand or scheduled
+   - Cache MP4 files in `/var/log/jumphost/rdp_recordings/mp4_cache/`
+   - Progress tracking for long conversions
+
+3. **Web Video Player**:
+   - HTML5 `<video>` element in session detail page
+   - Timeline scrubbing, play/pause controls
+   - Keyboard shortcuts (space, arrows)
+   - Optional: Download MP4 button
+
+4. **Performance Optimization**:
+   - Async conversion (don't block Flask)
+   - Queue system for multiple conversions
+   - Thumbnail generation for quick preview
+   - Bandwidth throttling for large videos
+
+### 🗂️ Files Modified (v1.2-dev)
+
+**Backend**:
+- `src/web/blueprints/sessions.py`:
+  - Added `get_rdp_recording_info()` - JSON conversion with caching
+  - Added `format_duration()` - Human-readable time formatting
+  - Added `/sessions/<id>/rdp-events` endpoint
+  - Glob pattern matching for pyrdp-convert output filenames
+
+**Frontend**:
+- `templates/sessions/view.html`:
+  - RDP session summary card (metadata + statistics)
+  - Download + playback instructions
+  - Placeholder for future video player
+  - Graceful fallback if conversion fails
+
+**System**:
+- Created `/var/log/jumphost/rdp_recordings/json_cache/` (owned by p.mojski)
+- Created `/opt/jumphost/venv-pyrdp-converter/` venv (PySide6 ready)
+
+### 📊 Test Results
+
+**JSON Conversion**:
+- ✅ Manual test: 254 events converted in <1s
+- ✅ Metadata extraction: host, resolution, username, timestamps
+- ✅ Event counting: keyboard (78), mouse (175) for test session
+- ✅ Cache system: Checks mtime, avoids re-conversion
+
+**Web Interface**:
+- ✅ Session detail shows RDP metadata
+- ✅ Download button works
+- ✅ Instructions displayed correctly
+- ❌ MP4 video player: Blocked by CPU (PySide6 segfault)
+
+### 🐛 Issues Fixed
+
+- Fixed pyrdp-convert output filename pattern (appends source name)
+- Fixed JSON cache directory permissions (p.mojski ownership)
+- Fixed glob pattern matching for cached JSON files
+- Removed non-functional event timeline (replaced with summary)
+
+### 🎯 Success Criteria (After CPU Upgrade)
+
+- [ ] MP4 conversion works without errors
+- [ ] Web interface displays embedded video player
+- [ ] Video playback smooth (no buffering on 1920x1200)
+- [ ] Conversion time acceptable (<30s for 5-minute session)
+- [ ] Audit team can review RDP sessions without downloading files
 
 ---
 

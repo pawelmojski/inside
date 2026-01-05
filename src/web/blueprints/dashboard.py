@@ -15,6 +15,11 @@ import subprocess
 
 from src.core.database import SessionLocal, User, Server, AccessPolicy, AuditLog, UserSourceIP, ServerGroup, IPAllocation, Session
 
+# Import helper function from sessions blueprint
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 dashboard_bp = Blueprint('dashboard', __name__)
 
 @dashboard_bp.route('/')
@@ -34,6 +39,9 @@ def index():
     
     # Active sessions (placeholder - would need real-time tracking)
     active_sessions = get_active_sessions()
+    
+    # Recent closed sessions
+    recent_sessions = get_recent_sessions(limit=10)
     
     # Servers with IP allocations
     servers = db.query(Server).order_by(Server.name).all()
@@ -57,6 +65,7 @@ def index():
                          stats=stats,
                          recent_logs=recent_logs,
                          active_sessions=active_sessions,
+                         recent_sessions=recent_sessions,
                          server_allocations=server_allocations)
 
 @dashboard_bp.route('/api/stats')
@@ -66,6 +75,38 @@ def api_stats():
     db = g.db
     stats = get_statistics(db)
     return jsonify(stats)
+
+@dashboard_bp.route('/api/active-sessions')
+@login_required
+def api_active_sessions():
+    """API endpoint for active sessions list"""
+    db = g.db
+    active = db.query(Session).filter(
+        Session.is_active == True
+    ).order_by(Session.started_at.desc()).limit(10).all()
+    
+    sessions = []
+    for sess in active:
+        # Build server display
+        if sess.protocol == 'ssh' and sess.ssh_username:
+            server_display = f"{sess.ssh_username}@{sess.server.name if sess.server else sess.backend_ip}"
+            if sess.subsystem_name:
+                server_display += f" ({sess.subsystem_name})"
+        else:
+            server_display = sess.server.name if sess.server else sess.backend_ip
+        
+        sessions.append({
+            'id': sess.id,
+            'protocol': sess.protocol.upper(),
+            'user': sess.user.username if sess.user else 'Unknown',
+            'server': server_display,
+            'backend_ip': sess.backend_ip,
+            'source_ip': sess.source_ip,
+            'ssh_agent': sess.ssh_agent_used if sess.protocol == 'ssh' else None,
+            'started': sess.started_at.isoformat() if sess.started_at else None
+        })
+    
+    return jsonify({'sessions': sessions})
 
 def get_services_status():
     """Get status of SSH and RDP proxy services"""
@@ -208,6 +249,54 @@ def get_active_sessions():
             'backend_ip': sess.backend_ip,
             'ssh_agent': sess.ssh_agent_used if sess.protocol == 'ssh' else None,
             'started': sess.started_at
+        })
+    
+    return sessions
+
+
+def get_recent_sessions(limit=10):
+    """Get recently closed sessions from database"""
+    # Import here to avoid circular dependency
+    from blueprints.sessions import recording_exists
+    
+    db = g.db
+    recent = db.query(Session).filter(
+        Session.is_active == False
+    ).order_by(Session.ended_at.desc()).limit(limit).all()
+    
+    sessions = []
+    for sess in recent:
+        # Build server display
+        if sess.protocol == 'ssh' and sess.ssh_username:
+            server_display = f"{sess.ssh_username}@{sess.server.name if sess.server else sess.backend_ip}"
+            if sess.subsystem_name:
+                server_display += f" ({sess.subsystem_name})"
+        else:
+            server_display = sess.server.name if sess.server else sess.backend_ip
+        
+        # Format duration
+        if sess.duration_seconds:
+            hours = int(sess.duration_seconds // 3600)
+            minutes = int((sess.duration_seconds % 3600) // 60)
+            seconds = int(sess.duration_seconds % 60)
+            if hours > 0:
+                duration = f"{hours}h {minutes}m"
+            elif minutes > 0:
+                duration = f"{minutes}m {seconds}s"
+            else:
+                duration = f"{seconds}s"
+        else:
+            duration = "N/A"
+        
+        sessions.append({
+            'session_id': sess.session_id,
+            'protocol': sess.protocol.upper(),
+            'user': sess.user.username if sess.user else 'Unknown',
+            'server': server_display,
+            'started': sess.started_at,
+            'duration': duration,
+            'ended': sess.ended_at,
+            'has_recording': recording_exists(sess)
         })
     
     return sessions

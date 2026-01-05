@@ -4,7 +4,7 @@
 
 Self-made SSH/RDP jump host with temporal access control, source IP mapping, session recording, real-time monitoring, and system logging integration.
 
-## Architecture (Current State - v1.1)
+## Architecture (Current State - v1.3)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -12,11 +12,13 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │                      (10.0.160.5)                                │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Web Management Interface (5000)                ⭐ NEW   │   │
+│  │  Web Management Interface (5000) - Systemd Service 🎯   │   │
 │  │                                                            │   │
 │  │  Flask Web GUI (Bootstrap 5)                              │   │
-│  │  - Dashboard: Service status, statistics, charts          │   │
-│  │  - Active Sessions: Real-time monitoring widget 🎯 NEW   │   │
+│  │  - Dashboard: Auto-refresh stats, active sessions 🎯     │   │
+│  │  - Session History: List, filter, live view 🎯          │   │
+│  │  - Live Session Viewer: Real-time SSH log streaming 🎯  │   │
+│  │  - RDP Session Viewer: MP4 conversion & video player 🎯 │   │
 │  │  - User Management: CRUD + multiple source IPs            │   │
 │  │  - Server Management: CRUD + IP allocation                │   │
 │  │  - Group Management: Create groups, assign servers        │   │
@@ -24,36 +26,38 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │  │  - Monitoring: Audit logs with filters, charts            │   │
 │  │  - Authentication: Placeholder (ready for Azure AD)       │   │
 │  │  - URL: http://10.0.160.5:5000 (admin/admin)             │   │
+│  │  - Service: jumphost-flask.service                        │   │
+│  │  - Logs: /var/log/jumphost/flask.log                      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  SSH Access (10.0.160.129:22)                            │   │
+│  │  SSH Access (10.0.160.129:22) - Systemd Service 🎯      │   │
 │  │                                                            │   │
 │  │  SSH Proxy (Paramiko)                                     │   │
 │  │  - Source IP: 100.64.0.20 → User: p.mojski               │   │
 │  │  - Agent forwarding support (-A flag)                     │   │
-│  │  - Session recording (JSON)                               │   │
-│  │  - Real-time session tracking 🎯 NEW                     │   │
-│  │  - UTMP/WTMP logging (ssh0-ssh99) 🎯 NEW                │   │
+│  │  - Live session recording (JSONL) 🎯 NEW                │   │
+│  │  - Real-time session tracking 🎯                         │   │
+│  │  - UTMP/WTMP logging (ssh0-ssh99)                        │   │
 │  │  - Backend: 10.0.160.4 (Linux SSH)                        │   │
 │  │  - Access Control V2: Policy-based authorization          │   │
+│  │  - Service: jumphost-ssh-proxy.service                    │   │
+│  │  - Logs: /var/log/jumphost/ssh_proxy.log                  │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  RDP Access (10.0.160.129:3389)                           │   │
+│  │  RDP Access (0.0.0.0:3389) - Systemd Service 🎯         │   │
 │  │                                                            │   │
-│  │  RDP Guard Proxy (Python asyncio)                         │   │
-│  │  - Source IP: 100.64.0.39 → User: p.mojski.win           │   │
-│  │  - Access control + audit logging                         │   │
-│  │  - Forwards to: PyRDP MITM (localhost:13389)             │   │
-│  │                                                            │   │
-│  │  PyRDP MITM (localhost:13389)                             │   │
+│  │  PyRDP MITM (Direct)                                      │   │
+│  │  - Listen: 0.0.0.0:3389                                   │   │
+│  │  - Target: 127.0.0.1:3389 (dynamic routing)              │   │
 │  │  - Full session recording (.pyrdp files)                  │   │
-│  │  - Real-time session tracking 🎯 NEW                     │   │
-│  │  - UTMP/WTMP logging (rdp0-rdp99) 🎯 NEW                │   │
-│  │  - Connection multiplexing detection 🎯 NEW              │   │
-│  │  - Backend: 10.30.0.140 (Windows RDP)                     │   │
+│  │  - Real-time session tracking 🎯                         │   │
+│  │  - UTMP/WTMP logging (rdp0-rdp99)                        │   │
+│  │  - Connection multiplexing detection                      │   │
 │  │  - Access Control V2: Policy-based authorization          │   │
+│  │  - Service: jumphost-rdp-proxy.service                    │   │
+│  │  - Logs: /var/log/jumphost/rdp_mitm.log                   │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -70,7 +74,7 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │  │    - ip_allocations (proxy IP assignments)               │   │
 │  │    - session_recordings (file paths)                     │   │
 │  │    - audit_logs (all actions logged)                     │   │
-│  │    - sessions (real-time tracking) 🎯 NEW               │   │
+│  │    - sessions (real-time tracking) 🎯                   │   │
 │  │                                                            │   │
 │  │  • Access Control Engine V2 ⭐                           │   │
 │  │    - Policy-based authorization (group/server/service)   │   │
@@ -80,13 +84,28 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │  │    - Temporal validation (start/end time)                 │   │
 │  │    - Legacy fallback for V1 compatibility                 │   │
 │  │                                                            │   │
-│  │  • Session Monitoring System 🎯 NEW                     │   │
+│  │  • Session Monitoring System 🎯                         │   │
 │  │    - Database tracking (18-field sessions table)         │   │
 │  │    - UTMP/WTMP integration (system logging)              │   │
 │  │    - Custom `jw` command (view active sessions)          │   │
 │  │    - Duration/recording size auto-calculation            │   │
 │  │    - SSH subsystem & agent detection                      │   │
 │  │    - RDP multiplexing support (10s window)               │   │
+│  │    - Live session recording (JSONL format) 🎯          │   │
+│  │    - Web GUI live view with 2s polling 🎯              │   │
+│  │                                                            │   │
+│  │  • MP4 Conversion System 🎯 NEW v1.3                   │   │
+│  │    - Background worker queue (2 workers, systemd)        │   │
+│  │    - PyRDP converter with PySide6 (separate venv)        │   │
+│  │    - On-demand .pyrdp → .mp4 conversion (10 FPS)        │   │
+│  │    - Queue management: 2 concurrent, 10 pending max      │   │
+│  │    - Priority "rush" button for urgent conversions       │   │
+│  │    - Progress tracking with ETA calculation              │   │
+│  │    - HTML5 video player with seeking                     │   │
+│  │    - MP4 cache: /var/log/jumphost/rdp_recordings/        │   │
+│  │      mp4_cache/                                           │   │
+│  │    - Workers: jumphost-mp4-converter@1/2.service         │   │
+│  │    - Resource limits: 150% CPU, 2GB RAM per worker       │   │
 │  │                                                            │   │
 │  │  • IP Pool Manager                                        │   │
 │  │    - Pool: 10.0.160.128/25 (126 usable IPs)             │   │
@@ -97,7 +116,7 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │  │    - V2 Commands: add-user-v2, add-server-group,         │   │
 │  │      grant-access-v2, list-users-v2, etc.                │   │
 │  │    - Legacy V1 commands still supported                   │   │
-│  │    - `jw` command: View active proxy sessions 🎯 NEW    │   │
+│  │    - `jw` command: View active proxy sessions 🎯       │   │
 │  │                                                            │   │
 │  │  • Web Management Interface (Flask) ⭐ NEW               │   │
 │  │    - Complete CRUD for users, servers, groups, policies  │   │
@@ -203,28 +222,50 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 ├── src/
 │   ├── core/
 │   │   ├── database.py            # SQLAlchemy models
-│   │   ├── access_control.py      # Access control engine
+│   │   ├── access_control.py      # Access control engine V2
 │   │   └── ip_pool.py             # IP pool manager
 │   ├── proxy/
-│   │   ├── ssh_proxy.py           # SSH proxy server (WORKING ✓)
-│   │   ├── rdp_guard.py           # RDP guard proxy (WORKING ✓)
-│   │   ├── rdp_wrapper.sh         # PyRDP MITM wrapper
-│   │   └── rdp_proxy.py           # Old Python wrapper (deprecated)
-│   └── cli/
-│       └── jumphost_cli.py        # CLI management tool
+│   │   ├── ssh_proxy.py           # SSH proxy server (Systemd) ✓
+│   │   └── [RDP] Direct PyRDP MITM (Systemd) ✓
+│   ├── cli/
+│   │   └── jumphost_cli.py        # CLI management tool
+│   └── web/
+│       ├── app.py                 # Flask application (Systemd) ✓
+│       ├── blueprints/
+│       │   ├── dashboard.py       # Dashboard + API endpoints
+│       │   ├── sessions.py        # Session history & live view 🎯
+│       │   ├── users.py           # User management
+│       │   ├── servers.py         # Server management
+│       │   ├── groups.py          # Group management
+│       │   ├── policies.py        # Policy wizard
+│       │   └── monitoring.py      # Audit logs
+│       └── templates/             # Jinja2 templates
 ├── certs/                         # SSL certificates for RDP
-└── logs/
+└── scripts/                       # Utility scripts
 
 /var/log/jumphost/
-├── ssh_proxy.log                  # SSH proxy logs
-├── rdp_guard.log                  # RDP guard proxy logs
-├── rdp_wrapper.log                # PyRDP backend logs
-├── ssh_recordings/                # SSH session recordings (JSON)
-│   └── ssh_session_*.json
+├── flask.log                      # Flask web app logs 🎯
+├── ssh_proxy.log                  # SSH proxy logs 🎯
+├── rdp_mitm.log                   # PyRDP MITM logs 🎯
+├── mp4-converter-worker1.log      # MP4 worker 1 logs 🎯
+├── mp4-converter-worker2.log      # MP4 worker 2 logs 🎯
+├── ssh_recordings/                # SSH session recordings (JSONL) 🎯
+│   └── ssh_session_*.log          # Live recording format
 └── rdp_recordings/                # RDP session recordings
     ├── replays/                   # .pyrdp replay files
     ├── files/                     # Transferred files
-    └── certs/                     # Auto-generated certificates
+    ├── certs/                     # Auto-generated certificates
+    ├── json_cache/                # JSON metadata cache (RDP events)
+    └── mp4_cache/                 # MP4 video cache 🎯 NEW
+
+/etc/systemd/system/
+├── jumphost-flask.service         # Flask web service 🎯
+├── jumphost-ssh-proxy.service     # SSH proxy service 🎯
+├── jumphost-rdp-proxy.service     # RDP proxy service 🎯
+└── jumphost-mp4-converter@.service # MP4 worker template (@1, @2) 🎯 NEW
+
+/etc/logrotate.d/
+└── jumphost                       # Log rotation config 🎯
 ```
 
 ## Database Schema
@@ -282,12 +323,16 @@ Real-time session tracking for active and historical connections:
 - SSH agent detection and subsystem tracking (sftp, scp)
 - RDP session recording with PyRDP integration
 - Visible in Web GUI Dashboard "Active Sessions"
+- **Live SSH Session Viewer**: Real-time log streaming with 2s polling 🎯
+- **Session History**: Filter by protocol, user, server, status 🎯
 
 **SSH Proxy Integration:**
 - Creates session record after backend authentication
 - Updates session on disconnect (via channel close handler)
 - Tracks SSH username, subsystem (sftp/scp), SSH agent usage
 - Records session duration and file size on close
+- **JSONL Recording**: Streams events immediately to disk (not buffered) 🎯
+- **Live View Support**: Web GUI polls for new events every 2 seconds 🎯
 
 **RDP Proxy Integration (PyRDP MITM):**
 - Creates session record after access control check
@@ -299,6 +344,37 @@ Real-time session tracking for active and historical connections:
 - Updates on normal close: `ended_at`, `duration_seconds`, `recording_size`
 - Updates on error: `termination_reason='error'`
 - Logs all session events to `/var/log/jumphost/ssh_proxy.log`
+- **RDP Viewer** (v1.2-dev): Metadata extraction, JSON conversion, MP4 planned 🔄
+
+## Session Viewer Features (v1.1+)
+
+### SSH Live View
+- **Real-time Streaming**: JSONL format, 2-second polling
+- **Terminal UI**: Dark theme, monospace font, color-coded events
+- **Event Types**: Connection, authentication, server output, client input, disconnect
+- **Filters**: Search text, toggle client/server messages
+- **Auto-scroll**: Keeps latest events visible
+- **Download**: Export session .log file
+
+### RDP Session Review (v1.2-dev)
+- **Metadata Display**: Host, resolution, username, domain, duration
+- **Event Statistics**: Keyboard keystrokes, mouse events count
+- **JSON Conversion**: `pyrdp-convert -f json` with caching
+- **Download Support**: Original .pyrdp file for pyrdp-player
+- **Playback Instructions**: How to view locally with PyRDP Player
+- **Future (MP4)**: Embedded video player after CPU upgrade 🔜
+
+**Cache System**:
+- JSON cache: `/var/log/jumphost/rdp_recordings/json_cache/`
+- On-demand conversion with mtime checking
+- Avoids repeated subprocess calls
+- Owned by Flask user (p.mojski)
+
+**Limitations**:
+- MP4 conversion requires CPU with SSSE3/SSE4 support
+- Current VM: "Common KVM processor" (basic instruction set)
+- Solution: Proxmox CPU upgrade to `host` type
+- JSON events show input only (no screen updates)
 
 ## Current Network Configuration
 
@@ -363,15 +439,16 @@ Real-time session tracking for active and historical connections:
 - [x] Shell sessions
 - [x] Exec requests (SCP, tracked in session metadata) ⭐
 - [x] Subsystem requests (SFTP, tracked in session metadata) ⭐
-- [x] Session recording (JSON)
+- [x] Live session recording (JSONL format) 🎯 NEW
 - [x] Source IP-based access control
 - [x] Temporal access validation
 - [x] Real-time session monitoring 🎯
 - [x] UTMP/WTMP logging (ssh0-ssh99) 🎯
+- [x] Systemd service with auto-restart 🎯 NEW
 
 ### RDP Proxy ✓
 - [x] PyRDP MITM with session recording and real-time tracking ⭐
-- [x] Guard proxy with access control
+- [x] Direct MITM on 0.0.0.0:3389 (no guard proxy) 🎯 NEW
 - [x] Source IP-based access control
 - [x] Backend server verification
 - [x] Audit logging (access granted/denied)
@@ -381,10 +458,16 @@ Real-time session tracking for active and historical connections:
 - [x] Real-time session monitoring in Web GUI ⭐
 - [x] Connection multiplexing detection (10s window) 🎯
 - [x] UTMP/WTMP logging (rdp0-rdp99) 🎯
+- [x] Systemd service with auto-restart 🎯 NEW
 
 ### Session Monitoring & Logging 🎯 (NEW in v1.1)
 - [x] Real-time session tracking in database (sessions table with 18 fields)
-- [x] Web GUI "Active Sessions" dashboard widget (7-column table)
+- [x] Web GUI "Active Sessions" dashboard widget (auto-refresh every 5s) 🎯 NEW
+- [x] Session history with filtering (protocol, status, user, server) 🎯 NEW
+- [x] Live session viewer with terminal UI (SSH) 🎯 NEW
+- [x] 2-second polling for active session logs 🎯 NEW
+- [x] JSONL format for streaming session recording 🎯 NEW
+- [x] LRU cache for session parser (performance optimization) 🎯 NEW
 - [x] UTMP/WTMP integration (system login records)
 - [x] Custom `jw` command for viewing active proxy sessions
 - [x] Session duration auto-calculation
@@ -394,6 +477,50 @@ Real-time session tracking for active and historical connections:
 - [x] RDP connection multiplexing support
 - [x] Multiple concurrent sessions (tested with 4+ simultaneous connections)
 - [x] Reliable session closing via TCP observer pattern
+- [x] Download recordings (SSH .log, RDP .pyrdp) 🎯 NEW
+
+### RDP Session MP4 Conversion 🎯 (NEW in v1.3)
+- [x] Background worker queue system (2 systemd workers) 🎯 NEW
+- [x] On-demand .pyrdp → .mp4 conversion (10 FPS) 🎯 NEW
+- [x] Queue management (max 2 concurrent, 10 pending) 🎯 NEW
+- [x] Priority "rush" button for urgent conversions 🎯 NEW
+- [x] Real-time progress tracking with ETA 🎯 NEW
+- [x] HTML5 video player with seeking support 🎯 NEW
+- [x] MP4 download button 🎯 NEW
+- [x] Frontend polling (2s interval) for conversion status 🎯 NEW
+- [x] MP4 cache management (/var/log/jumphost/rdp_recordings/mp4_cache/) 🎯 NEW
+- [x] Separate PyRDP environment with PySide6 🎯 NEW
+- [x] Worker resource limits (150% CPU, 2GB RAM) 🎯 NEW
+- [x] RDP version compatibility (RDP10_12 = 0x80011) 🎯 NEW
+- [x] Python 3.13 compatibility fixes 🎯 NEW
+- [x] Database queue table (mp4_conversion_queue) 🎯 NEW
+- [x] API endpoints: convert, status, stream, priority, delete 🎯 NEW
+
+### Web Management Interface 🎯 (NEW in v1.1)
+- [x] Dashboard with service status and statistics
+- [x] Auto-refresh dashboard (5s interval) 🎯 NEW
+- [x] Active sessions monitoring with live updates 🎯 NEW
+- [x] Session history viewer with filters 🎯 NEW
+- [x] Live SSH session viewer (2s polling) 🎯 NEW
+- [x] Terminal-style log viewer (search, filter) 🎯 NEW
+- [x] User management (CRUD)
+- [x] Server management (CRUD)
+- [x] Group management (CRUD)
+- [x] Policy wizard (grant access)
+- [x] Audit log viewer with filters
+- [x] Authentication placeholder
+- [x] Bootstrap 5 responsive design
+- [x] Systemd service integration 🎯 NEW
+
+### Deployment & Operations 🎯 (NEW in v1.1)
+- [x] Systemd service files for all components 🎯 NEW
+  - jumphost-flask.service (Flask web app)
+  - jumphost-ssh-proxy.service (SSH proxy)
+  - jumphost-rdp-proxy.service (RDP proxy via PyRDP MITM)
+- [x] Centralized logging in /var/log/jumphost/ 🎯 NEW
+- [x] Logrotate configuration (14/30 days retention) 🎯 NEW
+- [x] Auto-restart on failure 🎯 NEW
+- [x] Proper user permissions (root for ports 22/3389, p.mojski for Flask) 🎯 NEW
 
 ## Known Issues & Limitations
 
@@ -410,7 +537,7 @@ Real-time session tracking for active and historical connections:
 ### Minor Issues
 1. Source IP must be manually set in database (CLI doesn't support it)
 2. No monitoring/alerting
-3. No systemd service files
+3. ~~No systemd service files~~ ✓ FIXED in v1.1
 4. SSH proxy runs on port 22, conflicts with management SSH
 5. UTMP entries not shown in 'w' command (no real PTY) - use `jw` instead
 
@@ -421,11 +548,13 @@ Real-time session tracking for active and historical connections:
 - RDP: PyRDP MITM tested with ~20 concurrent sessions
 - Database: PostgreSQL with indexes on is_active, started_at
 - Session tracking: Tested with 4+ simultaneous connections
+- Web GUI: LRU cache (maxsize=100) for session parsing
 
 ### Future Optimizations
 - Connection pooling for database
 - Separate SSH proxy instances per backend
 - Load balancing for multiple jump hosts
+- Redis for session state caching
 
 ## Security Considerations
 
@@ -489,7 +618,9 @@ db =Web GUI Tests
 - [x] Login with admin/admin
 - [x] Dashboard loads with service status
 - [x] Dashboard shows statistics cards
-- [x] Dashboard auto-refreshes every 30 seconds
+- [x] Dashboard auto-refreshes every 5 seconds 🎯 NEW
+- [x] Active sessions update automatically 🎯 NEW
+- [x] Statistics update in real-time 🎯 NEW
 - [x] User list page loads
 - [x] Add new user with multiple source IPs
 - [x] View user details with policies
@@ -515,15 +646,92 @@ db =Web GUI Tests
 - [x] Monitoring page loads with charts
 - [x] Audit log viewer with pagination
 - [x] Audit log filters work
+- [x] Session history page loads 🎯 NEW
+- [x] Session list filtering works (protocol, status, user, server) 🎯 NEW
+- [x] Session detail page shows metadata 🎯 NEW
+- [x] Live session viewer works (2s polling) 🎯 NEW
+- [x] Recording download works (SSH .log, RDP .pyrdp) 🎯 NEW
+- [x] Search in session logs works 🎯 NEW
+- [x] Client/Server log filters work 🎯 NEW
 - [x] Logout works
 - [x] Session persistence across requests
 
-###  SessionLocal()
+### Systemd Service Management 🎯 (NEW in v1.1)
+
+```bash
+# Check service status
+sudo systemctl status jumphost-flask
+sudo systemctl status jumphost-ssh-proxy
+sudo systemctl status jumphost-rdp-proxy
+
+# Start/stop/restart services
+sudo systemctl start jumphost-flask
+sudo systemctl restart jumphost-ssh-proxy
+sudo systemctl stop jumphost-rdp-proxy
+
+# Enable/disable auto-start on boot
+sudo systemctl enable jumphost-flask
+sudo systemctl disable jumphost-rdp-proxy
+
+# View logs
+sudo journalctl -u jumphost-flask -f
+sudo journalctl -u jumphost-ssh-proxy --since "1 hour ago"
+tail -f /var/log/jumphost/flask.log
+tail -f /var/log/jumphost/ssh_proxy.log
+tail -f /var/log/jumphost/rdp_mitm.log
+
+# Check all jumphost services
+sudo systemctl list-units 'jumphost-*'
+```
+
+### Session History & Live View 🎯 (NEW in v1.1)
+
+```bash
+# Via CLI - Active sessions
+python3 src/cli/jumphost_cli.py sessions --active
+
+# Via system - UTMP/WTMP
+jw                    # Custom command showing active sessions
+w                     # System command (won't show jumphost sessions)
+last -f /var/log/wtmp # Historical sessions
+
+# Via Web GUI
+# Navigate to: http://10.0.160.5:5000/sessions/
+# - View all sessions (active and closed)
+# - Filter by protocol, status, user, server
+# - Click "View" to see session details
+# - Click "Live View" for active SSH sessions (2s polling)
+# - Download recordings (SSH .log, RDP .pyrdp)
+# - Search within session logs
+# - Toggle Client/Server events
+
+# Via Database
+python3 << EOF
+import sys; sys.path.insert(0, '/opt/jumphost')
+from src.core.database import SessionLocal, Session
+
+db = SessionLocal()
+active = db.query(Session).filter_by(is_active=True).all()
+for s in active:
+    print(f'{s.protocol} | {s.user} → {s.server} | {s.source_ip} | Started: {s.started_at}')
+db.close()
+EOF
+```
+
+### Monitoring & Audit Logs
+
+```bash
+# Via CLI
+python3 << EOF
+import sys; sys.path.insert(0, '/opt/jumphost')
+from src.core.database import SessionLocal, AuditLog
+
+db = SessionLocal()
 logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(10).all()
 for log in logs:
     print(f'{log.timestamp} - {log.action} - {log.source_ip} - {log.success} - {log.details}')
 db.close()
-"
+EOF
 
 # Via Web GUI
 # Navigate to: http://10.0.160.5:5000/monitoring/audit

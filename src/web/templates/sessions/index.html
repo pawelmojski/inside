@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+
+{% block title %}Session History{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Session History</h2>
+    </div>
+
+    <!-- Filters -->
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <form method="get" class="row g-3">
+                <div class="col-md-2">
+                    <label for="protocol" class="form-label">Protocol</label>
+                    <select name="protocol" id="protocol" class="form-select">
+                        <option value="">All Protocols</option>
+                        {% for proto in protocols %}
+                        <option value="{{ proto }}" {% if proto == current_protocol %}selected{% endif %}>
+                            {{ proto.upper() }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label for="status" class="form-label">Status</label>
+                    <select name="status" id="status" class="form-select">
+                        <option value="all" {% if current_status == 'all' %}selected{% endif %}>All</option>
+                        <option value="active" {% if current_status == 'active' %}selected{% endif %}>Active</option>
+                        <option value="closed" {% if current_status == 'closed' %}selected{% endif %}>Closed</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="user" class="form-label">User</label>
+                    <input type="text" name="user" id="user" class="form-control" placeholder="Search by username" value="{{ current_user }}">
+                </div>
+                <div class="col-md-3">
+                    <label for="server" class="form-label">Server</label>
+                    <input type="text" name="server" id="server" class="form-control" placeholder="Search by server name" value="{{ current_server }}">
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">Filter</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Results -->
+    <div class="card shadow-sm">
+        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Sessions ({{ total }} total)</h5>
+            <span class="badge bg-light text-dark">Page {{ page }} of {{ total_pages }}</span>
+        </div>
+        <div class="card-body">
+            {% if sessions %}
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>Protocol</th>
+                            <th>User</th>
+                            <th>Server</th>
+                            <th>Source IP</th>
+                            <th>Backend IP</th>
+                            <th>Started</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for session in sessions %}
+                        <tr class="{% if session.is_active %}table-success{% endif %}">
+                            <td><span class="badge bg-{{ 'primary' if session.protocol == 'ssh' else 'success' }}">{{ session.protocol.upper() }}</span></td>
+                            <td>{{ session.user.username if session.user else 'Unknown' }}</td>
+                            <td>
+                                <strong>
+                                    {% if session.protocol == 'ssh' and session.ssh_username %}
+                                        {{ session.ssh_username }}@{{ session.server.name if session.server else session.backend_ip }}
+                                        {% if session.subsystem_name %}
+                                            <span class="badge bg-info">{{ session.subsystem_name }}</span>
+                                        {% endif %}
+                                    {% else %}
+                                        {{ session.server.name if session.server else session.backend_ip }}
+                                    {% endif %}
+                                </strong>
+                            </td>
+                            <td><code>{{ session.source_ip }}</code></td>
+                            <td><code>{{ session.backend_ip }}</code></td>
+                            <td>{{ session.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                            <td>
+                                {% if session.duration_seconds %}
+                                    {% set hours = (session.duration_seconds // 3600)|int %}
+                                    {% set minutes = ((session.duration_seconds % 3600) // 60)|int %}
+                                    {% set seconds = (session.duration_seconds % 60)|int %}
+                                    {% if hours > 0 %}
+                                        {{ hours }}h {{ minutes }}m
+                                    {% elif minutes > 0 %}
+                                        {{ minutes }}m {{ seconds }}s
+                                    {% else %}
+                                        {{ seconds }}s
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if session.is_active %}
+                                    <span class="badge bg-success">
+                                        <span class="spinner-grow spinner-grow-sm" role="status" style="width: 0.5rem; height: 0.5rem;"></span>
+                                        Active
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-secondary">Closed</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <a href="{{ url_for('sessions.view', session_id=session.session_id) }}" class="btn btn-sm btn-outline-primary" title="View Details">
+                                    <i class="bi bi-eye"></i> View
+                                    {% if session.is_active and session.protocol == 'ssh' %}
+                                        <span class="badge bg-success ms-1">LIVE</span>
+                                    {% endif %}
+                                </a>
+                                {% if recording_exists(session) %}
+                                <a href="{{ url_for('sessions.download', session_id=session.session_id) }}" class="btn btn-sm btn-outline-success" title="Download Recording">
+                                    <i class="bi bi-download"></i>
+                                </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            {% if total_pages > 1 %}
+            <nav aria-label="Session pagination">
+                <ul class="pagination justify-content-center">
+                    <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                        <a class="page-link" href="?page={{ page - 1 }}&protocol={{ current_protocol }}&status={{ current_status }}&user={{ current_user }}&server={{ current_server }}">Previous</a>
+                    </li>
+                    
+                    {% for p in range(1, total_pages + 1) %}
+                        {% if p == page or (p <= 3) or (p > total_pages - 3) or (p >= page - 1 and p <= page + 1) %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="?page={{ p }}&protocol={{ current_protocol }}&status={{ current_status }}&user={{ current_user }}&server={{ current_server }}">{{ p }}</a>
+                            </li>
+                        {% elif p == 4 or p == total_pages - 3 %}
+                            <li class="page-item disabled">
+                                <span class="page-link">...</span>
+                            </li>
+                        {% endif %}
+                    {% endfor %}
+                    
+                    <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                        <a class="page-link" href="?page={{ page + 1 }}&protocol={{ current_protocol }}&status={{ current_status }}&user={{ current_user }}&server={{ current_server }}">Next</a>
+                    </li>
+                </ul>
+            </nav>
+            {% endif %}
+
+            {% else %}
+            <p class="text-muted text-center py-4">No sessions found matching your criteria.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,857 @@
+{% extends "base.html" %}
+
+{% block title %}Session Details{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Session Details</h2>
+        <a href="{{ url_for('sessions.index') }}" class="btn btn-secondary">Back to List</a>
+    </div>
+
+    <!-- Session Info Card -->
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-{{ 'primary' if session.protocol == 'ssh' else 'success' }} text-white">
+            <h5 class="mb-0">
+                <span class="badge bg-light text-dark">{{ session.protocol.upper() }}</span>
+                Session: {{ session.session_id }}
+            </h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <h6 class="text-muted">Connection Details</h6>
+                    <table class="table table-sm">
+                        <tr>
+                            <th style="width: 40%;">User:</th>
+                            <td><strong>{{ session.user.username if session.user else 'Unknown' }}</strong></td>
+                        </tr>
+                        <tr>
+                            <th>Server:</th>
+                            <td>
+                                <strong>{{ session.server.name if session.server else session.backend_ip }}</strong>
+                                {% if session.server %}
+                                    <br><small class="text-muted">{{ session.server.hostname }}</small>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Source IP:</th>
+                            <td><code>{{ session.source_ip }}</code></td>
+                        </tr>
+                        <tr>
+                            <th>Backend IP:</th>
+                            <td><code>{{ session.backend_ip }}:{{ session.backend_port }}</code></td>
+                        </tr>
+                        {% if session.protocol == 'ssh' %}
+                        <tr>
+                            <th>SSH Username:</th>
+                            <td><code>{{ session.ssh_username or 'N/A' }}</code></td>
+                        </tr>
+                        <tr>
+                            <th>Subsystem:</th>
+                            <td>
+                                {% if session.subsystem_name %}
+                                    <span class="badge bg-info">{{ session.subsystem_name }}</span>
+                                {% else %}
+                                    <span class="text-muted">Shell</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>SSH Agent:</th>
+                            <td>
+                                {% if session.ssh_agent_used %}
+                                    <span class="text-success">✓ Forwarded</span>
+                                {% else %}
+                                    <span class="text-muted">✗ Not Used</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    <h6 class="text-muted">Session Timeline</h6>
+                    <table class="table table-sm">
+                        <tr>
+                            <th style="width: 40%;">Started:</th>
+                            <td>{{ session.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        </tr>
+                        <tr>
+                            <th>Ended:</th>
+                            <td>
+                                {% if session.ended_at %}
+                                    {{ session.ended_at.strftime('%Y-%m-%d %H:%M:%S') }}
+                                {% else %}
+                                    <span class="badge bg-success">Active</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Duration:</th>
+                            <td>
+                                {% if session.duration_seconds %}
+                                    {% set hours = (session.duration_seconds // 3600)|int %}
+                                    {% set minutes = ((session.duration_seconds % 3600) // 60)|int %}
+                                    {% set seconds = (session.duration_seconds % 60)|int %}
+                                    {% if hours > 0 %}
+                                        <strong>{{ hours }}h {{ minutes }}m {{ seconds }}s</strong>
+                                    {% elif minutes > 0 %}
+                                        <strong>{{ minutes }}m {{ seconds }}s</strong>
+                                    {% else %}
+                                        <strong>{{ seconds }}s</strong>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Status:</th>
+                            <td>
+                                {% if session.is_active %}
+                                    <span class="badge bg-success">Active</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">Closed</span>
+                                    {% if session.termination_reason %}
+                                        <br><small class="text-muted">{{ session.termination_reason }}</small>
+                                    {% endif %}
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Recording:</th>
+                            <td>
+                                {% if file_exists %}
+                                    <span class="text-success">✓ Available</span>
+                                    {% if session.recording_size %}
+                                        <br><small class="text-muted">{{ (session.recording_size / 1024)|round(2) }} KB</small>
+                                    {% endif %}
+                                {% elif session.recording_path %}
+                                    <span class="text-warning">⚠ Path set but file not found</span>
+                                    <br><small class="text-muted">{{ session.recording_path }}</small>
+                                {% else %}
+                                    <span class="text-muted">✗ Not Available</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% if session.policy %}
+                        <tr>
+                            <th>Policy:</th>
+                            <td><code>{{ session.policy.id }}</code></td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Session Recording/Log -->
+    {% if file_exists or (is_active and session.protocol == 'ssh') %}
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+                <i class="bi bi-file-earmark-text"></i>
+                Session Recording
+                {% if is_active %}
+                    <span class="badge bg-success ms-2">
+                        <span class="spinner-grow spinner-grow-sm" role="status"></span>
+                        LIVE
+                    </span>
+                {% endif %}
+            </h5>
+            <div>
+                {% if is_active and session.protocol == 'ssh' %}
+                <button id="toggle-live" class="btn btn-sm btn-success me-2">
+                    <i class="bi bi-play-circle"></i> Start Live View
+                </button>
+                {% endif %}
+                {% if file_exists %}
+                <a href="{{ url_for('sessions.download', session_id=session.session_id) }}" class="btn btn-sm btn-light">
+                    <i class="bi bi-download"></i> Download
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        <div class="card-body">
+            {% if session.protocol == 'ssh' and recording_data %}
+                {% if recording_data.error %}
+                    <div class="alert alert-danger">
+                        <strong>Error parsing recording:</strong> {{ recording_data.error }}
+                    </div>
+                {% else %}
+                    <div class="mb-3">
+                        <span class="badge bg-info me-2">User: {{ recording_data.username }}</span>
+                        <span class="badge bg-info me-2">Server: {{ recording_data.server_ip }}</span>
+                        <span class="badge bg-info me-2">Total Events: {{ recording_data.total_events }}</span>
+                        <span class="badge bg-info me-2">Duration: {{ recording_data.total_duration }}</span>
+                    </div>
+
+                    <!-- SSH Log Viewer with Terminal Style -->
+                    <div class="terminal-container">
+                        <div class="terminal-header">
+                            <span class="terminal-title">SSH Session Transcript - {{ recording_data.username }}@{{ recording_data.server_ip }}</span>
+                        </div>
+                        <div class="terminal-body" id="ssh-log-viewer">
+                            {% for entry in recording_data.log_entries %}
+                            {% if entry.type not in ['session_start', 'session_end'] %}
+                            <div class="log-entry log-{{ entry.type }}" data-timestamp="{{ entry.elapsed_seconds }}">
+                                <span class="log-time text-muted">[{{ entry.elapsed }}]</span>
+                                <span class="log-type badge bg-{{ 'success' if entry.type == 'client_to_server' else 'info' if entry.type == 'server_to_client' else 'secondary' }}">
+                                    {{ entry.type.replace('_', ' ').title() }}
+                                </span>
+                                <span class="log-content">{{ entry.content }}</span>
+                                {% if entry.content_length > 500 %}
+                                <small class="text-warning ms-2">({{ entry.content_length }} bytes total)</small>
+                                {% endif %}
+                            </div>
+                            {% endif %}
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Log Controls -->
+                    <div class="mt-3 d-flex gap-2 align-items-center">
+                        <input type="text" id="log-search" class="form-control" placeholder="Search in log..." style="flex: 1;" />
+                        <div class="btn-group" role="group">
+                            <input type="checkbox" class="btn-check" id="show-client" checked autocomplete="off">
+                            <label class="btn btn-outline-success btn-sm" for="show-client">Client</label>
+                            
+                            <input type="checkbox" class="btn-check" id="show-server" checked autocomplete="off">
+                            <label class="btn btn-outline-info btn-sm" for="show-server">Server</label>
+                        </div>
+                    </div>
+                    <small class="text-muted d-block mt-1">Filter by search term or toggle client/server messages</small>
+                {% endif %}
+
+            {% elif session.protocol == 'rdp' and recording_info %}
+                {% if recording_info.has_json and recording_info.metadata %}
+                    <!-- RDP Session Summary -->
+                    <div class="alert alert-info alert-permanent">
+                        <h5><i class="bi bi-info-circle"></i> RDP Session Summary</h5>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <p class="mb-2"><strong>Target Host:</strong> <code>{{ recording_info.metadata.host }}</code></p>
+                                <p class="mb-2"><strong>Screen Resolution:</strong> {{ recording_info.metadata.width }}x{{ recording_info.metadata.height }}</p>
+                                {% if recording_info.metadata.username %}
+                                <p class="mb-2"><strong>Username:</strong> {{ recording_info.metadata.username }}</p>
+                                {% endif %}
+                            </div>
+                            <div class="col-md-6">
+                                {% if recording_info.duration_formatted %}
+                                <p class="mb-2"><strong>Duration:</strong> {{ recording_info.duration_formatted }}</p>
+                                {% endif %}
+                                <p class="mb-2"><strong>Activity:</strong> {{ recording_info.event_summary.keyboard }} keystrokes, {{ recording_info.event_summary.mouse }} mouse events</p>
+                                <p class="mb-2"><strong>File Size:</strong> {{ recording_info.file_size_mb }} MB</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- MP4 Conversion & Video Player -->
+                    <div class="card mb-3">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h6 class="mb-0"><i class="bi bi-film"></i> Video Playback</h6>
+                            <span id="conversion-status-badge" class="badge bg-secondary">Checking...</span>
+                        </div>
+                        <div class="card-body">
+                            <!-- Status: Not Converted -->
+                            <div id="not-converted-section" style="display: none;">
+                                <p class="text-muted mb-3">
+                                    <i class="bi bi-info-circle"></i> This session can be converted to MP4 video for web playback (10 FPS, ~3x faster than real-time).
+                                </p>
+                                <button id="btn-convert" class="btn btn-primary">
+                                    <i class="bi bi-gear-fill"></i> Convert to MP4
+                                </button>
+                                <small class="text-muted d-block mt-2">
+                                    Conversion uses background processing and may take several minutes depending on session length.
+                                </small>
+                            </div>
+
+                            <!-- Status: Pending/Converting -->
+                            <div id="converting-section" style="display: none;">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <span id="conversion-status-text">Converting...</span>
+                                    <button id="btn-priority" class="btn btn-sm btn-warning" title="Move to front of queue">
+                                        <i class="bi bi-arrow-up-circle"></i> Rush
+                                    </button>
+                                </div>
+                                <div class="progress mb-2" style="height: 25px;">
+                                    <div id="conversion-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                                         role="progressbar" style="width: 0%">0%</div>
+                                </div>
+                                <small id="conversion-eta" class="text-muted"></small>
+                            </div>
+
+                            <!-- Status: Failed -->
+                            <div id="failed-section" style="display: none;">
+                                <div class="alert alert-danger mb-3">
+                                    <i class="bi bi-exclamation-triangle"></i> <strong>Conversion Failed</strong>
+                                    <p id="conversion-error" class="mb-0 mt-2"></p>
+                                </div>
+                                <button id="btn-retry" class="btn btn-primary">
+                                    <i class="bi bi-arrow-clockwise"></i> Retry Conversion
+                                </button>
+                            </div>
+
+                            <!-- Status: Completed - Video Player -->
+                            <div id="completed-section" style="display: none;">
+                                <video id="rdp-video-player" controls style="width: 100%; max-height: 600px; background: #000;">
+                                    <source id="video-source" src="{{ url_for('sessions.stream_mp4', session_id=session.session_id) }}" type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="mt-2 d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">
+                                        <i class="bi bi-info-circle"></i> Video converted at 10 FPS for efficient playback
+                                    </small>
+                                    <div class="btn-group">
+                                        <a id="btn-download-mp4" href="{{ url_for('sessions.stream_mp4', session_id=session.session_id) }}" download class="btn btn-sm btn-success">
+                                            <i class="bi bi-download"></i> Download MP4
+                                        </a>
+                                        <button id="btn-delete-mp4" class="btn btn-sm btn-outline-danger">
+                                            <i class="bi bi-trash"></i> Delete MP4
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                {% else %}
+                    <!-- Fallback: Basic RDP info without JSON -->
+                    <div class="alert alert-info alert-permanent">
+                        <h6><i class="bi bi-play-circle"></i> RDP Session Recording</h6>
+                        <p>RDP sessions are recorded in PyRDP format (.pyrdp files).</p>
+                        
+                        <table class="table table-sm bg-white">
+                            <tr>
+                                <th style="width: 30%;">File Name:</th>
+                                <td><code>{{ recording_info.file_name }}</code></td>
+                            </tr>
+                            <tr>
+                                <th>File Size:</th>
+                                <td><strong>{{ recording_info.file_size_mb }} MB</strong></td>
+                            </tr>
+                            <tr>
+                                <th>Modified:</th>
+                                <td>{{ recording_info.modified_time }}</td>
+                            </tr>
+                        </table>
+
+                        <h6 class="mt-3">How to View:</h6>
+                        <ol>
+                            <li>Download the recording file using the button above</li>
+                            <li>Install PyRDP: <code>pip install pyrdp</code></li>
+                            <li>Run the player: <code>pyrdp-player {{ recording_info.file_name }}</code></li>
+                        </ol>
+                        
+                        <p class="mb-0">
+                            <strong>Note:</strong> PyRDP Player provides full video replay, file transfers, and clipboard activity.
+                        </p>
+                    </div>
+                {% endif %}
+                
+                <!-- Local PyRDP Player Instructions (always visible for RDP sessions) -->
+                <div class="alert alert-secondary alert-permanent">
+                    <h6><i class="bi bi-download"></i> Alternative: Local PyRDP Player</h6>
+                    <p class="mb-2">For full-quality replay with all details:</p>
+                    <ol class="mb-2">
+                        <li>Download the recording file using the button above</li>
+                        <li>Install PyRDP Player: <code>pip install pyrdp</code></li>
+                        <li>Run: <code>pyrdp-player {{ recording_info.file_name }}</code></li>
+                    </ol>
+                    <p class="mb-0">
+                        <small><strong>Note:</strong> PyRDP Player provides full 30 FPS video, clipboard activity, and file transfers.</small>
+                    </p>
+                </div>
+            {% else %}
+                <div class="alert alert-warning">
+                    <i class="bi bi-exclamation-triangle"></i>
+                    Recording file not found or could not be parsed.
+                </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+/* Terminal-like styling for SSH log viewer */
+.terminal-container {
+    background-color: #1e1e1e;
+    border-radius: 5px;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+}
+
+.terminal-header {
+    background-color: #2d2d2d;
+    padding: 8px 15px;
+    border-bottom: 1px solid #444;
+}
+
+.terminal-title {
+    color: #ccc;
+    font-size: 12px;
+}
+
+.terminal-body {
+    padding: 15px;
+    max-height: 600px;
+    overflow-y: auto;
+    color: #d4d4d4;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.log-entry {
+    margin-bottom: 8px;
+    padding: 4px 0;
+    border-left: 3px solid transparent;
+    padding-left: 10px;
+}
+
+.log-entry:hover {
+    background-color: #252525;
+    border-left-color: #007bff;
+}
+
+.log-time {
+    color: #858585;
+    font-size: 11px;
+    margin-right: 8px;
+}
+
+.log-type {
+    font-size: 10px;
+    margin-right: 8px;
+}
+
+.log-content {
+    color: #d4d4d4;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Search highlighting */
+.log-entry.hidden {
+    display: none;
+}
+
+.log-entry.highlight {
+    background-color: #3e3e00;
+    border-left-color: #ffc107;
+}
+
+/* Type-specific styling */
+.log-client_to_server {
+    border-left-color: #28a745;
+}
+
+.log-server_to_client {
+    border-left-color: #17a2b8;
+}
+</style>
+
+<script>
+// Search and filter functionality for log viewer
+document.addEventListener('DOMContentLoaded', function() {
+    const searchInput = document.getElementById('log-search');
+    const showClientCheckbox = document.getElementById('show-client');
+    const showServerCheckbox = document.getElementById('show-server');
+    
+    function filterLogs() {
+        const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+        const showClient = showClientCheckbox ? showClientCheckbox.checked : true;
+        const showServer = showServerCheckbox ? showServerCheckbox.checked : true;
+        const logEntries = document.querySelectorAll('.log-entry');
+        
+        logEntries.forEach(entry => {
+            const content = entry.textContent.toLowerCase();
+            const isClient = entry.classList.contains('log-client_to_server');
+            const isServer = entry.classList.contains('log-server_to_client');
+            
+            // Check type filter
+            let typeMatch = true;
+            if (isClient && !showClient) typeMatch = false;
+            if (isServer && !showServer) typeMatch = false;
+            
+            // Check search term
+            const searchMatch = searchTerm === '' || content.includes(searchTerm);
+            
+            if (typeMatch && searchMatch) {
+                entry.classList.remove('hidden');
+                if (searchTerm !== '') {
+                    entry.classList.add('highlight');
+                } else {
+                    entry.classList.remove('highlight');
+                }
+            } else {
+                entry.classList.add('hidden');
+                entry.classList.remove('highlight');
+            }
+        });
+    }
+    
+    // Attach event listeners
+    if (searchInput) {
+        searchInput.addEventListener('input', filterLogs);
+    }
+    if (showClientCheckbox) {
+        showClientCheckbox.addEventListener('change', filterLogs);
+    }
+    if (showServerCheckbox) {
+        showServerCheckbox.addEventListener('change', filterLogs);
+    }
+    
+    // Live view functionality
+    const toggleLiveBtn = document.getElementById('toggle-live');
+    if (toggleLiveBtn) {
+        let liveInterval = null;
+        let isLiveActive = false;
+        let lastEventTimestamp = 0;
+        
+        // Get initial last timestamp from existing events
+        const allEntries = document.querySelectorAll('.log-entry');
+        if (allEntries.length > 0) {
+            const lastEntry = allEntries[allEntries.length - 1];
+            lastEventTimestamp = parseFloat(lastEntry.dataset.timestamp) || 0;
+        }
+        
+        toggleLiveBtn.addEventListener('click', function() {
+            if (!isLiveActive) {
+                // Start live view
+                isLiveActive = true;
+                toggleLiveBtn.innerHTML = '<i class="bi bi-stop-circle"></i> Stop Live View';
+                toggleLiveBtn.classList.remove('btn-success');
+                toggleLiveBtn.classList.add('btn-danger');
+                
+                // Poll for new events every 2 seconds
+                liveInterval = setInterval(fetchNewEvents, 2000);
+                fetchNewEvents(); // Fetch immediately
+            } else {
+                // Stop live view
+                isLiveActive = false;
+                toggleLiveBtn.innerHTML = '<i class="bi bi-play-circle"></i> Start Live View';
+                toggleLiveBtn.classList.remove('btn-danger');
+                toggleLiveBtn.classList.add('btn-success');
+                
+                if (liveInterval) {
+                    clearInterval(liveInterval);
+                    liveInterval = null;
+                }
+            }
+        });
+        
+        function fetchNewEvents() {
+            const sessionId = '{{ session.session_id }}';
+            fetch(`/sessions/${sessionId}/live?after=${lastEventTimestamp}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error('Live view error:', data.error);
+                        if (!data.is_active) {
+                            // Session closed, stop live view
+                            if (isLiveActive) {
+                                toggleLiveBtn.click();
+                            }
+                            alert('Session has ended');
+                        }
+                        return;
+                    }
+                    
+                    if (data.events && data.events.length > 0) {
+                        const logViewer = document.getElementById('ssh-log-viewer');
+                        
+                        data.events.forEach(entry => {
+                            // Skip session_start and session_end
+                            if (entry.type === 'session_start' || entry.type === 'session_end') {
+                                return;
+                            }
+                            
+                            // Create log entry element
+                            const logEntry = document.createElement('div');
+                            logEntry.className = `log-entry log-${entry.type} new-entry`;
+                            logEntry.dataset.timestamp = entry.elapsed_seconds;
+                            
+                            const typeLabel = entry.type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+                            let badgeClass = 'secondary';
+                            if (entry.type === 'client_to_server') badgeClass = 'success';
+                            if (entry.type === 'server_to_client') badgeClass = 'info';
+                            
+                            let contentHtml = `
+                                <span class="log-time text-muted">[${entry.elapsed}]</span>
+                                <span class="log-type badge bg-${badgeClass}">${typeLabel}</span>
+                                <span class="log-content">${escapeHtml(entry.content)}</span>
+                            `;
+                            
+                            if (entry.content_length > 500) {
+                                contentHtml += `<small class="text-warning ms-2">(${entry.content_length} bytes total)</small>`;
+                            }
+                            
+                            logEntry.innerHTML = contentHtml;
+                            logViewer.appendChild(logEntry);
+                            
+                            // Update last timestamp
+                            lastEventTimestamp = entry.elapsed_seconds;
+                            
+                            // Highlight new entry briefly
+                            setTimeout(() => {
+                                logEntry.classList.remove('new-entry');
+                            }, 2000);
+                        });
+                        
+                        // Auto-scroll to bottom
+                        logViewer.scrollTop = logViewer.scrollHeight;
+                        
+                        // Apply current filters
+                        filterLogs();
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to fetch live events:', error);
+                });
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    }
+    
+    // ============================================
+    // MP4 Conversion Status Polling (for RDP)
+    // ============================================
+    {% if session.protocol == 'rdp' %}
+    let conversionPollInterval;
+    
+    function checkConversionStatus() {
+        fetch('/sessions/{{ session.session_id }}/convert-status')
+            .then(response => response.json())
+            .then(data => {
+                updateConversionUI(data);
+            })
+            .catch(error => {
+                console.error('Failed to fetch conversion status:', error);
+            });
+    }
+    
+    function updateConversionUI(data) {
+        const badge = document.getElementById('conversion-status-badge');
+        const notConverted = document.getElementById('not-converted-section');
+        const converting = document.getElementById('converting-section');
+        const failed = document.getElementById('failed-section');
+        const completed = document.getElementById('completed-section');
+        
+        // Check if elements exist (they might not if template conditions changed)
+        if (!badge || !notConverted || !converting || !failed || !completed) {
+            console.warn('MP4 conversion UI elements not found, stopping polling');
+            if (conversionPollInterval) {
+                clearInterval(conversionPollInterval);
+            }
+            return;
+        }
+        
+        // Hide all sections
+        notConverted.style.display = 'none';
+        converting.style.display = 'none';
+        failed.style.display = 'none';
+        completed.style.display = 'none';
+        
+        if (data.status === 'not_queued') {
+            badge.textContent = 'Not Converted';
+            badge.className = 'badge bg-secondary';
+            notConverted.style.display = 'block';
+        } else if (data.status === 'pending') {
+            badge.textContent = 'Pending';
+            badge.className = 'badge bg-warning';
+            converting.style.display = 'block';
+            document.getElementById('conversion-status-text').textContent = 
+                `In queue (position ${data.position || '?'})`;
+            document.getElementById('conversion-progress-bar').style.width = '0%';
+            document.getElementById('conversion-progress-bar').textContent = 'Waiting...';
+            document.getElementById('conversion-eta').textContent = '';
+        } else if (data.status === 'converting') {
+            badge.textContent = 'Converting';
+            badge.className = 'badge bg-primary';
+            converting.style.display = 'block';
+            
+            const percent = data.percent || 0;
+            document.getElementById('conversion-status-text').textContent = 
+                `Converting: ${data.progress || 0} / ${data.total || '?'}`;
+            document.getElementById('conversion-progress-bar').style.width = `${percent}%`;
+            document.getElementById('conversion-progress-bar').textContent = `${percent}%`;
+            
+            if (data.eta_seconds && data.eta_seconds > 0) {
+                const minutes = Math.floor(data.eta_seconds / 60);
+                const seconds = data.eta_seconds % 60;
+                document.getElementById('conversion-eta').textContent = 
+                    `ETA: ${minutes}m ${seconds}s remaining`;
+            } else {
+                document.getElementById('conversion-eta').textContent = 'Calculating ETA...';
+            }
+        } else if (data.status === 'failed') {
+            badge.textContent = 'Failed';
+            badge.className = 'badge bg-danger';
+            failed.style.display = 'block';
+            document.getElementById('conversion-error').textContent = data.error_msg || 'Unknown error';
+        } else if (data.status === 'completed') {
+            badge.textContent = 'Ready';
+            badge.className = 'badge bg-success';
+            completed.style.display = 'block';
+            
+            // Load video source when section becomes visible
+            const video = document.getElementById('rdp-video-player');
+            if (video) {
+                video.load();
+            }
+            
+            // Stop polling when completed
+            if (conversionPollInterval) {
+                clearInterval(conversionPollInterval);
+            }
+        }
+    }
+    
+    // Convert button click
+    document.getElementById('btn-convert')?.addEventListener('click', function() {
+        this.disabled = true;
+        this.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Queuing...';
+        
+        fetch('/sessions/{{ session.session_id }}/convert', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+                this.disabled = false;
+                this.innerHTML = '<i class="bi bi-gear-fill"></i> Convert to MP4';
+            } else {
+                checkConversionStatus();
+            }
+        })
+        .catch(error => {
+            alert('Failed to queue conversion: ' + error);
+            this.disabled = false;
+            this.innerHTML = '<i class="bi bi-gear-fill"></i> Convert to MP4';
+        });
+    });
+    
+    // Priority button click
+    document.getElementById('btn-priority')?.addEventListener('click', function() {
+        this.disabled = true;
+        
+        fetch('/sessions/{{ session.session_id }}/convert/priority', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+            } else {
+                alert('Moved to front of queue!');
+                checkConversionStatus();
+            }
+            this.disabled = false;
+        })
+        .catch(error => {
+            alert('Failed to prioritize: ' + error);
+            this.disabled = false;
+        });
+    });
+    
+    // Retry button click
+    document.getElementById('btn-retry')?.addEventListener('click', function() {
+        this.disabled = true;
+        this.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Retrying...';
+        
+        fetch('/sessions/{{ session.session_id }}/convert', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+                this.disabled = false;
+                this.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Retry Conversion';
+            } else {
+                checkConversionStatus();
+            }
+        });
+    });
+    
+    // Delete MP4 button click
+    document.getElementById('btn-delete-mp4')?.addEventListener('click', function() {
+        if (!confirm('Are you sure you want to delete the MP4 file? You will need to convert again.')) {
+            return;
+        }
+        
+        this.disabled = true;
+        
+        fetch('/sessions/{{ session.session_id }}/mp4', {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+                this.disabled = false;
+            } else {
+                alert('MP4 deleted successfully');
+                checkConversionStatus();
+            }
+        })
+        .catch(error => {
+            alert('Failed to delete MP4: ' + error);
+            this.disabled = false;
+        });
+    });
+    
+    // Initial status check
+    if (document.getElementById('conversion-status-badge')) {
+        checkConversionStatus();
+        
+        // Poll every 2 seconds
+        conversionPollInterval = setInterval(checkConversionStatus, 2000);
+    }
+    {% endif %}
+});
+</script>
+
+<style>
+/* New entry animation */
+.log-entry.new-entry {
+    animation: highlightNew 2s ease-in-out;
+}
+
+@keyframes highlightNew {
+    0% {
+        background-color: #ffc107;
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+
+/* RDP Timeline Styles */
+.rdp-timeline {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+}
+
+.rdp-event {
+    padding: 4px 8px;
+    border-left: 3px solid #495057;
+    margin-bottom: 4px;
+    transition: all 0.2s;
+}
+
+.rdp-event:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-left-color: #ffc107;
+}
+</style>
+{% endblock %}

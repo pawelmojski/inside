@@ -57,6 +57,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'sessions' in request.endpoint %}active{% endif %}" 
+                           href="{{ url_for('sessions.index') }}">
+                            <i class="bi bi-clock-history"></i> Sessions
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {% if request.endpoint and 'monitoring' in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('monitoring.index') }}">
                             <i class="bi bi-activity"></i> Monitoring

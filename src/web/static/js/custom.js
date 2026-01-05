@@ -1,6 +1,8 @@
 // Jumphost Web GUI - Custom JavaScript
 
-// Auto-hide alerts after 5 seconds
+// Auto-hide alerts disabled - all alerts stay visible
+// User can manually close them with X button
+/*
 document.addEventListener('DOMContentLoaded', function() {
     const alerts = document.querySelectorAll('.alert:not(.alert-permanent)');
     alerts.forEach(function(alert) {
@@ -10,6 +12,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 5000);
     });
 });
+*/
 
 // Confirmation dialogs for delete actions
 function confirmDelete(entityType, entityName) {
