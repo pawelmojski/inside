@@ -267,11 +267,492 @@ CREATE INDEX idx_created_at ON mp4_conversion_queue(created_at);
 
 ---
 
-## 📋 NEXT: v1.4 - Enhancements & Optimizations (Backlog)
+## � IN PROGRESS: v1.4 - Advanced Access Control & User Experience (January 2026)
 
-### 🎯 Potential Features
+### 🎯 Goals: Recursive Groups, Port Forwarding, Curl CLI
 
-#### 1. MP4 System Improvements
+**Status**: Planning phase - January 2026
+
+**Strategy**: Build from foundation to interface
+1. Recursive groups (infrastructure)
+2. Port forwarding (features using new permissions)
+3. Curl API (user-friendly interface)
+
+---
+
+### 📋 Feature 1: Recursive Groups & Nested Permissions
+
+**Priority**: 🔴 Critical - Foundation for all access control
+
+**Problem**: Current system supports flat groups only. Need hierarchical organization.
+
+**Requirements**:
+- **User Groups**: Users can belong to groups (e.g., "biuro", "ideo")
+- **Group Nesting**: Groups can contain other groups (e.g., "biuro" ⊂ "ideo")
+- **Permission Inheritance**: User in "biuro" automatically gets "ideo" permissions
+- **Server Groups**: Same nesting for servers (e.g., "prod-web" ⊂ "production")
+- **Cycle Detection**: Prevent infinite loops (A → B → C → A)
+
+**Use Cases**:
+```
+Example 1: User Groups
+- Group "ideo" (parent)
+  └── Group "biuro" (child)
+      └── User "p.mojski"
+      
+Grant for "ideo" → applies to "biuro" → applies to "p.mojski"
+
+Example 2: Server Groups
+- Group "production" (parent)
+  ├── Group "prod-web" (child)
+  │   ├── web01.prod
+  │   └── web02.prod
+  └── Group "prod-db" (child)
+      ├── db01.prod
+      └── db02.prod
+      
+Grant to "production" → access to all 4 servers
+```
+
+**Database Changes**:
+```sql
+-- New Tables
+CREATE TABLE user_groups (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT,
+    parent_group_id INTEGER REFERENCES user_groups(id),  -- Recursive!
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE user_group_members (
+    id SERIAL PRIMARY KEY,
+    user_group_id INTEGER REFERENCES user_groups(id),
+    user_id INTEGER REFERENCES users(id),
+    added_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_group_id, user_id)
+);
+
+-- Extend Existing
+ALTER TABLE server_groups ADD COLUMN parent_group_id INTEGER REFERENCES server_groups(id);
+ALTER TABLE access_policies ADD COLUMN user_group_id INTEGER REFERENCES user_groups(id);
+```
+
+**Algorithm: Recursive Membership Resolution**:
+```python
+def get_all_user_groups(user_id, db):
+    """Get all groups user belongs to (direct + inherited via parent groups)"""
+    visited = set()
+    queue = get_direct_groups(user_id)  # Start with direct membership
+    
+    while queue:
+        group = queue.pop(0)
+        if group.id in visited:
+            continue  # Cycle detection
+        visited.add(group.id)
+        
+        # Add parent groups to queue
+        if group.parent_group_id:
+            parent = db.query(UserGroup).get(group.parent_group_id)
+            if parent:
+                queue.append(parent)
+    
+    return visited
+
+def get_all_servers_in_group(group_id, db):
+    """Get all servers in group (direct + inherited from child groups)"""
+    visited = set()
+    queue = [group_id]
+    
+    while queue:
+        gid = queue.pop(0)
+        if gid in visited:
+            continue
+        visited.add(gid)
+        
+        # Add direct servers
+        servers = get_direct_servers(gid)
+        visited.update(servers)
+        
+        # Add child groups to queue
+        children = db.query(ServerGroup).filter(ServerGroup.parent_group_id == gid).all()
+        queue.extend([c.id for c in children])
+    
+    return visited
+```
+
+**Access Control Integration**:
+```python
+# In AccessControlEngineV2.check_access_v2()
+def check_access_v2(self, db, source_ip, dest_ip, protocol):
+    user = self.find_user_by_source_ip(db, source_ip)
+    server = self.find_backend_by_proxy_ip(db, dest_ip)
+    
+    # Get ALL groups user belongs to (including inherited)
+    user_groups = get_all_user_groups(user.id, db)
+    
+    # Check policies for:
+    # 1. Direct user access
+    # 2. Any of user's groups (direct or inherited)
+    policies = db.query(AccessPolicy).filter(
+        or_(
+            AccessPolicy.user_id == user.id,
+            AccessPolicy.user_group_id.in_(user_groups)
+        ),
+        # ... rest of policy checks
+    ).all()
+```
+
+**Cycle Detection**:
+```python
+def validate_no_cycles(group_id, new_parent_id, db):
+    """Ensure setting parent_id won't create cycle"""
+    visited = set([group_id])
+    current = new_parent_id
+    
+    while current:
+        if current in visited:
+            raise ValueError(f"Cycle detected: {group_id} -> ... -> {current} -> {group_id}")
+        visited.add(current)
+        
+        parent_group = db.query(UserGroup).get(current)
+        current = parent_group.parent_group_id if parent_group else None
+```
+
+**Web GUI Changes**:
+- User Groups management page (create, nest, assign users)
+- Server Groups tree view (drag & drop nesting)
+- Policy wizard: Select user OR user group
+- Visualization: Group hierarchy tree
+
+**Performance Considerations**:
+- Cache group membership in Redis (TTL 5min)
+- Indexed queries on parent_group_id
+- Limit nesting depth (max 10 levels)
+
+**Migration Path**:
+1. Create new tables (Alembic migration)
+2. Migrate existing server_groups (all at root level initially)
+3. Deploy new AccessControlEngineV2
+4. Test with simple 2-level hierarchy
+5. Roll out to production
+
+**Status**: 
+- [ ] Database schema design
+- [ ] Alembic migration
+- [ ] Recursive algorithms (membership, cycle detection)
+- [ ] Update AccessControlEngineV2
+- [ ] Web GUI for group management
+- [ ] Testing (edge cases, cycles, performance)
+
+---
+
+### 📋 Feature 2: SSH Port Forwarding (-L / -R)
+
+**Priority**: 🟡 High - Critical for daily productivity
+
+**Problem**: Current SSH proxy doesn't support port forwarding. Users can't use VS Code Remote SSH, database tunnels, or other port forwarding workflows.
+
+**Requirements**:
+- **Local Forwarding** (`ssh -L`): Client opens port, forwards to backend
+- **Remote Forwarding** (`ssh -R`): Backend opens port, forwards to client
+- **Access Control**: New permission `port_forwarding_allowed` (per user or group)
+- **Logging**: Track all port forward requests (source, dest, ports)
+- **Restrictions**: Configurable allowed destination IPs/ports
+
+**Use Cases**:
+```bash
+# Local forwarding (ssh -L)
+ssh -L 5432:db-backend:5432 jumphost
+# Now: localhost:5432 -> jumphost -> db-backend:5432
+
+# Remote forwarding (ssh -R)
+ssh -R 8080:localhost:3000 jumphost
+# Now: jumphost:8080 -> your-machine:3000
+
+# VS Code Remote SSH
+# VS Code opens random high port, forwards stdin/stdout
+```
+
+**Paramiko Channels**:
+- `direct-tcpip`: Local forwarding (ssh -L)
+- `forwarded-tcpip`: Remote forwarding (ssh -R)
+
+**Database Changes**:
+```sql
+ALTER TABLE users ADD COLUMN port_forwarding_allowed BOOLEAN DEFAULT FALSE;
+ALTER TABLE user_groups ADD COLUMN port_forwarding_allowed BOOLEAN DEFAULT FALSE;
+
+CREATE TABLE port_forward_sessions (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(255) REFERENCES sessions(session_id),
+    source_ip VARCHAR(45),
+    username VARCHAR(255),
+    forward_type VARCHAR(20),  -- 'local' or 'remote'
+    listen_host VARCHAR(255),
+    listen_port INTEGER,
+    dest_host VARCHAR(255),
+    dest_port INTEGER,
+    started_at TIMESTAMP DEFAULT NOW(),
+    ended_at TIMESTAMP,
+    bytes_sent BIGINT DEFAULT 0,
+    bytes_received BIGINT DEFAULT 0
+);
+```
+
+**SSH Proxy Changes** (`src/proxy/ssh_proxy.py`):
+```python
+class SSHProxyServerInterface(paramiko.ServerInterface):
+    def check_channel_request(self, kind, chanid):
+        if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED
+        elif kind == 'direct-tcpip':  # ssh -L
+            return self._check_port_forward_request('local')
+        elif kind == 'forwarded-tcpip':  # ssh -R
+            return self._check_port_forward_request('remote')
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    
+    def _check_port_forward_request(self, forward_type):
+        # Check if user has port_forwarding_allowed
+        if not self.user.port_forwarding_allowed:
+            # Check group permissions (recursive!)
+            user_groups = get_all_user_groups(self.user.id, db)
+            if not any(g.port_forwarding_allowed for g in user_groups):
+                logger.warning(f"Port forwarding denied for {self.username}")
+                return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+        
+        logger.info(f"Port forwarding {forward_type} allowed for {self.username}")
+        return paramiko.OPEN_SUCCEEDED
+    
+    def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+        """Called for ssh -L"""
+        dest_addr, dest_port = destination
+        
+        # Validate destination (optional whitelist)
+        if not self._validate_port_forward_destination(dest_addr, dest_port):
+            return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+        
+        # Log port forward session
+        self._log_port_forward('local', origin, destination)
+        
+        return paramiko.OPEN_SUCCEEDED
+```
+
+**Port Forward Handler**:
+```python
+def handle_direct_tcpip(channel, origin, destination):
+    """Forward traffic between client and destination"""
+    try:
+        dest_addr, dest_port = destination
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((dest_addr, dest_port))
+        
+        # Bidirectional forwarding
+        while True:
+            r, w, x = select.select([channel, sock], [], [])
+            if channel in r:
+                data = channel.recv(4096)
+                if not data:
+                    break
+                sock.sendall(data)
+            if sock in r:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                channel.sendall(data)
+    finally:
+        sock.close()
+        channel.close()
+```
+
+**Configuration**:
+```python
+# In config or database
+PORT_FORWARD_WHITELIST = {
+    'allowed_dest_ips': ['10.30.0.*', '192.168.*'],  # Glob patterns
+    'blocked_ports': [22, 3389],  # No forwarding to SSH/RDP ports
+    'require_approval': False  # Future: admin approval workflow
+}
+```
+
+**Web GUI**:
+- User profile: Checkbox "Allow Port Forwarding"
+- Group settings: Checkbox "Allow Port Forwarding" (inherited by members)
+- Active Port Forwards widget (dashboard)
+- Audit log: Port forward attempts (granted/denied)
+
+**Status**:
+- [ ] Database schema (port_forwarding_allowed, port_forward_sessions)
+- [ ] SSH proxy: channel request handlers
+- [ ] Bidirectional traffic forwarding
+- [ ] Logging and audit
+- [ ] Web GUI toggles
+- [ ] Testing (ssh -L, ssh -R, VS Code Remote)
+
+---
+
+### 📋 Feature 3: Curl-based CLI API
+
+**Priority**: 🟢 Medium - User experience enhancement
+
+**Problem**: Users need to interact with jumphost from any machine without installing tools. Only `curl` is universally available.
+
+**Requirements**:
+- **User-Agent Detection**: Recognize curl, return plain text instead of HTML
+- **Simple Endpoints**: Short, memorable URLs
+- **Self-Service**: Request access, check status, list grants
+- **Admin Approval**: Workflow for sensitive operations
+- **No Auth (for reads)**: Use source IP (already authenticated)
+
+**Example Usage**:
+```bash
+# Check who you are
+$ curl jump/whoami
+You are: p.mojski (pawel.mojski@example.com)
+Source IP: 100.64.0.20
+Active grants: 3 servers (5 expire in < 7 days)
+
+# Backend info
+$ curl jump/i/10.30.0.140
+test-rdp-server (10.30.0.140)
+  Proxy IP: 10.0.160.130
+  Groups: test-servers, rdp-hosts
+  Your access: ✓ RDP (expires 2026-02-01)
+
+# List your grants
+$ curl jump/p/list
+Active Grants:
+  [RDP] 10.30.0.140 (test-rdp-server) - expires 2026-02-01
+  [SSH] 10.30.0.200 (linux-dev)       - expires 2026-01-15
+  [SSH] 10.30.0.201 (linux-prod)      - permanent
+
+# Request new access
+$ curl jump/p/request/ssh/10.30.0.202
+Access request created: #42
+Server: linux-staging (10.30.0.202)
+Protocol: SSH
+Status: Pending admin approval
+View: http://jump:5000/requests/42
+
+# Add your IP (if multiple IPs)
+$ curl -X POST jump/p/add-ip/100.64.0.99
+Request created: #43
+New IP: 100.64.0.99 will be linked to your account
+Status: Pending admin approval
+```
+
+**API Endpoints**:
+```python
+# src/web/blueprints/cli_api.py
+
+@cli_api.route('/whoami')
+def whoami():
+    source_ip = request.remote_addr
+    user = find_user_by_source_ip(source_ip)
+    
+    if is_curl_request():
+        return format_plain_text({
+            'user': user.username,
+            'email': user.email,
+            'source_ip': source_ip,
+            'grants': count_active_grants(user)
+        })
+    else:
+        return jsonify({...})  # JSON for browsers
+
+@cli_api.route('/i/<path:ip_or_name>')
+def backend_info(ip_or_name):
+    server = find_server(ip_or_name)  # By IP or name
+    user = find_user_by_source_ip(request.remote_addr)
+    
+    access = check_access(user, server)
+    
+    return format_plain_text({
+        'server': server,
+        'proxy_ip': server.proxy_ip,
+        'groups': server.groups,
+        'your_access': access
+    })
+
+@cli_api.route('/p/request/<protocol>/<ip>')
+def request_access(protocol, ip):
+    user = find_user_by_source_ip(request.remote_addr)
+    server = find_server(ip)
+    
+    # Create access request (new table)
+    req = AccessRequest(
+        user_id=user.id,
+        server_id=server.id,
+        protocol=protocol,
+        status='pending',
+        requested_at=datetime.now()
+    )
+    db.add(req)
+    db.commit()
+    
+    # Notify admins (future: email/Slack)
+    
+    return format_plain_text({
+        'request_id': req.id,
+        'status': 'pending',
+        'url': f'http://{request.host}/requests/{req.id}'
+    })
+```
+
+**User-Agent Detection**:
+```python
+def is_curl_request():
+    ua = request.headers.get('User-Agent', '').lower()
+    return 'curl' in ua or 'wget' in ua
+```
+
+**Admin Approval Workflow**:
+```sql
+CREATE TABLE access_requests (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    server_id INTEGER REFERENCES servers(id),
+    protocol VARCHAR(10),
+    justification TEXT,
+    status VARCHAR(20) DEFAULT 'pending',  -- pending/approved/denied
+    requested_at TIMESTAMP DEFAULT NOW(),
+    reviewed_by INTEGER REFERENCES users(id),
+    reviewed_at TIMESTAMP,
+    approval_notes TEXT
+);
+```
+
+**Web GUI**:
+- `/requests` - Pending requests list (admins only)
+- Approve/Deny buttons
+- Auto-create AccessPolicy on approval
+
+**Shortcuts**:
+```bash
+# Add to /etc/hosts or DNS
+10.0.160.5  jump
+
+# Or create shell alias
+alias jh='curl -s jump'
+jh /whoami
+jh /i/10.30.0.140
+```
+
+**Status**:
+- [ ] Blueprint: cli_api.py
+- [ ] User-agent detection
+- [ ] Plain text formatters
+- [ ] Endpoints: whoami, info, list, request
+- [ ] Database: access_requests table
+- [ ] Admin approval GUI
+- [ ] Testing with curl
+- [ ] Documentation (user guide)
+
+---
+
+## 📋 Backlog: Future Enhancements
+
+### MP4 System Improvements
 - [ ] Fix delete MP4 permission issue (chown mp4_cache to p.mojski)
 - [ ] Replace datetime.utcnow() with datetime.now(datetime.UTC) (Python 3.13)
 - [ ] Configurable FPS per conversion (ENV variable or UI setting)
@@ -279,26 +760,25 @@ CREATE INDEX idx_created_at ON mp4_conversion_queue(created_at);
 - [ ] WebSocket/SSE for real-time progress (reduce polling)
 - [ ] Conversion metrics dashboard (avg time, success rate)
 
-#### 2. Session Monitoring
+### Session Monitoring
 - [ ] SSH session video recording (ttyrec/asciinema format)
 - [ ] Session playback speed controls (0.5x, 1x, 2x)
 - [ ] Search within session transcripts
 - [ ] Export session reports (PDF/JSON)
 
-#### 3. Access Control
+### Advanced Access Control
 - [ ] FreeIPA integration (user sync + authentication)
 - [ ] Multi-factor authentication (TOTP)
-- [ ] Emergency access requests (approval workflow)
-- [ ] Role-based access control (RBAC)
-- [ ] IP whitelist/blacklist per user
+- [ ] Time-based access (only during business hours)
+- [ ] Break-glass emergency access
 
-#### 4. Performance & Scaling
+### Performance & Scaling
 - [ ] Redis cache for session state
 - [ ] Connection pooling for database
 - [ ] Load balancing across multiple jump hosts
 - [ ] Separate SSH proxy instances per backend
 
-#### 5. Monitoring & Alerting
+### Monitoring & Alerting
 - [ ] Prometheus metrics export
 - [ ] Grafana dashboards
 - [ ] Email/Slack alerts for denied access
