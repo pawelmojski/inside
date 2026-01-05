@@ -25,6 +25,7 @@ class User(UserMixin, Base):
     full_name = Column(String(255))
     source_ip = Column(String(45), index=True)  # DEPRECATED: Use user_source_ips table instead
     is_active = Column(Boolean, default=True)
+    port_forwarding_allowed = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -162,12 +163,18 @@ class ServerGroup(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, nullable=False, index=True)
     description = Column(Text)
+    parent_group_id = Column(Integer, ForeignKey("server_groups.id", ondelete="SET NULL"), index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
+    parent_group = relationship("ServerGroup", remote_side=[id], backref="child_groups")
     members = relationship("ServerGroupMember", back_populates="group", cascade="all, delete-orphan")
     access_policies = relationship("AccessPolicy", back_populates="target_group")
+    
+    __table_args__ = (
+        CheckConstraint("id != parent_group_id", name="server_groups_no_self_reference"),
+    )
 
 
 class ServerGroupMember(Base):
@@ -188,12 +195,52 @@ class ServerGroupMember(Base):
     )
 
 
+class UserGroup(Base):
+    """User groups for hierarchical access management with recursive parent support."""
+    __tablename__ = "user_groups"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), unique=True, nullable=False, index=True)
+    description = Column(Text)
+    parent_group_id = Column(Integer, ForeignKey("user_groups.id", ondelete="SET NULL"), index=True)
+    port_forwarding_allowed = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    parent_group = relationship("UserGroup", remote_side=[id], backref="child_groups")
+    members = relationship("UserGroupMember", back_populates="group", cascade="all, delete-orphan")
+    access_policies = relationship("AccessPolicy", back_populates="user_group")
+    
+    __table_args__ = (
+        CheckConstraint("id != parent_group_id", name="user_groups_no_self_reference"),
+    )
+
+
+class UserGroupMember(Base):
+    """N:M relationship: users can belong to multiple groups."""
+    __tablename__ = "user_group_members"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_group_id = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    added_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", backref="group_memberships")
+    group = relationship("UserGroup", back_populates="members")
+    
+    __table_args__ = (
+        CheckConstraint("user_group_id IS NOT NULL AND user_id IS NOT NULL", name="check_user_group_member_ids"),
+    )
+
+
 class AccessPolicy(Base):
     """Flexible access policy with granular control (group/server/service level)."""
     __tablename__ = "access_policies"
     
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_group_id = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=True, index=True)
     
     # Source IP restriction (NULL = all user's IPs allowed)
     source_ip_id = Column(Integer, ForeignKey("user_source_ips.id"), index=True)
@@ -219,6 +266,7 @@ class AccessPolicy(Base):
     
     # Relationships
     user = relationship("User", back_populates="access_policies")
+    user_group = relationship("UserGroup", back_populates="access_policies")
     source_ip_ref = relationship("UserSourceIP", back_populates="access_policies")
     target_group = relationship("ServerGroup", back_populates="access_policies")
     target_server = relationship("Server", back_populates="access_policies")
@@ -237,6 +285,10 @@ class AccessPolicy(Base):
             "(scope_type = 'group' AND target_group_id IS NOT NULL AND target_server_id IS NULL) OR "
             "(scope_type IN ('server', 'service') AND target_server_id IS NOT NULL AND target_group_id IS NULL)",
             name="check_scope_targets"
+        ),
+        CheckConstraint(
+            "(user_id IS NOT NULL AND user_group_id IS NULL) OR (user_id IS NULL AND user_group_id IS NOT NULL)",
+            name="check_user_or_group"
         ),
     )
 
@@ -328,6 +380,116 @@ class MP4ConversionQueue(Base):
     __table_args__ = (
         CheckConstraint("status IN ('pending', 'converting', 'completed', 'failed')", name="check_conversion_status"),
     )
+
+
+def get_all_user_groups(user_id, db):
+    """
+    Get all user groups recursively (including parent groups).
+    Uses BFS with cycle detection.
+    
+    Args:
+        user_id: User ID
+        db: Database session
+        
+    Returns:
+        set: Set of UserGroup IDs
+    """
+    visited = set()
+    queue = []
+    
+    # Get direct group memberships
+    direct_memberships = db.query(UserGroupMember).filter(
+        UserGroupMember.user_id == user_id
+    ).all()
+    
+    for membership in direct_memberships:
+        queue.append(membership.user_group_id)
+    
+    # BFS traversal with cycle detection
+    while queue:
+        group_id = queue.pop(0)
+        
+        if group_id in visited:
+            continue
+            
+        visited.add(group_id)
+        
+        # Get parent group
+        group = db.query(UserGroup).filter(UserGroup.id == group_id).first()
+        if group and group.parent_group_id:
+            if group.parent_group_id not in visited:
+                queue.append(group.parent_group_id)
+    
+    return visited
+
+
+def get_all_server_groups(server_id, db):
+    """
+    Get all server groups recursively (including parent groups).
+    Uses BFS with cycle detection.
+    
+    Args:
+        server_id: Server ID
+        db: Database session
+        
+    Returns:
+        set: Set of ServerGroup IDs
+    """
+    visited = set()
+    queue = []
+    
+    # Get direct group memberships
+    direct_memberships = db.query(ServerGroupMember).filter(
+        ServerGroupMember.server_id == server_id
+    ).all()
+    
+    for membership in direct_memberships:
+        queue.append(membership.group_id)
+    
+    # BFS traversal with cycle detection
+    while queue:
+        group_id = queue.pop(0)
+        
+        if group_id in visited:
+            continue
+            
+        visited.add(group_id)
+        
+        # Get parent group
+        group = db.query(ServerGroup).filter(ServerGroup.id == group_id).first()
+        if group and group.parent_group_id:
+            if group.parent_group_id not in visited:
+                queue.append(group.parent_group_id)
+    
+    return visited
+
+
+def validate_no_group_cycle(group_id, new_parent_id, db, model_class):
+    """
+    Validate that setting parent_group_id won't create a cycle.
+    
+    Args:
+        group_id: Group ID being modified
+        new_parent_id: New parent group ID
+        db: Database session
+        model_class: UserGroup or ServerGroup
+        
+    Raises:
+        ValueError: If cycle detected
+    """
+    if not new_parent_id:
+        return
+    
+    visited = {group_id}
+    current = new_parent_id
+    
+    while current:
+        if current in visited:
+            raise ValueError(f"Cycle detected: setting parent would create circular reference")
+        
+        visited.add(current)
+        parent = db.query(model_class).filter(model_class.id == current).first()
+        current = parent.parent_group_id if parent else None
 
 
 def init_db():

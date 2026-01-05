@@ -7,7 +7,8 @@ import logging
 
 from .database import (
     User, Server, AccessGrant, AuditLog, IPAllocation,
-    UserSourceIP, ServerGroup, ServerGroupMember, AccessPolicy, PolicySSHLogin
+    UserSourceIP, ServerGroup, ServerGroupMember, AccessPolicy, PolicySSHLogin,
+    UserGroup, UserGroupMember, get_all_user_groups, get_all_server_groups
 )
 
 logger = logging.getLogger(__name__)
@@ -148,9 +149,15 @@ class AccessControlEngineV2:
             # Step 3: Find matching policies
             now = datetime.utcnow()
             
-            # Base query: active policies for this user within valid time range
+            # Get all user groups (including parent groups)
+            user_group_ids = get_all_user_groups(user.id, db)
+            
+            # Base query: active policies for this user OR any of user's groups within valid time range
             base_query = db.query(AccessPolicy).filter(
-                AccessPolicy.user_id == user.id,
+                or_(
+                    AccessPolicy.user_id == user.id,
+                    AccessPolicy.user_group_id.in_(user_group_ids) if user_group_ids else False
+                ),
                 AccessPolicy.is_active == True,
                 AccessPolicy.start_time <= now,
                 AccessPolicy.end_time >= now
@@ -170,15 +177,14 @@ class AccessControlEngineV2:
             
             matching_policies = []
             
+            # Get all server groups (including parent groups)
+            server_group_ids = get_all_server_groups(server.id, db)
+            
             for policy in base_query:
                 # Check scope
                 if policy.scope_type == 'group':
-                    # Check if server belongs to target group
-                    is_member = db.query(ServerGroupMember).filter(
-                        ServerGroupMember.server_id == server.id,
-                        ServerGroupMember.group_id == policy.target_group_id
-                    ).first()
-                    if is_member:
+                    # Check if server belongs to target group (recursively)
+                    if policy.target_group_id in server_group_ids:
                         matching_policies.append(policy)
                         
                 elif policy.scope_type in ('server', 'service'):
