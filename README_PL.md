@@ -249,6 +249,7 @@ Szukaj: "denied"         → Wszystkie odmówione próby połączenia
 - ✅ **Odtwarzanie** - Przeglądaj przeszłe sesje
 - ✅ **Wyszukiwanie** - Znajdź sesje po użytkowniku, serwerze, czasie, statusie
 - ✅ **Auto-odświeżanie** - Dashboard co 5s, wyszukiwanie co 2s
+- ✅ **Wygaśnięcie grantu** - Sesje SSH przerywane po zakończeniu grantu (użytkownik dostaje wcześniejsze ostrzeżenie)
 
 ### Audytowanie
 - ✅ **Próby połączeń** - Zarówno udane jak i odmówione

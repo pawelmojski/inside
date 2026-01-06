@@ -249,6 +249,7 @@ Search: "denied"         → All denied connection attempts
 - ✅ **Playback** - Review past sessions
 - ✅ **Search** - Find sessions by user, server, time, status
 - ✅ **Auto-refresh** - Dashboard updates every 5s, search every 2s
+- ✅ **Grant expiration** - SSH sessions terminated when grant ends (users get advance warning)
 
 ### Auditing
 - ✅ **Connection attempts** - Both successful and denied
