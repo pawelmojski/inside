@@ -153,8 +153,8 @@ Critical Bugs Fixed:     3 (SSH login, RDP dest_ip, denied connections)
 👨‍💻 CREDITS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Developer:               Paweł Mojski (p.mojski@ideosoftware.com)
-Organization:            IDEO Software
+Developer:               Open Source
+Organization:            Open Source Project
 Release Date:            2026-01-04
 Version:                 1.0
 License:                 Proprietary - Internal Use Only

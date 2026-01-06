@@ -185,7 +185,7 @@ alembic upgrade head
 
 ## 📞 Support & Maintenance
 
-**Primary Contact**: p.mojski@ideosoftware.com  
+
 **Documentation**: See FLEXIBLE_ACCESS_CONTROL_V2.md for detailed API docs  
 **Logs**: `/var/log/jumphost/` (ssh/, rdp/, rdp_proxy.log)  
 **Database**: PostgreSQL on localhost:5432, database: jumphost

@@ -330,7 +330,7 @@ psql jumphost -c "SELECT * FROM ip_allocations;"
 
 ## 📞 Support
 
-**Contact**: p.mojski@ideosoftware.com  
+
 **Emergency Rollback**: Use full system rollback (Scenario 3)  
 **Documentation**: README.md, FLEXIBLE_ACCESS_CONTROL_V2.md, ROADMAP.md
 

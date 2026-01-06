@@ -442,7 +442,6 @@ git show v1.0
 
 ## 📞 Support
 
-**Contact:** p.mojski@ideosoftware.com  
 **Documentation:** See `FLEXIBLE_ACCESS_CONTROL_V2.md` for detailed API docs  
 **Logs:** `/var/log/jumphost/` (ssh/, rdp/, rdp_proxy.log)  
 **Database:** PostgreSQL on localhost:5432, database: jumphost
@@ -451,16 +450,14 @@ git show v1.0
 
 ## 📄 License
 
-Proprietary - Internal use only  
-© 2026 IDEO Software. All rights reserved.
+MIT License - See LICENSE file for details.
 
 ---
 
 ## 🏆 Credits
 
-**Development:** Paweł Mojski (p.mojski@ideosoftware.com)  
+**Development:** Open Source Project  
 **Testing:** Production validation with real-world scenarios  
-**Duration:** 4 days (rapid development cycle)  
 **Lines of Code:** ~3500 Python, ~500 SQL  
 **External Dependencies:** Paramiko, PyRDP, SQLAlchemy, PostgreSQL
 
