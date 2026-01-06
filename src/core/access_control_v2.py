@@ -171,6 +171,8 @@ class AccessControlEngineV2:
                     'user_ip': None,
                     'server': None,
                     'policies': [],
+                    'selected_policy': None,
+                    'denial_reason': 'unknown_source_ip',
                     'reason': f'Unknown source IP {source_ip}'
                 }
             
@@ -187,6 +189,8 @@ class AccessControlEngineV2:
                     'user_ip': user_ip,
                     'server': None,
                     'policies': [],
+                    'selected_policy': None,
+                    'denial_reason': 'user_inactive',
                     'reason': f'User not found or inactive'
                 }
             
@@ -200,6 +204,8 @@ class AccessControlEngineV2:
                     'user_ip': user_ip,
                     'server': None,
                     'policies': [],
+                    'selected_policy': None,
+                    'denial_reason': 'server_not_found',
                     'reason': f'No backend server for destination IP {dest_ip}'
                 }
             
@@ -276,6 +282,8 @@ class AccessControlEngineV2:
                             'user_ip': user_ip,
                             'server': server,
                             'policies': matching_policies,
+                            'selected_policy': matching_policies[0] if matching_policies else None,
+                            'denial_reason': 'ssh_login_not_allowed',
                             'reason': f'SSH login "{ssh_login}" not allowed by direct user policy'
                         }
                     
@@ -294,6 +302,8 @@ class AccessControlEngineV2:
                         'user_ip': user_ip,
                         'server': server,
                         'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'no_matching_policy',
                         'reason': 'No matching policy (user or group)'
                     }
                 
@@ -332,6 +342,8 @@ class AccessControlEngineV2:
                     'user_ip': user_ip,
                     'server': server,
                     'policies': [],
+                    'selected_policy': None,
+                    'denial_reason': 'no_matching_policy',
                     'reason': f'No matching access policy'
                 }
             
@@ -357,6 +369,8 @@ class AccessControlEngineV2:
                     'user_ip': user_ip,
                     'server': server,
                     'policies': matching_policies,  # Show which policies exist but are inactive
+                    'selected_policy': matching_policies[0] if matching_policies else None,
+                    'denial_reason': 'outside_schedule',
                     'reason': 'Outside allowed time windows'
                 }
             
@@ -392,6 +406,8 @@ class AccessControlEngineV2:
                         'user_ip': user_ip,
                         'server': server,
                         'policies': matching_policies,
+                        'selected_policy': matching_policies[0] if matching_policies else None,
+                        'denial_reason': 'ssh_login_not_allowed',
                         'reason': f'SSH login "{ssh_login}" not allowed by group policy'
                     }
                 
@@ -442,12 +458,16 @@ class AccessControlEngineV2:
                                     effective_end_time = schedule_end
                                     logger.info(f"Effective end_time adjusted to schedule window end: {schedule_end}")
             
+            # Select first matching policy for session tracking (OR logic - any policy grants access)
+            selected_policy = matching_policies[0] if matching_policies else None
+            
             return {
                 'has_access': True,
                 'user': user,
                 'user_ip': user_ip,
                 'server': server,
                 'policies': matching_policies,
+                'selected_policy': selected_policy,  # NEW v1.7.5: First matching policy for session tracking
                 'reason': 'Access granted',
                 'effective_end_time': effective_end_time  # NEW: earliest of policy end or schedule window end
             }
@@ -460,6 +480,8 @@ class AccessControlEngineV2:
                 'user_ip': None,
                 'server': None,
                 'policies': [],
+                'selected_policy': None,
+                'denial_reason': 'internal_error',
                 'reason': f'Internal error: {str(e)}'
             }
     

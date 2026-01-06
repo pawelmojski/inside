@@ -410,8 +410,14 @@ class Session(Base):
     is_active = Column(Boolean, default=True, index=True)
     termination_reason = Column(String(255))  # normal, timeout, error, killed
     
+    # Connection attempt tracking (v1.7.5)
+    connection_status = Column(String(30), default='active', index=True)  # tcp_connect, handshake, access_granted, denied, backend_connected, active, closed, timeout
+    denial_reason = Column(String(100), index=True)  # no_matching_policy, outside_schedule, policy_expired, wrong_source_ip, protocol_not_allowed, ssh_login_not_allowed, etc.
+    denial_details = Column(Text)  # Detailed explanation of denial
+    protocol_version = Column(String(50))  # SSH-2.0-OpenSSH_8.9, RDP 10.12, etc.
+    
     # Audit trail
-    policy_id = Column(Integer, ForeignKey("access_policies.id"))  # Which policy granted access
+    policy_id = Column(Integer, ForeignKey("access_policies.id"), index=True)  # Which policy granted access
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

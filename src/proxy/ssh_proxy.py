@@ -1755,6 +1755,14 @@ class SSHProxyServer:
                 recorder = SSHSessionRecorder(session_id, user.username, target_server.ip_address)
                 recorder.record_event('session_start', f"User {user.username} connecting to {target_server.ip_address}")
             
+            # Get policy_id from access_result
+            selected_policy = server_handler.access_result.get('selected_policy') if hasattr(server_handler, 'access_result') else None
+            policy_id = selected_policy.id if selected_policy else None
+            
+            # Get SSH protocol version from client
+            client_version = transport.remote_version if hasattr(transport, 'remote_version') else None
+            protocol_version = client_version.decode('utf-8') if isinstance(client_version, bytes) else str(client_version) if client_version else None
+            
             # Create session record in database
             db_session = DBSession(
                 session_id=session_id,
@@ -1770,7 +1778,10 @@ class SSHProxyServer:
                 ssh_agent_used=bool(server_handler.agent_channel),
                 started_at=datetime.utcnow(),
                 is_active=True,
-                recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None
+                recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
+                policy_id=policy_id,  # NEW v1.7.5: Track which policy granted access
+                connection_status='active',  # NEW v1.7.5: Connection status
+                protocol_version=protocol_version  # NEW v1.7.5: SSH client version
             )
             db.add(db_session)
             db.commit()
