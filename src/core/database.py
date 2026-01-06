@@ -33,9 +33,11 @@ class User(UserMixin, Base):
     # Relationships
     access_grants = relationship("AccessGrant", back_populates="user")
     source_ips = relationship("UserSourceIP", back_populates="user", cascade="all, delete-orphan")
-    access_policies = relationship("AccessPolicy", back_populates="user", cascade="all, delete-orphan")
+    access_policies = relationship("AccessPolicy", back_populates="user", cascade="all, delete-orphan", foreign_keys="[AccessPolicy.user_id]")
+    policies_created = relationship("AccessPolicy", back_populates="created_by", foreign_keys="[AccessPolicy.created_by_user_id]")
     sessions = relationship("SessionRecording", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")
+
 
 
 class Server(Base):
@@ -269,9 +271,11 @@ class AccessPolicy(Base):
     granted_by = Column(String(255))
     reason = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     
     # Relationships
-    user = relationship("User", back_populates="access_policies")
+    user = relationship("User", back_populates="access_policies", foreign_keys=[user_id])
+    created_by = relationship("User", back_populates="policies_created", foreign_keys=[created_by_user_id])
     user_group = relationship("UserGroup", back_populates="access_policies")
     source_ip_ref = relationship("UserSourceIP", back_populates="access_policies")
     target_group = relationship("ServerGroup", back_populates="access_policies")
@@ -345,6 +349,31 @@ class PolicySchedule(Base):
     
     # Relationships
     policy = relationship("AccessPolicy", back_populates="schedules")
+
+
+class PolicyAuditLog(Base):
+    """Audit trail for all policy changes (full history, no deletion allowed)."""
+    __tablename__ = "policy_audit_log"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    policy_id = Column(Integer, ForeignKey("access_policies.id", ondelete="CASCADE"), nullable=False, index=True)
+    changed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    
+    # Change tracking
+    change_type = Column(String(50), nullable=False, index=True)  # 'created', 'updated', 'revoked', 'renewed', 'schedule_added', etc.
+    field_name = Column(String(100))  # Which field changed (NULL for creation)
+    old_value = Column(Text)  # Old value as string
+    new_value = Column(Text)  # New value as string
+    
+    # Full state snapshots (for complex changes)
+    full_old_state = Column(postgresql.JSONB)  # Complete policy state before
+    full_new_state = Column(postgresql.JSONB)  # Complete policy state after
+    
+    changed_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    
+    # Relationships
+    policy = relationship("AccessPolicy")
+    changed_by = relationship("User", foreign_keys=[changed_by_user_id])
 
 
 class Session(Base):

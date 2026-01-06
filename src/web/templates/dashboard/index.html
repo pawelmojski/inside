@@ -299,44 +299,7 @@
     </div>
 </div>
 
-<!-- Recent Audit Log -->
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0"><i class="bi bi-clipboard-data"></i> Recent Activity</h5>
-                <a href="{{ url_for('monitoring.audit') }}" class="btn btn-sm btn-outline-primary">View All</a>
-            </div>
-            <div class="card-body">
-                {% if recent_logs %}
-                <div class="list-group list-group-flush">
-                    {% for log in recent_logs %}
-                    <div class="list-group-item audit-log-entry {{ 'success' if 'granted' in log.action else 'danger' if 'denied' in log.action else 'warning' }}">
-                        <div class="d-flex justify-content-between align-items-start">
-                            <div>
-                                <strong>{{ log.action.replace('_', ' ').title() }}</strong>
-                                <p class="mb-1">
-                                    {% if log.user %}User: {{ log.user.username }} | {% endif %}
-                                    Source: <code>{{ log.source_ip }}</code>
-                                    {% if log.details %} - {{ log.details }}{% endif %}
-                                </p>
-                            </div>
-                            <small class="text-muted">
-                                <span title="{{ log.timestamp|localtime if log.timestamp else '' }}">
-                                    {{ log.timestamp|timeago }}
-                                </span>
-                            </small>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <p class="text-muted mb-0">No recent activity</p>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-</div>
+<!-- Recent Activity section REMOVED - using Recent Sessions instead -->
 
 {% endblock %}
 

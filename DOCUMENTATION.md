@@ -81,7 +81,9 @@ Self-made SSH/RDP jump host with temporal access control, source IP mapping, ses
 │  │    - server_groups (tags/groups) ⭐                      │   │
 │  │    - server_group_members (N:M relationships) ⭐         │   │
 │  │    - access_policies (flexible permissions) ⭐           │   │
+│  │    - policy_schedules (recurring time windows) 🎯      │   │
 │  │    - policy_ssh_logins (SSH restrictions) ⭐             │   │
+│  │    - policy_audit_log (change history, JSONB) 🎯 NEW  │   │
 │  │    - ip_allocations (proxy IP assignments)               │   │
 │  │    - session_recordings (file paths)                     │   │
 │  │    - audit_logs (all actions logged)                     │   │
@@ -343,6 +345,43 @@ Recurring time-based access control for policies:
 - Timezone-aware: Converts UTC to policy timezone for comparison
 - **Smart Expiry**: `effective_end_time = min(policy.end_time, schedule_window_end)`
   - User gets warnings about schedule closing (e.g., 16:00 today), not distant policy expiry (e.g., Jan 31)
+
+### policy_audit_log (NEW in v1.7) ⭐
+Full audit trail for all policy changes with JSONB snapshots:
+- `id` (PK), `policy_id` (FK to access_policies, CASCADE delete)
+- `changed_by_user_id` (FK to users) - Admin who made the change
+- `change_type` (VARCHAR 50) - 'policy_updated', 'created', 'revoked', 'renewed', etc.
+- `field_name` (TEXT) - Specific field changed (NULL for full updates)
+- `old_value`, `new_value` (TEXT) - Field-level change tracking
+- `full_old_state` (JSONB) - Complete policy snapshot before change
+- `full_new_state` (JSONB) - Complete policy snapshot after change
+- `changed_at` (TIMESTAMP, default NOW())
+- **Indexes**: policy_id, changed_at, change_type
+
+**Features**:
+- Immutable audit trail (only admin can delete policy with CASCADE)
+- JSONB snapshots include: all fields, schedules array, SSH logins array
+- Field-level tracking: Can query specific field changes (e.g., end_time extensions)
+- Compliance: Full history of who changed what and when
+- **Policy Edit Integration**: Automatic logging on every policy update
+
+**JSONB Snapshot Example**:
+```json
+{
+  "user_id": 5,
+  "scope_type": "server",
+  "target_server_id": 12,
+  "protocol": "ssh",
+  "port_forwarding_allowed": true,
+  "start_time": "2026-01-01T00:00:00",
+  "end_time": "2026-02-01T23:59:00",
+  "use_schedules": true,
+  "ssh_logins": ["root", "admin"],
+  "schedules": [
+    {"id": 100, "name": "Business Hours", "weekdays": [0,1,2,3,4], "time_start": "08:00", "time_end": "16:00"}
+  ]
+}
+```
 
 ### sessions (NEW in v1.1) ⭐
 Real-time session tracking for active and historical connections:
@@ -1049,3 +1088,153 @@ When modifying the codebase:
 3. Check session recordings are created
 4. Update this documentation
 5. Update ROADMAP.md with progress
+---
+
+## Version History & Changelog
+
+### v1.7 - Policy Audit Trail & Edit System (January 2026)
+**Focus**: Comprehensive policy change tracking and easy schedule editing
+
+**New Features**:
+- ✅ **Policy Audit Trail**: Full change history with JSONB snapshots
+  - policy_audit_log table with CASCADE delete
+  - Tracks: changed_by_user_id, change_type, old/new values
+  - JSONB snapshots: full_old_state + full_new_state
+  - Immutable history (only admin can delete via CASCADE)
+- ✅ **Policy Editing**: Edit schedules without revoke/recreate
+  - GET /policies/<id>/edit - load policy with all schedules
+  - POST /policies/<id>/edit - save changes with audit logging
+  - JavaScript: Add/edit/remove schedules, keeps IDs on update
+  - Read-only: user/group and server/group (target locked)
+  - Editable: SSH logins, port forwarding, times, schedules
+- ✅ **Policy Creator Tracking**: created_by_user_id column
+  - Tracks who created policy (different from beneficiary)
+  - SQLAlchemy fix: Explicit foreign_keys for dual relationships
+  - User.access_policies (granted TO user) vs User.policies_created (created BY user)
+- ✅ **Security Hardening**: DELETE endpoints removed
+  - Policies: Only Revoke (end_time=NOW) or Renew (extend end_time)
+  - Sessions: Records preserved (MP4 cache deletion allowed)
+  - UI: Delete buttons removed, replaced with comments
+- ✅ **Dashboard Cleanup**: Recent Activity widget removed
+  - Kept: Recent Sessions widget (last 10 closed sessions)
+  - Reason: Audit logs not relevant for daily operations
+- ✅ **Schedule Display in List**: Tooltips showing all time windows
+  - Helper: format_policy_schedules_summary(policy)
+  - Single schedule: "Mon-Fri 08:00-16:00"
+  - Multiple: "Mon-Fri 8-16 (+2 more)" with full tooltip
+  - Bootstrap tooltips with HTML rendering
+  - JavaScript initialization on page load
+
+**Files Modified**:
+- Database: Manual SQL for policy_audit_log table + created_by_user_id column
+- Backend: database.py (PolicyAuditLog model, relationships fix)
+- Backend: policies.py (edit endpoint, format_schedules helper, DELETE removed)
+- Frontend: policies/edit.html (NEW, 489 lines, schedule management)
+- Frontend: policies/index.html (Edit button, schedule badges, tooltips)
+- Frontend: dashboard/index.html (Recent Activity removed)
+
+**Impact**:
+- Time savings: 10+ minutes editing 50-schedule policy (no revoke/recreate)
+- Compliance: Full audit trail with JSONB snapshots for investigations
+- UX: Edit button in list, schedule tooltips, cleaner dashboard
+
+### v1.6 - Schedule-Based Access Control (January 2026)
+**Focus**: Recurring time-based access control with timezone support
+
+**New Features**:
+- ✅ Policy schedules: Recurring time windows (weekdays, hours, months, days)
+- ✅ Multiple schedules per policy (OR logic)
+- ✅ Timezone support with pytz (Europe/Warsaw default)
+- ✅ Smart expiry warnings (schedule closing time, not distant policy end)
+- ✅ Web GUI schedule builder with validation
+- ✅ Business hours, maintenance windows, seasonal access
+
+**Files Modified**:
+- Database: policy_schedules table (CASCADE delete)
+- Backend: schedule_checker.py (NEW, 265 lines)
+- Backend: access_control_v2.py (Step 3.5, effective_end_time)
+- Frontend: policies/add.html (Section 6: schedule builder)
+
+### v1.5 - Grant Expiry Auto-Disconnect (January 2026)
+**Focus**: Automatic session termination with user warnings
+
+**New Features**:
+- ✅ Wall-style warnings: 5 minutes, 1 minute before expiry
+- ✅ Auto-disconnect: SSH channel closed at grant end_time
+- ✅ Background monitoring thread: 30-second checks
+- ✅ Graceful shutdown with expiry reason logging
+
+### v1.4 - SSH Port Forwarding & Policy Enhancements (January 2026)
+**Focus**: SSH tunneling control and policy management improvements
+
+**New Features**:
+- ✅ SSH port forwarding: -L (local), -R (remote), -D (SOCKS)
+- ✅ Per-policy control: port_forwarding_allowed flag
+- ✅ Session transfer tracking: port_forward_local/remote, socks_connection
+- ✅ Policy renew/reactivate: Extend or restart expired policies
+- ✅ Group filtering in policy list
+
+### v1.3 - RDP MP4 Conversion System (January 2026)
+**Focus**: Background video conversion for RDP sessions
+
+**New Features**:
+- ✅ Background worker queue (2 workers, systemd)
+- ✅ PyRDP converter with PySide6 (separate venv)
+- ✅ On-demand .pyrdp → .mp4 (10 FPS for file size optimization)
+- ✅ Queue management: 2 concurrent, 10 pending max
+- ✅ Priority "rush" button for urgent conversions
+- ✅ Progress tracking with ETA calculation
+- ✅ HTML5 video player with seeking
+
+**Files Modified**:
+- Backend: mp4_converter_worker.py (NEW, 400 lines)
+- Backend: sessions.py blueprint (convert endpoint, queue API)
+- Frontend: sessions/view.html (video player, progress bar)
+- Systemd: jumphost-mp4-converter@.service (template unit)
+
+### v1.2-dev - RDP Session Viewer (January 2026)
+**Focus**: RDP session metadata and JSON event extraction
+
+**New Features**:
+- ✅ RDP session metadata: Host, resolution, username, domain
+- ✅ JSON conversion with caching (pyrdp-convert -f json)
+- ✅ Event statistics: Keyboard, mouse event counts
+- ✅ Download support for .pyrdp files
+
+### v1.1 - Session Monitoring & Live View (January 2026)
+**Focus**: Real-time session tracking and live SSH viewer
+
+**New Features**:
+- ✅ Session history: Filter by protocol, status, user, server
+- ✅ Live SSH viewer: 2-second polling, terminal UI
+- ✅ Dashboard auto-refresh: 5-second AJAX updates
+- ✅ Active sessions widget with statistics
+- ✅ JSONL recording format for streaming
+- ✅ Systemd service integration (flask, ssh-proxy, rdp-proxy)
+
+**Files Modified**:
+- Database: sessions table (18 fields)
+- Backend: sessions.py blueprint (NEW, list/view/live endpoints)
+- Backend: ssh_proxy.py (JSONL recording, session tracking)
+- Frontend: sessions/* templates (list, view, live viewer)
+- Frontend: dashboard/index.html (Active Sessions widget)
+
+### v1.0 - Access Control V2 (December 2025)
+**Focus**: Policy-based authorization with flexible scopes
+
+**New Features**:
+- ✅ Policy-based authorization (group/server/service level)
+- ✅ Multiple source IPs per user
+- ✅ Protocol filtering (ssh/rdp/both)
+- ✅ SSH login restrictions
+- ✅ Temporal validation (start/end time)
+- ✅ Web GUI policy wizard
+
+### v0.9 - Real-time Session Tracking (December 2025)
+**Focus**: UTMP/WTMP integration and session database
+
+**New Features**:
+- ✅ UTMP/WTMP logging (ssh0-ssh99, rdp0-rdp99)
+- ✅ Custom `jw` command (view active sessions)
+- ✅ Database session tracking
+- ✅ Duration and recording size auto-calculation

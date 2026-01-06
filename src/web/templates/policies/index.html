@@ -131,8 +131,12 @@
                         </td>
                         <td>
                             {% if policy.use_schedules and policy.schedules %}
-                                <i class="bi bi-calendar-week text-primary"></i>
-                                <small class="text-muted">({{ policy.schedules|length }} rules)</small>
+                                {% set summary, tooltip = format_schedules(policy) %}
+                                <span class="badge bg-primary" data-bs-toggle="tooltip" data-bs-placement="top" 
+                                      data-bs-html="true" title="{{ tooltip|replace('\n', '<br>')|safe }}"
+                                      style="cursor: help;">
+                                    <i class="bi bi-calendar-week"></i> {{ summary }}
+                                </span>
                             {% elif policy.use_schedules %}
                                 <span class="badge bg-warning">Enabled but no rules</span>
                             {% else %}
@@ -159,6 +163,10 @@
                             {% endif %}
                         </td>
                         <td>
+                            <a href="{{ url_for('policies.edit', policy_id=policy.id) }}" 
+                               class="btn btn-sm btn-primary" title="Edit policy">
+                                <i class="bi bi-pencil"></i> Edit
+                            </a>
                             <form method="POST" action="{{ url_for('policies.renew', policy_id=policy.id) }}" 
                                   style="display: inline;">
                                 <input type="hidden" name="days" value="30">
@@ -172,12 +180,7 @@
                                     <i class="bi bi-x-circle"></i> Revoke
                                 </button>
                             </form>
-                            <form method="POST" action="{{ url_for('policies.delete', policy_id=policy.id) }}" 
-                                  style="display: inline;" onsubmit="return confirmDelete('delete this policy');">
-                                <button type="submit" class="btn btn-sm btn-danger" title="Delete">
-                                    <i class="bi bi-trash"></i>
-                                </button>
-                            </form>
+                            <!-- DELETE removed - policies cannot be deleted, only revoked -->
                         </td>
                     </tr>
                     {% else %}
@@ -194,3 +197,16 @@
     </div>
 </div>
 {% endblock %}
+
+{% block extra_js %}
+<script>
+// Enable Bootstrap tooltips
+document.addEventListener('DOMContentLoaded', function() {
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+});
+</script>
+{% endblock %}
+

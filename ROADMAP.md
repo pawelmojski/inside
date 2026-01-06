@@ -1,6 +1,6 @@
 # Jump Host Project - Roadmap & TODO
 
-## Current Status: v1.6 (Schedule-Based Access Control) - January 2026 ✅
+## Current Status: v1.7 (Policy Audit Trail & Edit System) - January 2026 ✅
 
 **Operational Services:**
 - ✅ SSH Proxy: `0.0.0.0:22` (systemd: jumphost-ssh-proxy.service)
@@ -16,9 +16,13 @@
 - ✅ SSH Port Forwarding: -L (local), -R (remote), -D (SOCKS) 🎯
 - ✅ Policy Management: Renew/Reactivate with group filtering 🎯
 - ✅ Grant Expiry Auto-Disconnect: Warnings & auto-termination 🎯
-- ✅ **Schedule-Based Access Control**: Recurring time windows with timezone support 🎯 NEW v1.6
+- ✅ Schedule-Based Access Control: Recurring time windows with timezone support 🎯
+- ✅ **Policy Audit Trail**: Full change history with JSONB snapshots 🎯 NEW v1.7
+- ✅ **Policy Editing**: Edit schedules without revoke/recreate 🎯 NEW v1.7
+- ✅ **Schedule Display**: Tooltips showing all time windows 🎯 NEW v1.7
 
 **Recent Milestones:**
+- v1.7: Policy Audit Trail & Edit System (January 2026) ✅ COMPLETED
 - v1.6: Schedule-Based Access Control (January 2026) ✅ COMPLETED
 - v1.5: Grant Expiry Auto-Disconnect with Warnings (January 2026) ✅ COMPLETED
 - v1.4: SSH Port Forwarding & Policy Enhancements (January 2026) ✅ COMPLETED
@@ -269,6 +273,267 @@ permanent → 0 (no expiry)
 **New Modules**: 1 (`duration_parser.py`)
 **User Experience**: Dramatically improved (no password prompts, flexible durations, scheduled grants)
 **Code Quality**: Cleaner, more maintainable (single duration field, early rejection pattern)
+
+---
+
+## ✅ COMPLETED: v1.7 - Policy Audit Trail & Edit System (January 2026)
+
+### 🎯 Goal: Comprehensive Policy Change Tracking & Easy Schedule Editing
+
+**Challenge Solved**: Policies with 50+ schedules required full revoke/recreate to add one window. No audit trail of who changed what. Dashboard showed confusing "Recent Activity" (audit logs). Schedule tooltips missing.
+
+### ✅ Delivered Features
+
+#### 1. Database Schema - policy_audit_log Table
+- **Table**: `policy_audit_log` with CASCADE delete on parent policy
+- **Columns**:
+  - `policy_id` (INTEGER FK) - Which policy was changed
+  - `changed_by_user_id` (INTEGER FK) - Who made the change (admin user ID)
+  - `change_type` (VARCHAR 50) - 'policy_updated', 'created', 'revoked', 'renewed'
+  - `field_name` (TEXT) - Specific field changed (NULL for full updates)
+  - `old_value`, `new_value` (TEXT) - Field-level changes
+  - `full_old_state` (JSONB) - Complete policy snapshot before
+  - `full_new_state` (JSONB) - Complete policy snapshot after
+  - `changed_at` (TIMESTAMP, default NOW())
+- **Indexes**: policy_id, changed_at, change_type for fast queries
+- **Migration**: Manual SQL execution after granting permissions to jumphost_user
+- **JSONB Snapshots**: Stores complete policy state including schedules, SSH logins, times
+
+#### 2. Policy Creator Tracking - created_by_user_id
+- **Column**: `access_policies.created_by_user_id` (INTEGER FK to users.id)
+- **Purpose**: Track who created each policy (different from user_id = beneficiary)
+- **Nullable**: Allows NULL for system-created policies
+- **Relationships**: 
+  - User.policies_created - policies this admin created
+  - User.access_policies - policies granted TO this user
+- **SQLAlchemy Fix**: Added explicit foreign_keys to resolve ambiguity:
+  ```python
+  User.access_policies = relationship(..., foreign_keys="[AccessPolicy.user_id]")
+  User.policies_created = relationship(..., foreign_keys="[AccessPolicy.created_by_user_id]")
+  AccessPolicy.user = relationship(..., foreign_keys=[user_id])
+  AccessPolicy.created_by = relationship(..., foreign_keys=[created_by_user_id])
+  ```
+- **Existing Data**: Set to admin user (ID=7) for all existing policies
+
+#### 3. Security Hardening - DELETE Endpoints Removed
+- **Policies**: DELETE endpoint removed from `/policies/` blueprint
+  - Old: DELETE button → immediate policy deletion
+  - New: Only Revoke (set end_time=NOW) or Renew (extend end_time)
+  - Comment: "policies cannot be deleted, only revoked"
+- **Sessions**: Session records preserved (MP4 cache deletion still allowed)
+- **Audit Trail**: Immutable history in policy_audit_log (CASCADE delete only when admin removes policy)
+- **UI Changes**: Delete button removed from policies/index.html
+
+#### 4. Dashboard Cleanup - Recent Activity Removed
+- **Removed**: "Recent Activity" widget showing audit_logs
+- **Reason**: Confusing for users, not relevant for daily operations
+- **Kept**: "Recent Sessions" widget (last 10 closed sessions with duration)
+- **Files Modified**:
+  - `templates/dashboard/index.html` - lines 303-345 removed
+  - `blueprints/dashboard.py` - recent_logs query removed
+
+#### 5. Schedule Display in Policy List
+- **Helper Function**: `format_policy_schedules_summary(policy)` returns (summary, tooltip)
+- **Display Logic**:
+  - 1 schedule: Full description ("Mon-Fri 08:00-16:00")
+  - Multiple: First + count ("Mon-Fri 8-16 (+2 more)")
+  - Disabled: "Schedule disabled" badge
+  - No rules: "No rules defined"
+- **Tooltip**: Bootstrap tooltip with HTML rendering showing all schedules line-by-line
+- **UI Components**:
+  - Badge with calendar icon in policy list table
+  - data-bs-toggle="tooltip" with formatted HTML
+  - JavaScript initialization on page load
+- **Files Modified**:
+  - `blueprints/policies.py` - lines 13-74 (helper function)
+  - `templates/policies/index.html` - lines 133-143 (badge), 199-207 (JS)
+
+#### 6. Policy Edit Endpoint - Full Schedule Management
+- **Endpoint**: GET `/policies/<id>/edit`
+  - Loads policy with all relationships (schedules, ssh_logins, groups)
+  - Converts schedules to JSON for JavaScript
+  - Pre-populates form with current values
+  - Read-only fields: user/group, server/group (cannot change target)
+- **Endpoint**: POST `/policies/<id>/edit`
+  - Captures old_state as JSONB snapshot (all fields + schedules)
+  - Updates editable fields: SSH logins, port_forwarding, start/end time
+  - Schedule management:
+    - Keeps existing schedule IDs for updates
+    - Adds new schedules (no ID = insert)
+    - Deletes removed schedules (not in updated list)
+  - Captures new_state as JSONB snapshot after changes
+  - Creates PolicyAuditLog entry with change_type='policy_updated'
+  - Logs changed_by_user_id (current Flask user)
+- **Template**: `templates/policies/edit.html`
+  - Based on add.html structure
+  - Pre-filled form fields
+  - Schedule list with Edit/Delete buttons per schedule
+  - JavaScript: editSchedule(index) - load schedule into form
+  - JavaScript: saveSchedule() - add or update (keeps ID)
+  - JavaScript: removeSchedule(index) - delete from array
+  - Cancel Edit button to reset form
+  - Status badge (Active/Inactive) per schedule
+
+#### 7. Edit Button in Policy List
+- **Location**: `templates/policies/index.html` actions column
+- **Button**: Primary styled "Edit" button before Renew
+- **Icon**: bi-pencil (Bootstrap Icons)
+- **Link**: `/policies/<id>/edit`
+
+### 📊 Use Cases Supported
+
+**Edit Schedule Without Revoke**:
+```
+Before: Policy with 50 schedules → Need to add 1 window
+Old way: Revoke entire policy → Create new → Re-enter all 50 schedules
+New way: Edit → Add 1 schedule → Save (50 existing kept, 1 new added)
+
+Benefit: Save 10+ minutes of re-entry work
+```
+
+**Audit Trail for Compliance**:
+```
+Scenario: Policy changed from 30 days to 60 days
+Question: Who extended access and when?
+
+Query policy_audit_log:
+- changed_by_user_id: 7 (admin@example.com)
+- changed_at: 2026-01-06 17:30:00
+- full_old_state: {"end_time": "2026-02-05T23:59:00"}
+- full_new_state: {"end_time": "2026-03-07T23:59:00"}
+```
+
+**Schedule Modification History**:
+```
+Policy #42 schedule changes:
+1. Created with Mon-Fri 8-16 (by admin, 2026-01-01)
+2. Added Sat 2-6 (+1 schedule, by admin, 2026-01-05)
+3. Changed Mon-Fri to 9-17 (edited schedule ID=100, by admin, 2026-01-06)
+
+All changes logged with JSONB snapshots in policy_audit_log
+```
+
+**Schedule Visibility in List**:
+```
+Policy list shows:
+- Policy #42: [📅 Mon-Fri 08:00-16:00 (+2 more)]
+- Hover tooltip shows:
+  Business Hours: Mon-Fri 08:00-16:00
+  Weekend Maintenance: Sat-Sun 02:00-06:00
+  Monthly Backup: First day of month 04:00-08:00
+```
+
+### 📁 Files Modified/Created
+
+**Database**:
+- Manual SQL: ALTER TABLE access_policies ADD created_by_user_id
+- Manual SQL: CREATE TABLE policy_audit_log with JSONB columns
+- Manual SQL: Indexes on policy_id, changed_at, change_type
+- Manual SQL: UPDATE existing policies SET created_by_user_id = 7 (admin)
+- Manual SQL: GRANT ALL on policy_audit_log to jumphost_user
+
+**Backend Models**:
+- `src/core/database.py`:
+  - Line 273: AccessPolicy.created_by_user_id column
+  - Lines 275-283: Both relationships with explicit foreign_keys
+  - Lines 32-38: User relationships (access_policies + policies_created)
+  - Lines 351-372: PolicyAuditLog model (JSONB fields)
+
+**Backend Blueprint**:
+- `src/web/blueprints/policies.py`:
+  - Lines 13-74: format_policy_schedules_summary() helper
+  - Line 107: Pass format_schedules to template
+  - Lines 76-260: edit() endpoint (GET + POST with audit logging)
+  - Lines 255-257: DELETE endpoint removed (replaced with comment)
+
+**Frontend Templates**:
+- `src/web/templates/policies/edit.html` (NEW, 489 lines):
+  - Pre-populated form with read-only grant details
+  - Schedule list with Edit/Delete buttons
+  - JavaScript for schedule management (add/edit/remove)
+  - Bootstrap tooltips for schedule display
+- `src/web/templates/policies/index.html`:
+  - Line 77: Schedule column in table header
+  - Lines 133-143: Schedule badge with tooltip
+  - Lines 166-168: Edit button before Renew
+  - Lines 175: DELETE button removed (comment)
+  - Lines 199-207: JavaScript for tooltip initialization
+- `src/web/templates/dashboard/index.html`:
+  - Lines 303-345: Recent Activity section removed
+
+**Migration Files**:
+- `alembic/versions/9a1b2c3d4e5f_add_policy_audit_trail.py` (NEW):
+  - Migration file structure (not executed via alembic)
+  - Manual SQL used instead for faster deployment
+
+### 🧪 Testing Results
+
+**Policy Edit**:
+- ✅ Load existing policy with 3 schedules → Form pre-populated
+- ✅ Edit schedule #1 (Mon-Fri 8-16 → 9-17) → ID preserved
+- ✅ Add new schedule (Sat 2-6) → New record created
+- ✅ Delete schedule #3 → Removed from database
+- ✅ Audit log created with full JSONB snapshots (before/after)
+
+**SQLAlchemy Relationships**:
+- ✅ User.access_policies (5 policies) → Works
+- ✅ User.policies_created (0 policies) → Works
+- ✅ No foreign key ambiguity errors
+- ✅ Both relationships query correctly
+
+**Schedule Display**:
+- ✅ Single schedule: "Mon-Fri 08:00-16:00"
+- ✅ Multiple schedules: "Mon-Fri 8-16 (+2 more)"
+- ✅ Tooltip shows all schedules line-by-line
+- ✅ Bootstrap tooltips initialize on page load
+- ✅ HTML rendering in tooltips works (<br> tags)
+
+**Security**:
+- ✅ DELETE button removed from UI
+- ✅ DELETE endpoint returns 404
+- ✅ Only Revoke (end_time=NOW) and Renew (extend end_time) available
+- ✅ Audit trail preserved (immutable history)
+
+**Dashboard**:
+- ✅ Recent Activity widget removed
+- ✅ Recent Sessions widget still present
+- ✅ No errors in Flask logs
+- ✅ Auto-refresh still works (5s interval)
+
+### 🐛 Issues Fixed
+
+1. **SQLAlchemy Foreign Key Ambiguity**
+   - Error: "Could not determine join condition between parent/child tables"
+   - Root cause: AccessPolicy has 2 FKs to User (user_id, created_by_user_id)
+   - Fix: Explicit foreign_keys in all 4 relationships (User + AccessPolicy)
+   - Test: Both relationships work independently
+
+2. **Policy Deletion Security**
+   - Issue: Policies could be permanently deleted, losing audit trail
+   - Fix: Remove DELETE endpoint, only allow Revoke (soft delete via end_time)
+   - Result: Full history preserved in policy_audit_log
+
+3. **Schedule Visibility**
+   - Issue: Policy list showed only "(3 rules)" without descriptions
+   - Fix: format_policy_schedules_summary() with tooltip
+   - Result: Users see schedule windows at a glance
+
+### 📈 Impact
+
+**Time Savings**:
+- Editing 1 schedule in 50-rule policy: ~10 minutes saved (no revoke/recreate)
+- Audit trail queries: Instant compliance reports (JSONB queries)
+
+**Data Integrity**:
+- All policy changes logged with full state snapshots
+- Immutable audit trail (CASCADE delete only)
+- created_by_user_id tracks policy ownership
+
+**User Experience**:
+- Edit button in policy list (easier discovery)
+- Schedule tooltips in list view (no need to open policy)
+- No DELETE confusion (only Revoke/Renew)
+- Cleaner dashboard (Recent Sessions only)
 
 ---
 

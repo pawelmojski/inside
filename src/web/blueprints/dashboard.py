@@ -34,10 +34,7 @@ def index():
     # Statistics
     stats = get_statistics(db)
     
-    # Recent audit log
-    recent_logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(10).all()
-    
-    # Active sessions (placeholder - would need real-time tracking)
+    # Active sessions
     active_sessions = get_active_sessions()
     
     # Recent closed sessions
@@ -63,7 +60,6 @@ def index():
     return render_template('dashboard/index.html',
                          services=services_status,
                          stats=stats,
-                         recent_logs=recent_logs,
                          active_sessions=active_sessions,
                          recent_sessions=recent_sessions,
                          server_allocations=server_allocations)
