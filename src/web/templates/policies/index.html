@@ -14,32 +14,43 @@
 <div class="card mb-3">
     <div class="card-body">
         <form method="GET" action="{{ url_for('policies.index') }}" class="row g-3">
-            <div class="col-md-4">
-                <label for="user_id" class="form-label">User</label>
-                <select class="form-select" id="user_id" name="user_id">
+            <div class="col-md-3">
+                <label for="user" class="form-label">User</label>
+                <select class="form-select" id="user" name="user">
                     <option value="">All users</option>
                     {% for user in users %}
-                    <option value="{{ user.id }}" {{ 'selected' if request.args.get('user_id') == user.id|string }}>
+                    <option value="{{ user.id }}" {{ 'selected' if user_filter == user.id|string }}>
                         {{ user.username }}
                     </option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
+                <label for="group" class="form-label">User Group</label>
+                <select class="form-select" id="group" name="group">
+                    <option value="">All groups</option>
+                    {% for group in user_groups %}
+                    <option value="{{ group.id }}" {{ 'selected' if group_filter == group.id|string }}>
+                        {{ group.name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
                 <label for="show_inactive" class="form-label">&nbsp;</label>
                 <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="show_inactive" name="show_inactive" value="1"
-                           {{ 'checked' if request.args.get('show_inactive') }}>
+                    <input class="form-check-input" type="checkbox" id="show_inactive" name="show_inactive" value="true"
+                           {{ 'checked' if show_inactive }}>
                     <label class="form-check-label" for="show_inactive">
-                        Show inactive/expired policies
+                        Show inactive/expired
                     </label>
                 </div>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label">&nbsp;</label>
                 <div>
                     <button type="submit" class="btn btn-primary">
-                        <i class="bi bi-filter"></i> Apply Filters
+                        <i class="bi bi-filter"></i> Filter
                     </button>
                     <a href="{{ url_for('policies.index') }}" class="btn btn-secondary">Clear</a>
                 </div>
@@ -134,10 +145,25 @@
                         </td>
                         <td>
                             {% if policy.is_active %}
+                            <form method="POST" action="{{ url_for('policies.renew', policy_id=policy.id) }}" 
+                                  style="display: inline;">
+                                <input type="hidden" name="days" value="30">
+                                <button type="submit" class="btn btn-sm btn-success" title="Renew for 30 days">
+                                    <i class="bi bi-arrow-clockwise"></i> Renew
+                                </button>
+                            </form>
                             <form method="POST" action="{{ url_for('policies.revoke', policy_id=policy.id) }}" 
                                   style="display: inline;" onsubmit="return confirmDelete('revoke this policy');">
                                 <button type="submit" class="btn btn-sm btn-warning" title="Revoke">
                                     <i class="bi bi-x-circle"></i> Revoke
+                                </button>
+                            </form>
+                            {% else %}
+                            <form method="POST" action="{{ url_for('policies.renew', policy_id=policy.id) }}" 
+                                  style="display: inline;">
+                                <input type="hidden" name="days" value="30">
+                                <button type="submit" class="btn btn-sm btn-info" title="Reactivate for 30 days">
+                                    <i class="bi bi-arrow-clockwise"></i> Reactivate
                                 </button>
                             </form>
                             {% endif %}

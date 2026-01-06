@@ -339,6 +339,32 @@ class AccessControlEngineV2:
                 'reason': f'Internal error: {str(e)}'
             }
     
+    def check_port_forwarding_allowed(self, db, source_ip: str, dest_ip: str) -> bool:
+        """Check if user has port forwarding permission for this server
+        
+        Returns True if ANY matching policy has port_forwarding_allowed=True
+        """
+        try:
+            # Use check_access_v2 to get matching policies
+            result = self.check_access_v2(db, source_ip, dest_ip, 'ssh', None)
+            
+            if not result['has_access']:
+                logger.warning(f"Port forwarding denied: No access to server")
+                return False
+            
+            # Check if any policy allows port forwarding
+            for policy in result['policies']:
+                if policy.port_forwarding_allowed:
+                    logger.info(f"Port forwarding allowed by policy {policy.id}")
+                    return True
+            
+            logger.warning(f"Port forwarding denied: No policy allows it")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking port forwarding: {e}", exc_info=True)
+            return False
+    
     def check_access_legacy_fallback(
         self,
         db: Session,

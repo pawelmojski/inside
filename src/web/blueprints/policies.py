@@ -18,6 +18,7 @@ def index():
     # Filter parameters
     show_inactive = request.args.get('show_inactive', 'false') == 'true'
     user_filter = request.args.get('user')
+    group_filter = request.args.get('group')
     
     query = db.query(AccessPolicy)
     
@@ -31,11 +32,16 @@ def index():
     if user_filter:
         query = query.filter(AccessPolicy.user_id == int(user_filter))
     
+    if group_filter:
+        query = query.filter(AccessPolicy.user_group_id == int(group_filter))
+    
     policies = query.order_by(AccessPolicy.created_at.desc()).all()
     users = db.query(User).order_by(User.username).all()
+    user_groups = db.query(UserGroup).order_by(UserGroup.name).all()
     
     return render_template('policies/index.html', policies=policies, users=users,
-                         show_inactive=show_inactive, user_filter=user_filter)
+                         user_groups=user_groups, show_inactive=show_inactive, 
+                         user_filter=user_filter, group_filter=group_filter)
 
 @policies_bp.route('/add', methods=['GET', 'POST'])
 @login_required
@@ -135,6 +141,41 @@ def revoke(policy_id):
     except Exception as e:
         db.rollback()
         flash(f'Error revoking policy: {str(e)}', 'danger')
+    
+    return redirect(url_for('policies.index'))
+
+@policies_bp.route('/renew/<int:policy_id>', methods=['POST'])
+@login_required
+def renew(policy_id):
+    """Renew policy - extend end_time by specified days"""
+    db = g.db
+    policy = db.query(AccessPolicy).filter(AccessPolicy.id == policy_id).first()
+    if not policy:
+        abort(404)
+    
+    try:
+        days = int(request.form.get('days', 30))
+        
+        # Reactivate if inactive
+        if not policy.is_active:
+            policy.is_active = True
+        
+        # Extend end_time
+        if policy.end_time:
+            # If end_time exists, extend from that date
+            policy.end_time = policy.end_time + timedelta(days=days)
+        else:
+            # If NULL (permanent), set end_time from now
+            policy.end_time = datetime.now() + timedelta(days=days)
+        
+        db.commit()
+        flash(f'Policy renewed for {days} days!', 'success')
+    except ValueError:
+        db.rollback()
+        flash('Invalid number of days', 'danger')
+    except Exception as e:
+        db.rollback()
+        flash(f'Error renewing policy: {str(e)}', 'danger')
     
     return redirect(url_for('policies.index'))
 

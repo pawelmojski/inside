@@ -211,9 +211,15 @@ class SSHProxyHandler(paramiko.ServerInterface):
         return "publickey,password"
     
     def check_channel_request(self, kind: str, chanid: int):
-        """Allow session channel requests"""
+        """Allow session, direct-tcpip (port forwarding -L) and dynamic-tcpip (SOCKS -D) channel requests"""
         logger.info(f"Channel request: kind={kind}, chanid={chanid}")
         if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED
+        elif kind == 'direct-tcpip':
+            # Port forwarding (-L local forward)
+            return paramiko.OPEN_SUCCEEDED
+        elif kind == 'dynamic-tcpip':
+            # SOCKS proxy (-D dynamic forward)
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     
@@ -255,6 +261,81 @@ class SSHProxyHandler(paramiko.ServerInterface):
         # Store the channel for later use
         self.agent_channel = channel
         return True
+    
+    def check_port_forward_request(self, address, port):
+        """Handle tcpip-forward requests for remote port forwarding (-R)
+        
+        For -R, we open the port locally on the jump host and forward 
+        connections to the client via SSH channel.
+        
+        Args:
+            address: Address to bind (usually '' or 'localhost')
+            port: Port to bind
+            
+        Note: SSH protocol does NOT send the destination (e.g. localhost:8080 from -R 9090:localhost:8080).
+        We only know the bind address/port. The destination is stored only on client side.
+        """
+        logger.info(f"Remote forward request: bind {address}:{port} (destination unknown - SSH protocol limitation)")
+        
+        # Check if user has port forwarding permission
+        access_control = AccessControl()
+        
+        allowed = access_control.check_port_forwarding_allowed(
+            self.db,
+            self.source_ip,
+            self.dest_ip
+        )
+        
+        if not allowed:
+            logger.warning(f"Remote port forwarding denied for source {self.source_ip}")
+            return False
+        
+        logger.info(f"Remote port forwarding allowed for {address}:{port}")
+        
+        # Store the request so we can open the port later
+        # (after we have the transport object)
+        # ASSUMPTION: We assume -R forwards to the same port (e.g. -R 9090:localhost:9090)
+        # because SSH protocol doesn't send destination in tcpip-forward message
+        if not hasattr(self, 'remote_forward_requests'):
+            self.remote_forward_requests = []
+        self.remote_forward_requests.append((address, port))
+        
+        return port  # Return the port that will be bound
+    
+    def cancel_port_forward_request(self, address, port):
+        """Handle cancel-tcpip-forward requests"""
+        logger.info(f"Cancel remote forward: {address}:{port}")
+        return True
+    
+    def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+        """Handle direct-tcpip requests for port forwarding (-L)
+        
+        Args:
+            chanid: Channel ID
+            origin: (host, port) where client is connecting from
+            destination: (host, port) where client wants to connect to
+        """
+        logger.info(f"Direct-TCPIP request: {origin} -> {destination}")
+        
+        # Check if user has port forwarding permission
+        access_control = AccessControl()
+        
+        allowed = access_control.check_port_forwarding_allowed(
+            self.db,
+            self.source_ip,
+            self.dest_ip
+        )
+        
+        if not allowed:
+            logger.warning(f"Port forwarding denied for source {self.source_ip}")
+            return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+        
+        # Store destination for the forwarding handler
+        self.forward_destinations = getattr(self, 'forward_destinations', {})
+        self.forward_destinations[chanid] = destination
+        
+        logger.info(f"Port forwarding allowed to {destination}")
+        return paramiko.OPEN_SUCCEEDED
 
 
 class SSHProxyServer:
@@ -320,6 +401,720 @@ class SSHProxyServer:
                     backend_channel.close()
             except:
                 pass
+    
+    def handle_port_forwarding(self, client_transport, backend_transport, server_handler, user, target_server):
+        """Handle port forwarding requests (-L, -R, -D)
+        
+        Monitors client transport for new channel requests and forwards them to backend.
+        This runs in a background thread while the main session is active.
+        """
+        try:
+            logger.info(f"Port forwarding handler started for {user.username}")
+            
+            # Wait for transport to become fully active
+            while not client_transport.is_active():
+                import time
+                time.sleep(0.1)
+            
+            # Continuously accept new forwarding channels
+            while client_transport.is_active():
+                try:
+                    # Accept new channel with short timeout
+                    channel = client_transport.accept(timeout=1.0)
+                    
+                    if channel is None:
+                        continue
+                    
+                    # Get the destination for this channel
+                    chanid = channel.get_id()
+                    destination = server_handler.forward_destinations.get(chanid)
+                    
+                    if not destination:
+                        logger.warning(f"No destination found for channel {chanid}")
+                        channel.close()
+                        continue
+                    
+                    dest_addr, dest_port = destination
+                    logger.info(f"Forwarding channel {chanid} to {dest_addr}:{dest_port}")
+                    
+                    # Open corresponding channel on backend
+                    try:
+                        # For direct-tcpip, we need to connect from backend to the target
+                        backend_channel = backend_transport.open_channel(
+                            'direct-tcpip',
+                            (dest_addr, dest_port),
+                            ('127.0.0.1', 0)  # Our address from backend's perspective
+                        )
+                        
+                        # Start forwarding in a new thread
+                        forward_thread = threading.Thread(
+                            target=self.forward_port_channel,
+                            args=(channel, backend_channel, dest_addr, dest_port),
+                            daemon=True
+                        )
+                        forward_thread.start()
+                        logger.info(f"Started forwarding thread for {dest_addr}:{dest_port}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to open backend channel: {e}")
+                        channel.close()
+                        
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        logger.debug(f"Accept error: {e}")
+            
+            logger.info("Port forwarding handler exiting (transport inactive)")
+            
+        except Exception as e:
+            logger.error(f"Port forwarding handler error: {e}", exc_info=True)
+    
+    def handle_reverse_forwarding(self, client_transport, backend_transport, server_handler, port_map):
+        """Handle reverse port forwarding (-R) from backend to client
+        
+        Args:
+            port_map: Dict mapping backend port -> (client_addr, client_port)
+        
+        When someone connects to a port on backend that was opened by -R,
+        backend sends us a channel that we need to forward to client.
+        """
+        try:
+            logger.info("Reverse forwarding handler started")
+            
+            # Wait for backend transport to become active
+            while not backend_transport.is_active():
+                import time
+                time.sleep(0.1)
+            
+            # Accept channels from backend
+            while backend_transport.is_active() and client_transport.is_active():
+                try:
+                    # Accept channel from backend with timeout
+                    backend_channel = backend_transport.accept(timeout=1.0)
+                    
+                    if backend_channel is None:
+                        continue
+                    
+                    logger.info(f"Got reverse forward channel from backend")
+                    
+                    # Get channel info - for forwarded-tcpip, paramiko should have this
+                    # We need to extract where backend wants us to connect
+                    origin = getattr(backend_channel, 'origin_addr', ('unknown', 0))
+                    
+                    logger.info(f"Reverse forward from backend: {origin}")
+                    
+                    # Open channel to client - this should trigger client to connect locally
+                    # For -R, client expects forwarded-tcpip channel
+                    try:
+                        # We need to forward this back to client
+                        # The client will handle connecting to its local service
+                        
+                        # Just forward the existing backend channel to client
+                        # Client transport should accept this as forwarded-tcpip
+                        
+                        # Start forwarding thread
+                        forward_thread = threading.Thread(
+                            target=self.forward_reverse_channel,
+                            args=(client_transport, backend_channel, origin, port_map),
+                            daemon=True
+                        )
+                        forward_thread.start()
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to setup reverse forward: {e}")
+                        backend_channel.close()
+                        
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        logger.debug(f"Reverse accept error: {e}")
+            
+            logger.info("Reverse forwarding handler exiting")
+            
+        except Exception as e:
+            logger.error(f"Reverse forwarding handler error: {e}", exc_info=True)
+    
+    def forward_reverse_channel(self, client_transport, backend_channel, origin, port_map):
+        """Forward a reverse channel from backend to client
+        
+        Args:
+            port_map: Dict mapping backend port -> (client_addr, client_port)
+        
+        When someone connects to the forwarded port on backend, backend opens
+        a channel to us. We need to relay this to the client, which will
+        connect to its local service.
+        """
+        try:
+            # For now, if we only have one mapping, use it
+            if len(port_map) == 1:
+                dest_addr, dest_port = list(port_map.values())[0]
+                logger.info(f"Using single port mapping: {dest_addr}:{dest_port}")
+            else:
+                logger.error(f"Multiple port mappings not yet supported: {port_map}")
+                backend_channel.close()
+                return
+            
+            # Instead of trying to open SSH channel to client (which fails),
+            # we need to make client open a channel to US and connect to localhost:8080
+            # The way to do this is to send a forwarded-tcpip channel request
+            
+            # Try using the proper paramiko method for server-initiated forwarded-tcpip
+            try:
+                # Get the Transport object's  channel open method
+                # We need to manually craft the channel open request
+                from paramiko import Channel
+                from paramiko.common import cMSG_CHANNEL_OPEN
+                
+                # Create a new channel on client transport
+                chanid = client_transport._next_channel()
+                chan = Channel(chanid)
+                client_transport._channels.put(chanid, chan)
+                
+                m = paramiko.Message()
+                m.add_byte(cMSG_CHANNEL_OPEN)
+                m.add_string('forwarded-tcpip')
+                m.add_int(chanid)
+                m.add_int(chan.in_window_size)
+                m.add_int(chan.in_max_packet_size)
+                m.add_string(dest_addr)  # Address to connect to on client
+                m.add_int(dest_port)  # Port to connect to on client
+                m.add_string(origin[0])  # Origin address
+                m.add_int(origin[1])  # Origin port
+                
+                client_transport._send_user_message(m)
+                chan._wait_for_event()
+                
+                logger.info(f"Opened forwarded-tcpip channel to client {dest_addr}:{dest_port}")
+                
+                # Forward data
+                self.forward_port_channel(backend_channel, chan, dest_addr, dest_port)
+                
+            except Exception as e:
+                logger.error(f"Failed to open forwarded-tcpip: {e}, traceback:", exc_info=True)
+                backend_channel.close()
+            
+        except Exception as e:
+            logger.error(f"Reverse forward channel error: {e}")
+            backend_channel.close()
+    
+    def forward_port_channel(self, client_channel, backend_channel, dest_addr, dest_port):
+        """Forward data between port forwarding channels (no recording)"""
+        try:
+            logger.info(f"Forwarding data for {dest_addr}:{dest_port}")
+            
+            while True:
+                if client_channel.closed or backend_channel.closed:
+                    break
+                
+                r, w, x = select.select([client_channel, backend_channel], [], [], 1.0)
+                
+                if client_channel in r:
+                    data = client_channel.recv(4096)
+                    if len(data) == 0:
+                        break
+                    backend_channel.send(data)
+                
+                if backend_channel in r:
+                    data = backend_channel.recv(4096)
+                    if len(data) == 0:
+                        break
+                    client_channel.send(data)
+        
+        except Exception as e:
+            logger.debug(f"Port forward channel ended: {e}")
+        
+        finally:
+            logger.info(f"Closing forward channel for {dest_addr}:{dest_port}")
+            try:
+                if not client_channel.closed:
+                    client_channel.close()
+            except:
+                pass
+            try:
+                if not backend_channel.closed:
+                    backend_channel.close()
+            except:
+                pass
+    
+    def handle_pool_ip_to_localhost_forward(self, pool_ip, port, client_transport):
+        """Forward connections from pool IP to client via SSH forwarded-tcpip channel
+        
+        Pool IP listener accepts connections (e.g. from backend) and opens 
+        forwarded-tcpip channels to the client.
+        
+        Args:
+            pool_ip: IP address from pool (e.g. 10.0.160.129)
+            port: Port to forward
+            client_transport: Client's SSH transport for opening channels
+        """
+        import socket
+        
+        try:
+            # Create listening socket on pool IP
+            listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_sock.bind((pool_ip, port))
+            listen_sock.listen(5)
+            listen_sock.settimeout(1.0)
+            
+            logger.info(f"Listening on {pool_ip}:{port}, forwarding via SSH to client")
+            
+            # Accept connections and forward to client via SSH channel
+            while client_transport.is_active():
+                try:
+                    conn, conn_addr = listen_sock.accept()
+                    logger.info(f"Connection from {conn_addr} to {pool_ip}:{port}")
+                    
+                    # Open forwarded-tcpip channel to client
+                    # SSH protocol limitation: we don't know the actual destination from -R request
+                    # We assume client used -R port:localhost:port (same port for bind and destination)
+                    try:
+                        client_channel = client_transport.open_channel(
+                            'forwarded-tcpip',
+                            ('localhost', port),  # Assumed destination - same port as bind
+                            (conn_addr[0], conn_addr[1])  # Originator (who connected)
+                        )
+                        
+                        logger.info(f"Opened forwarded-tcpip channel to client for {conn_addr}")
+                        
+                        # Relay data bidirectionally between socket and channel
+                        def relay_socket_to_channel(sock, chan):
+                            try:
+                                while True:
+                                    r, _, _ = select.select([sock, chan], [], [], 1.0)
+                                    
+                                    if sock in r:
+                                        data = sock.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        chan.send(data)
+                                    
+                                    if chan in r:
+                                        data = chan.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        sock.send(data)
+                            except Exception as e:
+                                logger.debug(f"Relay ended: {e}")
+                            finally:
+                                try:
+                                    sock.close()
+                                except:
+                                    pass
+                                try:
+                                    chan.close()
+                                except:
+                                    pass
+                        
+                        relay_thread = threading.Thread(
+                            target=relay_socket_to_channel,
+                            args=(conn, client_channel),
+                            daemon=True
+                        )
+                        relay_thread.start()
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to open channel to client: {e}")
+                        conn.close()
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if client_transport.is_active():
+                        logger.error(f"Accept error on {pool_ip}:{port}: {e}")
+                    break
+            
+            logger.info(f"Pool IP listener on {pool_ip}:{port} exiting")
+            listen_sock.close()
+            
+        except Exception as e:
+            logger.error(f"Pool IP listener error on {pool_ip}:{port}: {e}", exc_info=True)
+    
+    def handle_cascaded_reverse_forward(self, client_transport, backend_transport, server_handler):
+        """Handle cascaded -R forward: backend -> jump -> client
+        
+        When backend opens a forwarded channel to us (because someone connected
+        to backend:port), we need to forward it to pool IP listener which will
+        then open forwarded-tcpip channel to client.
+        """
+        try:
+            logger.info("Cascaded reverse forward handler started")
+            
+            pool_ip = server_handler.dest_ip  # Get pool IP for this session
+            
+            while backend_transport.is_active() and client_transport.is_active():
+                try:
+                    # Accept channel from backend
+                    backend_channel = backend_transport.accept(timeout=1.0)
+                    
+                    if backend_channel is None:
+                        continue
+                    
+                    logger.info(f"Got cascaded -R channel from backend")
+                    
+                    # Get port info
+                    if hasattr(server_handler, 'remote_forward_requests') and len(server_handler.remote_forward_requests) > 0:
+                        dest_addr, dest_port = server_handler.remote_forward_requests[0]
+                        
+                        # Connect to pool IP listener (which will forward to client)
+                        try:
+                            import socket
+                            jump_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            jump_sock.connect((pool_ip, dest_port))
+                            
+                            logger.info(f"Connected to pool IP {pool_ip}:{dest_port}, forwarding data")
+                            
+                            # Forward data between backend channel and pool IP socket
+                            def forward_cascade(backend_chan, local_sock):
+                                try:
+                                    while True:
+                                        r, _, _ = select.select([backend_chan, local_sock], [], [], 1.0)
+                                        
+                                        if backend_chan in r:
+                                            data = backend_chan.recv(4096)
+                                            if len(data) == 0:
+                                                break
+                                            local_sock.send(data)
+                                        
+                                        if local_sock in r:
+                                            data = local_sock.recv(4096)
+                                            if len(data) == 0:
+                                                break
+                                            backend_chan.send(data)
+                                except Exception as e:
+                                    logger.debug(f"Cascade forward ended: {e}")
+                                finally:
+                                    try:
+                                        local_sock.close()
+                                    except:
+                                        pass
+                                    try:
+                                        backend_chan.close()
+                                    except:
+                                        pass
+                            
+                            forward_thread = threading.Thread(
+                                target=forward_cascade,
+                                args=(backend_channel, jump_sock),
+                                daemon=True
+                            )
+                            forward_thread.start()
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to connect to pool IP {pool_ip}:{dest_port}: {e}")
+                            backend_channel.close()
+                    else:
+                        logger.error("No remote forward requests stored")
+                        backend_channel.close()
+                    
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        logger.error(f"Cascade accept error: {e}")
+            
+            logger.info("Cascaded reverse forward handler exiting")
+            
+        except Exception as e:
+            logger.error(f"Cascaded reverse forward error: {e}", exc_info=True)
+    
+    def handle_reverse_forward_on_backend_ip(self, client_transport, backend_ip, address, port):
+        """Open socket listener on backend's IP address from pool
+        
+        For -R 9090:localhost:8080:
+        - Client sends -R request
+        - We open socket on backend_ip:9090 (e.g. 10.0.160.4:9090)
+        - Backend connects to localhost:9090 (which resolves to 10.0.160.4:9090 via routing)
+        - We forward connection to client via SSH
+        - Client connects to its localhost:8080
+        
+        Args:
+            client_transport: SSH transport to client
+            backend_ip: IP address from pool assigned to this backend
+            address: Bind address (usually '' or 'localhost')
+            port: Port to bind
+        """
+        import socket
+        
+        try:
+            # Create listening socket on backend's IP
+            listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Bind to backend IP (from pool) so backend can connect to it
+            listen_sock.bind((backend_ip, port))
+            listen_sock.listen(5)
+            listen_sock.settimeout(1.0)
+            
+            logger.info(f"Listening on backend IP {backend_ip}:{port} for -R forward to client")
+            
+            # Accept connections while client is connected
+            while client_transport.is_active():
+                try:
+                    conn, conn_addr = listen_sock.accept()
+                    logger.info(f"Reverse forward connection from {conn_addr} to {backend_ip}:{port}")
+                    
+                    # Open channel to client - use direct-tcpip instead of forwarded-tcpip
+                    # Client will connect to localhost:port
+                    try:
+                        # direct-tcpip: tell client to connect to destination
+                        client_chan = client_transport.open_channel(
+                            'direct-tcpip',
+                            ('localhost', port),  # Destination on client
+                            conn_addr  # Our address (source)
+                        )
+                        
+                        logger.info(f"Opened direct-tcpip channel to client localhost:{port}, forwarding data")
+                        
+                        # Forward data between socket and SSH channel
+                        def forward_socket_to_channel(sock, chan):
+                            try:
+                                while True:
+                                    r, _, _ = select.select([sock, chan], [], [], 1.0)
+                                    
+                                    if sock in r:
+                                        data = sock.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        chan.send(data)
+                                    
+                                    if chan in r:
+                                        data = chan.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        sock.send(data)
+                            except Exception as e:
+                                logger.debug(f"Forward ended: {e}")
+                            finally:
+                                try:
+                                    sock.close()
+                                except:
+                                    pass
+                                try:
+                                    chan.close()
+                                except:
+                                    pass
+                        
+                        forward_thread = threading.Thread(
+                            target=forward_socket_to_channel,
+                            args=(conn, client_chan),
+                            daemon=True
+                        )
+                        forward_thread.start()
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to open channel to client: {e}")
+                        conn.close()
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if client_transport.is_active():
+                        logger.error(f"Accept error on {backend_ip}:{port}: {e}")
+                    break
+            
+            logger.info(f"Reverse forward listener on {backend_ip}:{port} exiting")
+            listen_sock.close()
+            
+        except Exception as e:
+            logger.error(f"Reverse forward listener error on {backend_ip}:{port}: {e}", exc_info=True)
+    
+    def handle_backend_socket_forward(self, client_transport, backend_ip, address, port):
+        """Open a socket listener on backend via SSH and forward to client
+        
+        This is a workaround for -R through proxy. We can't use SSH -R to backend
+        because client doesn't know to accept the forwarded-tcpip channels.
+        
+        Instead, we:
+        1. SSH to backend and run: nc -l -p 9090
+        2. Accept connections  
+        3. Forward each connection to client via forwarded-tcpip
+        
+        Actually, simpler: use SSH dynamic forward to create a listening port
+        """
+        import socket
+        import paramiko
+        
+        try:
+            # Connect to backend via SSH and open a remote tunnel
+            logger.info(f"Opening socket listener on backend {backend_ip}:{port}")
+            
+            # Create SSH connection to backend
+            backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            backend_sock.connect((backend_ip, 22))
+            
+            backend_trans = paramiko.Transport(backend_sock)
+            backend_trans.start_client()
+            
+            # TODO: We need credentials here... this won't work without them
+            # This approach is too complex
+            
+            logger.error("Backend socket forward not yet fully implemented")
+            backend_trans.close()
+            
+        except Exception as e:
+            logger.error(f"Backend socket forward error: {e}", exc_info=True)
+    
+    def handle_reverse_forwarding_v2(self, client_transport, backend_transport, server_handler):
+        """Accept forwarded connections from backend and forward to client
+        
+        For -R 9090:localhost:8080:
+        - Backend has port 9090 open
+        - When someone connects, backend opens channel to us
+        - We accept it and connect via socket to client's localhost:8080
+        """
+        try:
+            logger.info("Reverse forwarding v2 handler started")
+            
+            # Build port mapping: we need to know which backend port maps to which client destination
+            port_map = {}
+            if hasattr(server_handler, 'remote_forward_requests'):
+                for dest_addr, dest_port in server_handler.remote_forward_requests:
+                    # For -R 9090:localhost:8080, backend port 9090 -> client localhost:8080
+                    port_map[dest_port] = (dest_addr if dest_addr else 'localhost', dest_port)
+                    logger.info(f"Port mapping: backend {dest_port} -> client {dest_addr}:{dest_port}")
+            
+            while backend_transport.is_active() and client_transport.is_active():
+                try:
+                    # Accept channel from backend
+                    backend_channel = backend_transport.accept(timeout=1.0)
+                    
+                    if backend_channel is None:
+                        continue
+                    
+                    # Get origin info from channel
+                    origin = getattr(backend_channel, 'origin_addr', ('unknown', 0))
+                    logger.info(f"Got reverse forward channel from backend, origin={origin}")
+                    
+                    # For now, if we only have one mapping, use it
+                    if len(port_map) == 1:
+                        dest_addr, dest_port = list(port_map.values())[0]
+                        server_port = list(port_map.keys())[0]
+                        logger.info(f"Forwarding to client {dest_addr}:{dest_port} (from backend port {server_port})")
+                        
+                        # Open forwarded-tcpip channel to client
+                        # Parameters according to paramiko docs:
+                        # - src_addr: (src_addr, src_port) of the incoming connection (origin)
+                        # - dest_addr: (dest_addr, dest_port) of the forwarded server
+                        try:
+                            client_channel = client_transport.open_forwarded_tcpip_channel(
+                                origin,  # Source: who connected to backend
+                                ('', server_port)  # Dest: where backend was listening
+                            )
+                            
+                            logger.info(f"Opened forwarded-tcpip channel to client, forwarding data")
+                            
+                            # Forward data
+                            forward_thread = threading.Thread(
+                                target=self.forward_port_channel,
+                                args=(backend_channel, client_channel, dest_addr, dest_port),
+                                daemon=True
+                            )
+                            forward_thread.start()
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to open channel to client: {e}")
+                            backend_channel.close()
+                    else:
+                        logger.error(f"Multiple port mappings not yet supported: {port_map}")
+                        backend_channel.close()
+                    
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        logger.error(f"Reverse accept error: {e}")
+            
+            logger.info("Reverse forwarding v2 handler exiting")
+            
+        except Exception as e:
+            logger.error(f"Reverse forwarding v2 error: {e}", exc_info=True)
+    
+    def handle_reverse_forward_listener(self, client_transport, address, port, dest_addr, dest_port):
+        """Listen on a port and forward connections to SSH client
+        
+        This implements the server side of SSH -R (remote forward).
+        We open a socket, listen for connections, and for each connection
+        we open a forwarded-tcpip channel to the client.
+        
+        Args:
+            client_transport: SSH transport to client
+            address: Address to bind ('', 'localhost', etc)
+            port: Port to bind
+            dest_addr: Destination address on client side (e.g. 'localhost')
+            dest_port: Destination port on client side (e.g. 8080)
+        """
+        import socket
+        
+        try:
+            # Create listening socket
+            listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            bind_addr = '0.0.0.0' if address == '' else address
+            listen_sock.bind((bind_addr, port))
+            listen_sock.listen(5)
+            listen_sock.settimeout(1.0)  # Timeout for accept
+            
+            logger.info(f"Listening for reverse forward on {bind_addr}:{port} -> client {dest_addr}:{dest_port}")
+            
+            # Accept connections while client is connected
+            while client_transport.is_active():
+                try:
+                    conn, conn_addr = listen_sock.accept()
+                    logger.info(f"Reverse forward connection from {conn_addr}")
+                    
+                    # Open forwarded-tcpip channel to client
+                    # Client will connect to dest_addr:dest_port locally
+                    try:
+                        # Use direct method to open channel
+                        client_chan = client_transport.open_channel(
+                            'forwarded-tcpip',
+                            (dest_addr, dest_port),
+                            conn_addr
+                        )
+                        
+                        logger.info(f"Opened forwarded-tcpip to client for {dest_addr}:{dest_port}")
+                        
+                        # Forward data in background thread
+                        def forward_socket_to_channel(sock, chan):
+                            try:
+                                while True:
+                                    r, _, _ = select.select([sock, chan], [], [], 1.0)
+                                    
+                                    if sock in r:
+                                        data = sock.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        chan.send(data)
+                                    
+                                    if chan in r:
+                                        data = chan.recv(4096)
+                                        if len(data) == 0:
+                                            break
+                                        sock.send(data)
+                            except:
+                                pass
+                            finally:
+                                sock.close()
+                                chan.close()
+                        
+                        forward_thread = threading.Thread(
+                            target=forward_socket_to_channel,
+                            args=(conn, client_chan),
+                            daemon=True
+                        )
+                        forward_thread.start()
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to open channel to client: {e}")
+                        conn.close()
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if client_transport.is_active():
+                        logger.error(f"Accept error: {e}")
+                    break
+            
+            logger.info(f"Reverse forward listener on port {port} exiting")
+            listen_sock.close()
+            
+        except Exception as e:
+            logger.error(f"Reverse forward listener error: {e}", exc_info=True)
     
     def handle_client(self, client_socket, client_addr):
         """Handle incoming client connection"""
@@ -442,8 +1237,55 @@ class SSHProxyServer:
                 channel.close()
                 return
             
+            # For -R (remote forward): Open listener on pool IP and forward to client
+            # 
+            # Flow: Backend localhost:9090 -> Jump(pool-ip):9090 -> Client localhost:8080
+            # 
+            # 1. Backend has -R 9090:localhost:9090 which forwards to jump pool IP
+            # 2. Jump listens on pool IP (e.g. 10.0.160.129:9090)
+            # 3. Jump opens forwarded-tcpip channel to client
+            # 4. Client forwards to their localhost:8080 (as specified in -R 9090:localhost:8080)
+            if hasattr(server_handler, 'remote_forward_requests'):
+                pool_ip = server_handler.dest_ip  # IP from pool
+                for address, port in server_handler.remote_forward_requests:
+                    # Start listener on pool IP
+                    listener_thread = threading.Thread(
+                        target=self.handle_pool_ip_to_localhost_forward,
+                        args=(pool_ip, port, transport),
+                        daemon=True
+                    )
+                    listener_thread.start()
+                    logger.info(f"Started -R listener on pool IP {pool_ip}:{port} -> client")
+                    
+                    # Also ask backend to forward to jump host
+                    try:
+                        bound_port = backend_transport.request_port_forward(address, port)
+                        logger.info(f"Cascaded -R: backend:{bound_port} -> jump:{port}")
+                    except Exception as e:
+                        logger.error(f"Failed to setup cascaded -R for port {port}: {e}")
+            
             # Open backend channel
             backend_channel = backend_transport.open_session()
+            
+            # Start port forwarding handler in background thread
+            # This will handle any -L/-R/-D requests from client
+            forward_thread = threading.Thread(
+                target=self.handle_port_forwarding,
+                args=(transport, backend_transport, server_handler, user, target_server),
+                daemon=True
+            )
+            forward_thread.start()
+            logger.info("Port forwarding handler started")
+            
+            # For cascaded -R, accept channels from backend and forward to client
+            if hasattr(server_handler, 'remote_forward_requests'):
+                cascade_thread = threading.Thread(
+                    target=self.handle_cascaded_reverse_forward,
+                    args=(transport, backend_transport, server_handler),
+                    daemon=True
+                )
+                cascade_thread.start()
+                logger.info("Cascaded reverse forward handler started")
             
             # Setup PTY if client requested it (for interactive sessions)
             if server_handler.pty_term:
@@ -577,8 +1419,45 @@ class SSHProxyServer:
             server_socket.close()
 
 
+def cleanup_stale_sessions():
+    """Clean up active sessions from previous runs on startup"""
+    try:
+        from src.core.database import SessionLocal, Session
+        from datetime import datetime
+        
+        db = SessionLocal()
+        try:
+            # Find all active sessions (is_active=True or ended_at=NULL)
+            stale_sessions = db.query(Session).filter(
+                (Session.is_active == True) | (Session.ended_at == None)
+            ).all()
+            
+            if stale_sessions:
+                now = datetime.utcnow()
+                for session in stale_sessions:
+                    session.is_active = False
+                    session.ended_at = now
+                    session.termination_reason = 'service_restart'
+                    
+                    # Calculate duration if we have start time
+                    if session.started_at:
+                        session.duration_seconds = int((now - session.started_at).total_seconds())
+                
+                db.commit()
+                logger.info(f"Cleaned up {len(stale_sessions)} stale sessions from previous run")
+            else:
+                logger.info("No stale sessions to clean up")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Failed to clean up stale sessions: {e}")
+
+
 def main():
     """Main entry point"""
+    # Clean up stale sessions from previous runs
+    cleanup_stale_sessions()
+    
     proxy = SSHProxyServer(host='0.0.0.0', port=22)  # Listen on all interfaces
     proxy.start()
 

@@ -425,6 +425,76 @@ Real-time session tracking for active and historical connections:
 /opt/jumphost/venv/bin/python src/cli/jumphost_cli.py list-grants
 ```
 
+## SSH Port Forwarding (v1.4+) 🎯
+
+### Local Forward (-L)
+Forward local port through jump to backend destination:
+```bash
+# Forward local 2222 to backend SSH (via jump)
+ssh -A -L 2222:backend.local:22 p.mojski@10.0.160.129
+
+# In another terminal
+ssh -p 2222 user@localhost  # Connects to backend through jump
+
+# Forward local 8080 to backend web server
+ssh -A -L 8080:backend.local:80 p.mojski@10.0.160.129
+curl http://localhost:8080  # Access backend web via jump
+```
+
+### Remote Forward (-R)
+Make local port accessible on backend (exits from backend):
+```bash
+# Make client's localhost:8080 accessible on backend:9090
+ssh -A -R 9090:localhost:8080 p.mojski@10.0.160.129
+
+# On client, start HTTP server
+python3 -m http.server 8080
+
+# On backend
+curl localhost:9090  # Gets data from client's HTTP server
+
+# Forward external service through client
+ssh -A -R 9093:external.com:25 p.mojski@10.0.160.129
+# Backend can now telnet localhost:9093 to reach external.com:25 via client
+```
+
+### Dynamic SOCKS (-D)
+Use jump+backend as SOCKS proxy (exits from backend):
+```bash
+# Start SOCKS proxy on localhost:8123
+ssh -A -D 8123 p.mojski@10.0.160.129
+
+# Use SOCKS proxy with curl
+curl --socks5 localhost:8123 http://example.com
+
+# Use SOCKS proxy with Firefox
+# Preferences → Network Settings → Manual proxy
+# SOCKS Host: localhost, Port: 8123, SOCKS v5
+
+# Use with proxychains
+# Edit /etc/proxychains.conf: socks5 127.0.0.1 8123
+proxychains wget http://example.com
+```
+
+### Permission Requirements
+Port forwarding requires `port_forwarding_allowed=True` in access policy:
+```python
+# Enable in database
+policy.port_forwarding_allowed = True
+
+# Or via Web GUI (Policies → Add/Edit)
+# Check "Allow Port Forwarding" checkbox
+```
+
+### Architecture Notes
+- **-L**: Standard direct-tcpip, jump forwards to backend
+- **-R**: Cascaded architecture via pool IP binding
+  - Jump opens listener on pool IP (e.g. 10.0.160.129:9090)
+  - Backend requests -R to jump's pool IP
+  - Traffic: Backend → Jump pool IP → Jump localhost → Client
+- **-D**: Client parses SOCKS, sends direct-tcpip per connection
+- **Pool IP**: Each session gets unique IP, allows multiple backends same ports
+
 ## Session Recording
 
 ### SSH Sessions
@@ -448,12 +518,19 @@ Real-time session tracking for active and historical connections:
 - [x] Shell sessions
 - [x] Exec requests (SCP, tracked in session metadata) ⭐
 - [x] Subsystem requests (SFTP, tracked in session metadata) ⭐
-- [x] Live session recording (JSONL format) 🎯 NEW
+- [x] Live session recording (JSONL format) 🎯
 - [x] Source IP-based access control
 - [x] Temporal access validation
 - [x] Real-time session monitoring 🎯
 - [x] UTMP/WTMP logging (ssh0-ssh99) 🎯
-- [x] Systemd service with auto-restart 🎯 NEW
+- [x] Systemd service with auto-restart 🎯
+- [x] **SSH Port Forwarding** 🎯 NEW (v1.4)
+  - [x] Local forward (-L): `ssh -L 2222:backend:22 user@jump`
+  - [x] Remote forward (-R): `ssh -R 9090:localhost:8080 user@jump`
+  - [x] Dynamic SOCKS (-D): `ssh -D 8123 user@jump`
+  - [x] Per-policy permission control (`port_forwarding_allowed` flag)
+  - [x] Cascaded -R architecture (jump pool IP → backend → client)
+  - [x] Pool IP binding for multi-backend support
 
 ### RDP Proxy ✓
 - [x] PyRDP MITM with session recording and real-time tracking ⭐

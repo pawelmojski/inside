@@ -1,6 +1,6 @@
 # Jump Host Project - Roadmap & TODO
 
-## Current Status: v1.4 (Recursive Groups & Enhanced Policies) - January 2026 ✅
+## Current Status: v1.4 (SSH Port Forwarding & Enhanced Policies) - January 2026 ✅
 
 **Operational Services:**
 - ✅ SSH Proxy: `0.0.0.0:22` (systemd: jumphost-ssh-proxy.service)
@@ -11,11 +11,13 @@
 - ✅ Session Monitoring: Real-time tracking with live view (SSH + RDP MP4)
 - ✅ Auto-Refresh Dashboard: 5-second updates via AJAX
 - ✅ RDP MP4 Conversion: Background queue with progress tracking
-- ✅ Recursive User Groups: Hierarchical permissions with inheritance 🎯 NEW
-- ✅ Port Forwarding Control: Per-policy SSH forwarding permissions 🎯 NEW
+- ✅ Recursive User Groups: Hierarchical permissions with inheritance 🎯
+- ✅ Port Forwarding Control: Per-policy SSH forwarding permissions 🎯
+- ✅ SSH Port Forwarding: -L (local), -R (remote), -D (SOCKS) 🎯 NEW
+- ✅ Policy Management: Renew/Reactivate with group filtering 🎯 NEW
 
 **Recent Milestones:**
-- v1.4: Recursive Groups & Enhanced Policies (January 2026) ✅ COMPLETED
+- v1.4: SSH Port Forwarding & Policy Enhancements (January 2026) ✅ COMPLETED
 - v1.3: RDP MP4 Conversion System (January 2026) ✅ COMPLETED
 - v1.2-dev: RDP Session Viewer (January 2026) ✅ COMPLETED
 - v1.1: Session History & Live View (January 2026) ✅ COMPLETED
@@ -131,6 +133,109 @@ Live view available in web GUI
 - Added tooltips with dd-mm-yyyy format to all timestamps
 - Fixed JSONL recording to write immediately (not at session end)
 - Fixed Flask becoming slow (added caching)
+
+---
+
+## ✅ COMPLETED: v1.4 - SSH Port Forwarding & Policy Enhancements (January 2026)
+
+### 🎯 Goal: Complete SSH Port Forwarding Support (-L, -R, -D)
+
+**Challenge Solved**: SSH port forwarding through proxy requires special handling because:
+1. **-L (Local forward)**: Standard `direct-tcpip` channels work naturally
+2. **-R (Remote forward)**: Protocol limitation - destination not sent in tcpip-forward, requires cascaded architecture
+3. **-D (SOCKS)**: Client handles SOCKS parsing, sends `direct-tcpip` for each connection
+
+### ✅ Delivered Features
+
+#### 1. SSH Local Forward (-L) Support
+- **Usage**: `ssh -A -L 2222:backend:22 user@jump`
+- **Mechanism**: Client opens `direct-tcpip` channels through jump to backend
+- **Implementation**: 
+  - `check_channel_direct_tcpip_request()` validates and stores destination
+  - `handle_port_forwarding()` accepts channels and opens backend connections
+  - `forward_port_channel()` bidirectional data relay with select()
+- **Permission**: Per-policy `port_forwarding_allowed` flag
+- **Status**: ✅ Working - tested with SSH and HTTP forwarding
+
+#### 2. SSH Remote Forward (-R) Support - Cascaded Architecture
+- **Usage**: `ssh -A -R 9090:localhost:8080 user@jump`
+- **Challenge**: SSH protocol doesn't send destination in tcpip-forward request
+- **Architecture**: 
+  ```
+  Client -R 9090:localhost:8080 → Jump pool IP:9090 → Backend localhost:9090 → Jump → Client
+  ```
+- **Implementation**:
+  - Jump opens listener on pool IP (e.g. 10.0.160.129:9090)
+  - Backend requests `-R 9090:localhost:9090` to jump
+  - Pool IP listener forwards to client via `forwarded-tcpip` channels
+  - `handle_cascaded_reverse_forward()` accepts backend channels
+- **Permission**: Per-policy `port_forwarding_allowed` flag
+- **Status**: ✅ Working - tested with HTTP server and external SMTP
+- **Limitation**: Assumes same port for bind and destination (SSH protocol)
+
+#### 3. SSH Dynamic Forward (-D) SOCKS Support
+- **Usage**: `ssh -A -D 8123 user@jump`
+- **Mechanism**: 
+  - Client has built-in SOCKS server on localhost:8123
+  - Client parses SOCKS requests and opens `direct-tcpip` channels
+  - Jump forwards each connection to backend via existing -L mechanism
+- **Channel Type**: `dynamic-tcpip` (added to `check_channel_request()`)
+- **Implementation**: Reuses existing `direct-tcpip` infrastructure
+- **Permission**: Per-policy `port_forwarding_allowed` flag
+- **Status**: ✅ Working - tested with curl --socks5
+
+#### 4. Policy Management Enhancements
+- **Renew Endpoint**: `POST /policies/renew/<id>` extends policy by N days (default 30)
+- **Reactivate**: Inactive policies can be renewed (sets `is_active=True`)
+- **Group Filtering**: Added user group filter in policy list view
+- **UI Changes**:
+  - Green "Renew" button for active policies
+  - Blue "Reactivate" button for inactive policies
+  - User Group dropdown filter alongside User filter
+- **Status**: ✅ Working - tested with policy renewal and group filtering
+
+#### 5. Stale Session Cleanup
+- **Function**: `cleanup_stale_sessions()` runs on SSH proxy startup
+- **Action**: Sets `is_active=False`, `ended_at=now`, `termination_reason='service_restart'`
+- **Purpose**: Clean database state after service crashes/restarts
+- **Status**: ✅ Working
+
+### 📁 Modified Files
+- `src/proxy/ssh_proxy.py`:
+  - Added `check_channel_direct_tcpip_request()` for -L validation
+  - Added `check_port_forward_request()` for -R handling
+  - Added `handle_pool_ip_to_localhost_forward()` for pool IP listener
+  - Added `handle_cascaded_reverse_forward()` for backend channel relay
+  - Added `cleanup_stale_sessions()` for startup cleanup
+  - Modified `check_channel_request()` to accept `dynamic-tcpip`
+- `src/web/blueprints/policies.py`:
+  - Added `renew()` endpoint for policy extension
+  - Modified `index()` to support group filtering
+- `src/web/templates/policies/index.html`:
+  - Added User Group filter dropdown
+  - Added Renew/Reactivate buttons
+  - Fixed filter parameter names
+
+### 📊 Testing Results
+- **SSH -L**: ✅ Local forward working (tested: -L 2222:backend:22)
+- **SSH -R**: ✅ Remote forward working (tested: -R 9090:localhost:8080, -R 9093:las.init1.pl:25)
+- **SSH -D**: ✅ SOCKS proxy working (tested: curl --socks5 localhost:8123 http://example.com)
+- **Policy Renew**: ✅ Extends end_time by 30 days
+- **Policy Reactivate**: ✅ Sets is_active=True and extends
+- **Group Filter**: ✅ Shows policies for selected user group
+- **Stale Cleanup**: ✅ Cleans sessions on restart
+
+### 🐛 Issues Fixed
+- Fixed port forwarding permission check (requires `port_forwarding_allowed=True`)
+- Fixed variable name error (`client_transport` vs `transport` scope)
+- Fixed -R destination assumption (uses same port due to SSH protocol limitation)
+- Fixed cascade forward to connect to pool IP instead of localhost
+- Fixed double listener on localhost (removed unnecessary listener)
+
+### 📝 Technical Notes
+- **-R Limitation**: SSH protocol doesn't send destination in tcpip-forward message, only bind address/port. Jump assumes client used same port for both (e.g. `-R 9090:localhost:9090`). This works because client stores the actual mapping internally and ignores the destination we send in `forwarded-tcpip` channel.
+- **Pool IP Binding**: Each session gets unique pool IP, allowing multiple backends to use same port numbers without conflicts.
+- **Cascaded Architecture**: Backend doesn't know about client - it only sees jump. Jump handles the relay transparently.
 
 ---
 
