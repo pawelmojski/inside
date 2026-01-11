@@ -45,6 +45,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'gates' in request.endpoint %}active{% endif %}" 
+                           href="{{ url_for('gates.list') }}">
+                            <i class="bi bi-hdd-network"></i> Gates
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {% if request.endpoint and 'groups' in request.endpoint and 'user_groups' not in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('groups.index') }}">
                             <i class="bi bi-collection-fill"></i> Server Groups
@@ -66,6 +72,12 @@
                         <a class="nav-link {% if request.endpoint and 'sessions' in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('sessions.index') }}">
                             <i class="bi bi-clock-history"></i> Sessions
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'stays' in request.endpoint and 'stays_api' not in request.endpoint %}active{% endif %}" 
+                           href="{{ url_for('stays.list') }}">
+                            <i class="bi bi-door-open"></i> Stays
                         </a>
                     </li>
                     <li class="nav-item">
@@ -96,7 +108,7 @@
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" 
                            data-bs-toggle="dropdown" aria-expanded="false">
-                            <i class="bi bi-person-circle"></i> {{ current_user.username }}
+                            <i class="bi bi-person-circle"></i> {{ current_user.full_name or current_user.username }}
                         </a>
                         <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userDropdown">
                             <li><a class="dropdown-item" href="#"><i class="bi bi-gear"></i> Settings</a></li>

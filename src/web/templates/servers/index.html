@@ -23,6 +23,7 @@
                         <th>Protocols</th>
                         <th>Groups</th>
                         <th>Status</th>
+                        <th>Maintenance</th>
                         <th>Created</th>
                         <th>Actions</th>
                     </tr>
@@ -38,31 +39,48 @@
                             {% endif %}
                         </td>
                         <td>
-                            <code>{{ server.address }}:{{ server.port }}</code>
+                            <code>{{ server.ip_address }}</code>
                         </td>
                         <td>
-                            {% if server.ip_allocation %}
-                                <span class="badge bg-success">{{ server.ip_allocation.proxy_ip }}</span>
+                            {% if server.ip_allocations|length > 0 %}
+                                {% for alloc in server.ip_allocations[:3] %}
+                                <span class="badge bg-success">{{ alloc.allocated_ip }}</span>
+                                {% endfor %}
+                                {% if server.ip_allocations|length > 3 %}
+                                <span class="badge bg-secondary">+{{ server.ip_allocations|length - 3 }}</span>
+                                {% endif %}
                             {% else %}
                                 <span class="badge bg-secondary">Not allocated</span>
                             {% endif %}
                         </td>
                         <td>
-                            {% if server.ssh_enabled %}
-                                <span class="badge bg-info">SSH</span>
-                            {% endif %}
-                            {% if server.rdp_enabled %}
-                                <span class="badge bg-info">RDP</span>
-                            {% endif %}
+                            <span class="badge bg-info">SSH:{{ server.ssh_port }}</span>
+                            <span class="badge bg-info">RDP:{{ server.rdp_port }}</span>
                         </td>
                         <td>
-                            <span class="badge bg-secondary">{{ server.group_members|length }} groups</span>
+                            {% if server.group_memberships|length > 0 %}
+                            <span class="badge bg-secondary">{{ server.group_memberships|length }} groups</span>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
                         </td>
                         <td>
                             {% if server.is_active %}
-                                <span class="badge badge-active">Active</span>
+                                <span class="badge bg-success">Active</span>
                             {% else %}
-                                <span class="badge badge-inactive">Inactive</span>
+                                <span class="badge bg-danger">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if server.in_maintenance %}
+                            <span class="badge bg-warning text-dark">
+                                <i class="bi bi-tools"></i> In Maintenance
+                            </span>
+                            {% if server.maintenance_scheduled_at %}
+                            <br><small class="text-muted">Until: {{ server.maintenance_scheduled_at|localtime }}</small>
+                            {% endif %}
+                            {% else %}
+                            <span class="badge bg-secondary">No</span>
                             {% endif %}
                         </td>
                         <td>{{ server.created_at.strftime('%Y-%m-%d') }}</td>
@@ -75,17 +93,20 @@
                                class="btn btn-sm btn-warning" title="Edit">
                                 <i class="bi bi-pencil"></i>
                             </a>
-                            <form method="POST" action="{{ url_for('servers.delete', server_id=server.id) }}" 
-                                  style="display: inline;" onsubmit="return confirmDelete('server {{ server.name }}');">
-                                <button type="submit" class="btn btn-sm btn-danger" title="Delete">
-                                    <i class="bi bi-trash"></i>
-                                </button>
-                            </form>
+                            {% if server.in_maintenance %}
+                            <button class="btn btn-sm btn-success" onclick="exitMaintenance({{ server.id }}, '{{ server.name }}')" title="Exit Maintenance">
+                                <i class="bi bi-check-circle"></i>
+                            </button>
+                            {% elif server.is_active %}
+                            <button class="btn btn-sm btn-danger" onclick="enterMaintenance({{ server.id }}, '{{ server.name }}')" title="Maintenance">
+                                <i class="bi bi-tools"></i>
+                            </button>
+                            {% endif %}
                         </td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="9" class="text-center text-muted py-4">
+                        <td colspan="10" class="text-center text-muted py-4">
                             <i class="bi bi-inbox" style="font-size: 2rem;"></i>
                             <p class="mt-2">No servers found. Add your first server!</p>
                         </td>
@@ -96,4 +117,209 @@
         </div>
     </div>
 </div>
+
+<!-- Maintenance Modal -->
+<div class="modal fade" id="maintenanceModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Schedule Maintenance Mode</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Schedule maintenance for server <strong id="serverName"></strong>:</p>
+                
+                <div class="mb-3">
+                    <label class="form-label">Maintenance Start Time:</label>
+                    <div class="input-group">
+                        <input type="datetime-local" class="form-control" id="scheduledAt" required />
+                        <button class="btn btn-outline-secondary" type="button" onclick="setNow()">
+                            <i class="bi bi-clock"></i> Now
+                        </button>
+                    </div>
+                    <small class="text-muted">When maintenance begins (your local time)</small>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Grace Period (minutes):</label>
+                    <input type="range" class="form-range" id="graceMinutes" min="5" max="60" value="15" step="5" />
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">5 min</small>
+                        <strong><span id="graceValue">15</span> minutes</strong>
+                        <small class="text-muted">60 min</small>
+                    </div>
+                    <small class="text-muted">New logins blocked <span id="graceValue2">15</span> minutes before maintenance</small>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Reason:</label>
+                    <input type="text" class="form-control" id="maintenanceReason" value="Scheduled server maintenance" />
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Maintenance Personnel (optional):</label>
+                    <select class="form-select" id="personnelSelect" multiple size="5">
+                        {% for user in users %}
+                        <option value="{{ user.id }}">{{ user.full_name or user.username }} ({{ user.username }})</option>
+                        {% endfor %}
+                    </select>
+                    <small class="text-muted">Hold Ctrl/Cmd to select multiple. These users can login during maintenance.</small>
+                </div>
+                
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle"></i> 
+                    <strong>Timeline:</strong>
+                    <ul class="mb-0 mt-2">
+                        <li>Grace period starts <strong><span id="graceValue3">15</span> minutes before</strong> - new logins blocked</li>
+                        <li>Maintenance starts at <strong>scheduled time</strong> - existing sessions disconnected</li>
+                        <li>Selected personnel can login during grace period and maintenance</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" onclick="confirmMaintenance()">
+                    <i class="bi bi-tools"></i> Schedule Maintenance
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let selectedServerId = null;
+
+function setNow() {
+    const scheduledInput = document.getElementById('scheduledAt');
+    if (scheduledInput) {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        scheduledInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+}
+
+// Update grace value displays
+document.addEventListener('DOMContentLoaded', function() {
+    const graceInput = document.getElementById('graceMinutes');
+    if (graceInput) {
+        graceInput.addEventListener('input', function() {
+            const value = this.value;
+            document.getElementById('graceValue').textContent = value;
+            document.getElementById('graceValue2').textContent = value;
+            document.getElementById('graceValue3').textContent = value;
+        });
+    }
+    
+    // Set default time to 1 hour from now
+    const scheduledInput = document.getElementById('scheduledAt');
+    if (scheduledInput) {
+        const now = new Date();
+        now.setHours(now.getHours() + 1);
+        now.setMinutes(0);
+        now.setSeconds(0);
+        // Format as local datetime-local value (YYYY-MM-DDTHH:MM)
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        scheduledInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+        
+        const minNow = new Date();
+        const minYear = minNow.getFullYear();
+        const minMonth = String(minNow.getMonth() + 1).padStart(2, '0');
+        const minDay = String(minNow.getDate()).padStart(2, '0');
+        const minHours = String(minNow.getHours()).padStart(2, '0');
+        const minMinutes = String(minNow.getMinutes()).padStart(2, '0');
+        scheduledInput.min = `${minYear}-${minMonth}-${minDay}T${minHours}:${minMinutes}`;
+    }
+});
+
+function enterMaintenance(serverId, serverName) {
+    selectedServerId = serverId;
+    document.getElementById('serverName').textContent = serverName;
+    const modal = new bootstrap.Modal(document.getElementById('maintenanceModal'));
+    modal.show();
+}
+
+function exitMaintenance(serverId, serverName) {
+    if (!confirm(`Exit maintenance mode for ${serverName}?\n\nThis will:\n- Allow all users to login\n- Cancel scheduled disconnections\n- Clear maintenance personnel`)) {
+        return;
+    }
+    
+    fetch(`/servers/${serverId}/maintenance`, {
+        method: 'DELETE',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(`Maintenance mode ended for ${serverName}`);
+            location.reload();
+        } else {
+            alert('Error: ' + (data.message || data.error));
+        }
+    })
+    .catch(error => {
+        alert('Error exiting maintenance: ' + error);
+    });
+}
+
+function confirmMaintenance() {
+    const scheduledAtLocal = document.getElementById('scheduledAt').value;
+    const graceMinutes = parseInt(document.getElementById('graceMinutes').value);
+    const reason = document.getElementById('maintenanceReason').value;
+    const personnelSelect = document.getElementById('personnelSelect');
+    const personnelIds = Array.from(personnelSelect.selectedOptions).map(opt => parseInt(opt.value));
+    
+    if (!scheduledAtLocal) {
+        alert('Please select maintenance start time');
+        return;
+    }
+    
+    // Convert local datetime to UTC ISO string
+    const scheduledAt = new Date(scheduledAtLocal).toISOString();
+    
+    fetch(`/servers/${selectedServerId}/maintenance`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            scheduled_at: scheduledAt,
+            grace_minutes: graceMinutes,
+            reason: reason,
+            personnel_ids: personnelIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const graceTime = new Date(data.grace_starts_at).toLocaleString();
+            const maintenanceTime = new Date(data.scheduled_at).toLocaleString();
+            const personnelInfo = data.maintenance_personnel.length > 0 
+                ? `\nMaintenance personnel: ${data.maintenance_personnel.join(', ')}`
+                : '';
+            alert(`Maintenance scheduled successfully!\n\n` +
+                  `Grace period starts: ${graceTime}\n` +
+                  `Maintenance starts: ${maintenanceTime}\n` +
+                  `Affected sessions: ${data.affected_sessions}${personnelInfo}`);
+            location.reload();
+        } else {
+            alert('Error: ' + (data.message || data.error));
+        }
+    })
+    .catch(error => {
+        alert('Error scheduling maintenance: ' + error);
+    });
+    
+    bootstrap.Modal.getInstance(document.getElementById('maintenanceModal')).hide();
+}
+</script>
 {% endblock %}

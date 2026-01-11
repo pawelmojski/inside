@@ -20,7 +20,7 @@
                     <option value="">All users</option>
                     {% for user in users %}
                     <option value="{{ user.id }}" {{ 'selected' if user_filter == user.id|string }}>
-                        {{ user.username }}
+                        {{ user.full_name or user.username }}
                     </option>
                     {% endfor %}
                 </select>
@@ -85,7 +85,7 @@
                         <td>
                             {% if policy.user_id %}
                                 <a href="{{ url_for('users.view', user_id=policy.user.id) }}">
-                                    <i class="bi bi-person"></i> {{ policy.user.username }}
+                                    <i class="bi bi-person"></i> {{ policy.user.full_name or policy.user.username }}
                                 </a>
                             {% elif policy.user_group_id %}
                                 <a href="{{ url_for('user_groups.view', group_id=policy.user_group.id) }}">

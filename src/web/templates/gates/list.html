@@ -1,0 +1,431 @@
+{% extends "base.html" %}
+
+{% block title %}Gates - Inside{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="bi bi-hdd-network"></i> Gates</h2>
+        <a href="{{ url_for('gates.add') }}" class="btn btn-primary">
+            <i class="bi bi-plus-circle"></i> Add Gate
+        </a>
+    </div>
+
+    {% if gates %}
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Hostname</th>
+                    <th>Location</th>
+                    <th>Status</th>
+                    <th>IP Pool</th>
+                    <th>Allocated / Total</th>
+                    <th>Last Heartbeat</th>
+                    <th>Active</th>
+                    <th>Maintenance</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for gate in gates %}
+                <tr>
+                    <td>
+                        <a href="{{ url_for('gates.view', gate_id=gate.id) }}">
+                            <strong>{{ gate.name }}</strong>
+                        </a>
+                    </td>
+                    <td>{{ gate.hostname }}</td>
+                    <td>{{ gate.location or '-' }}</td>
+                    <td>
+                        {% if gate.status == 'online' %}
+                        <span class="badge bg-success">Online</span>
+                        {% elif gate.status == 'offline' %}
+                        <span class="badge bg-secondary">Offline</span>
+                        {% else %}
+                        <span class="badge bg-danger">{{ gate.status|title }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <code>{{ gate.ip_pool_start }} - {{ gate.ip_pool_end }}</code>
+                        <br>
+                        <small class="text-muted">{{ gate.ip_pool_network }}</small>
+                    </td>
+                    <td>
+                        <div class="progress" style="height: 20px;">
+                            {% set usage_pct = (gate.pool_allocated / gate.pool_total * 100) if gate.pool_total > 0 else 0 %}
+                            <div class="progress-bar {% if usage_pct > 90 %}bg-danger{% elif usage_pct > 70 %}bg-warning{% else %}bg-success{% endif %}" 
+                                 role="progressbar" 
+                                 style="width: {{ usage_pct }}%"
+                                 aria-valuenow="{{ gate.pool_allocated }}" 
+                                 aria-valuemin="0" 
+                                 aria-valuemax="{{ gate.pool_total }}">
+                                {{ gate.pool_allocated }} / {{ gate.pool_total }}
+                            </div>
+                        </div>
+                    </td>
+                    <td>
+                        {% if gate.last_heartbeat %}
+                        {{ gate.last_heartbeat.strftime('%Y-%m-%d %H:%M:%S') }}
+                        {% if gate.heartbeat_warning %}
+                        <i class="bi bi-exclamation-triangle-fill text-warning ms-2" 
+                           title="Heartbeat older than 2 minutes"></i>
+                        {% endif %}
+                        {% else %}
+                        <span class="text-muted">Never</span>
+                        {% if gate.is_active %}
+                        <i class="bi bi-exclamation-triangle-fill text-danger ms-2" 
+                           title="Gate active but no heartbeat received"></i>
+                        {% endif %}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if gate.is_active %}
+                        <span class="badge bg-success">Yes</span>
+                        {% else %}
+                        <span class="badge bg-danger">No</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if gate.in_maintenance %}
+                        <span class="badge bg-warning text-dark">
+                            <i class="bi bi-tools"></i> In Maintenance
+                        </span>
+                        {% if gate.maintenance_scheduled_at %}
+                        <br><small class="text-muted">Until: {{ gate.maintenance_scheduled_at|localtime }}</small>
+                        {% endif %}
+                        {% else %}
+                        <span class="badge bg-secondary">No</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('gates.view', gate_id=gate.id) }}" class="btn btn-sm btn-info">
+                            <i class="bi bi-eye"></i>
+                        </a>
+                        <a href="{{ url_for('gates.edit', gate_id=gate.id) }}" class="btn btn-sm btn-warning">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                        {% if gate.in_maintenance %}
+                        <button class="btn btn-sm btn-success" onclick="exitMaintenance({{ gate.id }}, '{{ gate.name }}')">
+                            <i class="bi bi-check-circle"></i> Exit Maintenance
+                        </button>
+                        {% elif gate.is_active %}
+                        <button class="btn btn-sm btn-danger" onclick="enterMaintenance({{ gate.id }}, '{{ gate.name }}')">
+                            <i class="bi bi-tools"></i> Maintenance
+                        </button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle"></i> No gates configured yet. 
+        <a href="{{ url_for('gates.add') }}" class="alert-link">Add your first gate</a>.
+    </div>
+    {% endif %}
+</div>
+
+<!-- Maintenance Modal -->
+<div class="modal fade" id="maintenanceModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Schedule Maintenance Mode</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Schedule maintenance for gate <strong id="gateName"></strong>:</p>
+                
+                <div class="mb-3">
+                    <label class="form-label">Maintenance Start Time:</label>
+                    <div class="input-group">
+                        <input type="datetime-local" class="form-control" id="scheduledAt" required />
+                        <button class="btn btn-outline-secondary" type="button" onclick="setNow()">
+                            <i class="bi bi-clock"></i> Now
+                        </button>
+                    </div>
+                    <small class="text-muted">When maintenance begins (your local time)</small>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Grace Period (minutes):</label>
+                    <input type="range" class="form-range" id="graceMinutes" min="5" max="60" value="15" step="5" 
+                           oninput="document.getElementById('graceValue').textContent = this.value" />
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">5 min</small>
+                        <strong><span id="graceValue">15</span> minutes</strong>
+                        <small class="text-muted">60 min</small>
+                    </div>
+                    <small class="text-muted">New logins blocked <span id="graceValue2">15</span> minutes before maintenance</small>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Reason:</label>
+                    <input type="text" class="form-control" id="maintenanceReason" value="Scheduled gate maintenance" />
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Maintenance Personnel (optional):</label>
+                    <select class="form-select" id="personnelSelect" multiple size="5">
+                        {% for user in users %}
+                        <option value="{{ user.id }}">{{ user.full_name or user.username }} ({{ user.username }})</option>
+                        {% endfor %}
+                    </select>
+                    <small class="text-muted">Hold Ctrl/Cmd to select multiple. These users can login during maintenance.</small>
+                </div>
+                
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle"></i> 
+                    <strong>Timeline:</strong>
+                    <ul class="mb-0 mt-2">
+                        <li>Grace period starts <strong><span id="graceValue3">15</span> minutes before</strong> - new logins blocked</li>
+                        <li>Maintenance starts at <strong>scheduled time</strong> - existing sessions disconnected</li>
+                        <li>Selected personnel can login during grace period and maintenance</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" onclick="confirmMaintenance()">
+                    <i class="bi bi-tools"></i> Schedule Maintenance
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let selectedGateId = null;
+
+function setNow() {
+    const scheduledInput = document.getElementById('scheduledAt');
+    if (scheduledInput) {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        scheduledInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+}
+
+// Update grace value displays
+document.addEventListener('DOMContentLoaded', function() {
+    const graceInput = document.getElementById('graceMinutes');
+    if (graceInput) {
+        graceInput.addEventListener('input', function() {
+            const value = this.value;
+            document.getElementById('graceValue').textContent = value;
+            document.getElementById('graceValue2').textContent = value;
+            document.getElementById('graceValue3').textContent = value;
+        });
+    }
+    
+    // Set default time to 1 hour from now
+    const scheduledInput = document.getElementById('scheduledAt');
+    if (scheduledInput) {
+        const now = new Date();
+        now.setHours(now.getHours() + 1);
+        now.setMinutes(0);
+        now.setSeconds(0);
+        // Format as local datetime-local value (YYYY-MM-DDTHH:MM)
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        scheduledInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+        
+        const minNow = new Date();
+        const minYear = minNow.getFullYear();
+        const minMonth = String(minNow.getMonth() + 1).padStart(2, '0');
+        const minDay = String(minNow.getDate()).padStart(2, '0');
+        const minHours = String(minNow.getHours()).padStart(2, '0');
+        const minMinutes = String(minNow.getMinutes()).padStart(2, '0');
+        scheduledInput.min = `${minYear}-${minMonth}-${minDay}T${minHours}:${minMinutes}`;
+    }
+});
+
+function enterMaintenance(gateId, gateName) {
+    selectedGateId = gateId;
+    document.getElementById('gateName').textContent = gateName;
+    const modal = new bootstrap.Modal(document.getElementById('maintenanceModal'));
+    modal.show();
+}
+
+function exitMaintenance(gateId, gateName) {
+    if (!confirm(`Exit maintenance mode for ${gateName}?\n\nThis will:\n- Allow all users to login\n- Cancel scheduled disconnections\n- Clear maintenance personnel`)) {
+        return;
+    }
+    
+    fetch(`/gates/${gateId}/maintenance`, {
+        method: 'DELETE',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(`Maintenance mode ended for ${gateName}`);
+            refreshGatesTable();
+        } else {
+            alert('Error: ' + (data.message || data.error));
+        }
+    })
+    .catch(error => {
+        alert('Error exiting maintenance: ' + error);
+    });
+}
+
+function confirmMaintenance() {
+    const scheduledAtLocal = document.getElementById('scheduledAt').value;
+    const graceMinutes = parseInt(document.getElementById('graceMinutes').value);
+    const reason = document.getElementById('maintenanceReason').value;
+    const personnelSelect = document.getElementById('personnelSelect');
+    const personnelIds = Array.from(personnelSelect.selectedOptions).map(opt => parseInt(opt.value));
+    
+    if (!scheduledAtLocal) {
+        alert('Please select maintenance start time');
+        return;
+    }
+    
+    // Convert local datetime to UTC ISO string
+    const scheduledAt = new Date(scheduledAtLocal).toISOString();
+    
+    fetch(`/gates/${selectedGateId}/maintenance`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            scheduled_at: scheduledAt,
+            grace_minutes: graceMinutes,
+            reason: reason,
+            personnel_ids: personnelIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const graceTime = new Date(data.grace_starts_at).toLocaleString();
+            const maintenanceTime = new Date(data.scheduled_at).toLocaleString();
+            const personnelInfo = data.maintenance_personnel.length > 0 
+                ? `\nMaintenance personnel: ${data.maintenance_personnel.join(', ')}`
+                : '';
+            alert(`Maintenance scheduled successfully!\n\n` +
+                  `Grace period starts: ${graceTime}\n` +
+                  `Maintenance starts: ${maintenanceTime}\n` +
+                  `Affected sessions: ${data.affected_sessions}${personnelInfo}`);
+            location.reload();
+        } else {
+            alert('Error: ' + (data.message || data.error));
+        }
+    })
+    .catch(error => {
+        alert('Error scheduling maintenance: ' + error);
+    });
+    
+    bootstrap.Modal.getInstance(document.getElementById('maintenanceModal')).hide();
+}
+
+// AJAX auto-refresh - updates only the table without reloading page
+let refreshInterval = null;
+
+function refreshGatesTable() {
+    // Don't refresh if modal is open
+    const modal = document.getElementById('maintenanceModal');
+    if (modal && modal.classList.contains('show')) {
+        return; // Skip refresh while modal is open
+    }
+    
+    fetch('/gates/data')
+        .then(response => response.json())
+        .then(gates => {
+            const tbody = document.querySelector('table tbody');
+            if (!tbody) return;
+            
+            // Rebuild table rows
+            tbody.innerHTML = gates.map(gate => {
+                const usagePct = gate.pool_total > 0 ? (gate.pool_allocated / gate.pool_total * 100) : 0;
+                const progressColor = usagePct > 90 ? 'bg-danger' : (usagePct > 70 ? 'bg-warning' : 'bg-success');
+                const statusBadge = gate.status === 'online' ? '<span class="badge bg-success">Online</span>' :
+                                  gate.status === 'offline' ? '<span class="badge bg-secondary">Offline</span>' :
+                                  `<span class="badge bg-danger">${gate.status}</span>`;
+                const activeBadge = gate.is_active ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-danger">No</span>';
+                const heartbeatWarning = gate.heartbeat_warning ? '<i class="bi bi-exclamation-triangle-fill text-warning ms-2" title="Heartbeat older than 2 minutes"></i>' : '';
+                const noHeartbeatWarning = !gate.last_heartbeat && gate.is_active ? '<i class="bi bi-exclamation-triangle-fill text-danger ms-2" title="Gate active but no heartbeat received"></i>' : '';
+                
+                // Maintenance status badge
+                const maintenanceBadge = gate.in_maintenance 
+                    ? `<span class="badge bg-warning text-dark"><i class="bi bi-tools"></i> In Maintenance</span>${gate.maintenance_scheduled_at ? '<br><small class="text-muted">Until: ' + gate.maintenance_scheduled_at + '</small>' : ''}`
+                    : '<span class="badge bg-secondary">No</span>';
+                
+                // Action buttons
+                let actionButtons = `<a href="/gates/view/${gate.id}" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a>
+                                     <a href="/gates/edit/${gate.id}" class="btn btn-sm btn-warning"><i class="bi bi-pencil"></i></a>`;
+                if (gate.in_maintenance) {
+                    actionButtons += `<button class="btn btn-sm btn-success" onclick="exitMaintenance(${gate.id}, '${gate.name}')"><i class="bi bi-check-circle"></i> Exit Maintenance</button>`;
+                } else if (gate.is_active) {
+                    actionButtons += `<button class="btn btn-sm btn-danger" onclick="enterMaintenance(${gate.id}, '${gate.name}')"><i class="bi bi-tools"></i> Maintenance</button>`;
+                }
+                
+                return `
+                    <tr>
+                        <td><a href="/gates/view/${gate.id}"><strong>${gate.name}</strong></a></td>
+                        <td>${gate.hostname}</td>
+                        <td>${gate.location || '-'}</td>
+                        <td>${statusBadge}</td>
+                        <td>
+                            <code>${gate.ip_pool_start} - ${gate.ip_pool_end}</code><br>
+                            <small class="text-muted">${gate.ip_pool_network}</small>
+                        </td>
+                        <td>
+                            <div class="progress" style="height: 20px;">
+                                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${usagePct}%" 
+                                     aria-valuenow="${gate.pool_allocated}" aria-valuemin="0" aria-valuemax="${gate.pool_total}">
+                                    ${gate.pool_allocated} / ${gate.pool_total}
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            ${gate.last_heartbeat || '<span class="text-muted">Never</span>'}
+                            ${heartbeatWarning}${noHeartbeatWarning}
+                        </td>
+                        <td>${activeBadge}</td>
+                        <td>${maintenanceBadge}</td>
+                        <td>
+                            ${actionButtons}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        })
+        .catch(error => console.error('Error refreshing gates:', error));
+}
+
+// Start auto-refresh every 10 seconds
+document.addEventListener('DOMContentLoaded', function() {
+    refreshInterval = setInterval(refreshGatesTable, 10000);
+});
+
+// Pause refresh when modal opens, resume when it closes
+document.getElementById('maintenanceModal')?.addEventListener('shown.bs.modal', function() {
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+    }
+});
+
+document.getElementById('maintenanceModal')?.addEventListener('hidden.bs.modal', function() {
+    if (!refreshInterval) {
+        refreshInterval = setInterval(refreshGatesTable, 10000);
+    }
+});
+</script>
+{% endblock %}

@@ -21,7 +21,7 @@
                         <label class="form-label">Granted To</label>
                         <div class="form-control-plaintext bg-light p-2 rounded">
                             {% if policy.user %}
-                                <i class="bi bi-person"></i> User: <strong>{{ policy.user.username }}</strong> ({{ policy.user.email or 'no email' }})
+                                <i class="bi bi-person"></i> User: <strong>{{ policy.user.full_name or policy.user.username }}</strong> ({{ policy.user.email or 'no email' }})
                             {% elif policy.user_group %}
                                 <i class="bi bi-people"></i> User Group: <strong>{{ policy.user_group.name }}</strong> ({{ policy.user_group.members|length }} members)
                             {% endif %}

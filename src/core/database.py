@@ -55,6 +55,12 @@ class Server(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Maintenance mode
+    in_maintenance = Column(Boolean, default=False, nullable=False)
+    maintenance_scheduled_at = Column(DateTime)
+    maintenance_reason = Column(Text)
+    maintenance_grace_minutes = Column(Integer, default=15)
+    
     # Relationships
     access_grants = relationship("AccessGrant", back_populates="server")
     ip_allocations = relationship("IPAllocation", back_populates="server")
@@ -83,12 +89,16 @@ class AccessGrant(Base):
 
 
 class IPAllocation(Base):
-    """IP pool allocation tracking - supports both permanent server assignments and temporary user sessions."""
+    """IP pool allocation tracking - supports both permanent server assignments and temporary user sessions.
+    
+    IP pools are per-gate and can overlap between gates (same IP can be used on different gates).
+    """
     __tablename__ = "ip_allocations"
     
     id = Column(Integer, primary_key=True, index=True)
-    allocated_ip = Column(String(45), nullable=False, unique=True, index=True)
+    allocated_ip = Column(String(45), nullable=False, index=True)  # NOT globally unique - unique per gate
     server_id = Column(Integer, ForeignKey("servers.id"), nullable=False)
+    gate_id = Column(Integer, ForeignKey("gates.id"), nullable=True)  # Which gate owns this IP allocation
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # NULL for permanent server assignments
     source_ip = Column(String(45), nullable=True)  # NULL for permanent assignments, filled for session-based
     allocated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -98,6 +108,46 @@ class IPAllocation(Base):
     
     # Relationships
     server = relationship("Server", back_populates="ip_allocations")
+    gate = relationship("Gate", back_populates="ip_allocations")
+
+
+class Gate(Base):
+    """Gate (data plane) registration and tracking."""
+    __tablename__ = "gates"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), unique=True, nullable=False, index=True)  # e.g., "gate-localhost", "gate-dmz", "gate-cloud"
+    hostname = Column(String(255), nullable=False)  # FQDN or IP
+    api_token = Column(String(255), nullable=False, unique=True)  # Bearer token for authentication
+    location = Column(String(255))  # e.g., "Datacenter 1", "AWS us-east-1"
+    description = Column(Text)
+    
+    # IP Pool Configuration (per-gate)
+    ip_pool_network = Column(String(45), default="10.0.160.128/25")  # CIDR notation
+    ip_pool_start = Column(String(45), default="10.0.160.129")  # First usable IP
+    ip_pool_end = Column(String(45), default="10.0.160.254")  # Last usable IP
+    
+    # Status tracking
+    status = Column(String(20), default="offline", nullable=False)  # "online", "offline", "error"
+    last_heartbeat = Column(DateTime)
+    version = Column(String(50))  # Gate software version
+    
+    # Metadata
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Maintenance mode
+    in_maintenance = Column(Boolean, default=False, nullable=False)
+    maintenance_scheduled_at = Column(DateTime)
+    maintenance_reason = Column(Text)
+    maintenance_grace_minutes = Column(Integer, default=15)
+    
+    # Relationships
+    session_recordings = relationship("SessionRecording", back_populates="gate")
+    sessions = relationship("Session", back_populates="gate", foreign_keys="[Session.gate_id]")
+    stays = relationship("Stay", back_populates="gate")
+    ip_allocations = relationship("IPAllocation", back_populates="gate")
 
 
 class SessionRecording(Base):
@@ -108,6 +158,7 @@ class SessionRecording(Base):
     session_id = Column(String(255), unique=True, nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     server_id = Column(Integer, ForeignKey("servers.id"), nullable=False)
+    gate_id = Column(Integer, ForeignKey("gates.id"), nullable=True)  # NEW: Which gate handled this session
     protocol = Column(String(10), nullable=False)  # ssh, rdp
     source_ip = Column(String(45), nullable=False)
     allocated_ip = Column(String(45), nullable=False)
@@ -119,6 +170,7 @@ class SessionRecording(Base):
     
     # Relationships
     user = relationship("User", back_populates="sessions")
+    gate = relationship("Gate", back_populates="session_recordings")
 
 
 class AuditLog(Base):
@@ -137,6 +189,21 @@ class AuditLog(Base):
     
     # Relationships
     user = relationship("User", back_populates="audit_logs")
+
+
+class MaintenanceAccess(Base):
+    """Personnel with access during maintenance mode."""
+    __tablename__ = "maintenance_access"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    entity_type = Column(String(10), nullable=False)  # 'gate' or 'server'
+    entity_id = Column(Integer, nullable=False, index=True)
+    person_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        CheckConstraint("entity_type IN ('gate', 'server')", name="check_entity_type"),
+    )
 
 
 class UserSourceIP(Base):
@@ -376,6 +443,39 @@ class PolicyAuditLog(Base):
     changed_by = relationship("User", foreign_keys=[changed_by_user_id])
 
 
+class Stay(Base):
+    """Period of Person being inside (may have multiple Sessions)."""
+    __tablename__ = "stays"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Core references
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)  # TODO: Rename to person_id in future
+    policy_id = Column(Integer, ForeignKey("access_policies.id"), nullable=False, index=True)  # TODO: Rename to grant_id in future
+    gate_id = Column(Integer, ForeignKey("gates.id"), nullable=True, index=True)  # Which gate person entered through
+    server_id = Column(Integer, ForeignKey("servers.id"), nullable=False, index=True)  # Target server
+    
+    # Timing
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ended_at = Column(DateTime, index=True)  # NULL = person still inside
+    duration_seconds = Column(Integer)  # Calculated on end
+    
+    # Status
+    is_active = Column(Boolean, default=True, nullable=False, index=True)  # True = person is inside
+    termination_reason = Column(String(255))  # grant_expired, revoked, manual_disconnect, schedule_ended
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    user = relationship("User")  # TODO: Rename to person
+    policy = relationship("AccessPolicy")  # TODO: Rename to grant
+    gate = relationship("Gate", back_populates="stays")
+    server = relationship("Server")
+    sessions = relationship("Session", back_populates="stay")  # One stay can have many sessions (disconnect/reconnect)
+
+
 class Session(Base):
     """Active and historical connection sessions (SSH/RDP)."""
     __tablename__ = "sessions"
@@ -386,6 +486,8 @@ class Session(Base):
     # Session details
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
     server_id = Column(Integer, ForeignKey("servers.id"), index=True)
+    stay_id = Column(Integer, ForeignKey("stays.id"), nullable=True, index=True)  # NEW: Which stay this session belongs to
+    gate_id = Column(Integer, ForeignKey("gates.id"), nullable=True, index=True)  # NEW: Which gate handled this session
     protocol = Column(String(10), nullable=False, index=True)  # ssh, rdp
     
     # Connection info
@@ -423,6 +525,8 @@ class Session(Base):
     # Relationships
     user = relationship("User")
     server = relationship("Server")
+    stay = relationship("Stay", back_populates="sessions")  # NEW: Link to stay
+    gate = relationship("Gate", back_populates="sessions")  # NEW: Link to gate
     policy = relationship("AccessPolicy")
     transfers = relationship("SessionTransfer", back_populates="session")
     

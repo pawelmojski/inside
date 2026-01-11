@@ -11,7 +11,7 @@ import select
 import threading
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import paramiko
 import pytz
@@ -20,10 +20,11 @@ import pytz
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.database import SessionLocal, User, Server, AccessGrant, Session as DBSession
-from src.core.access_control_v2 import AccessControlEngineV2 as AccessControl
 from src.core.ip_pool import IPPoolManager
 from src.core.utmp_helper import write_utmp_login, write_utmp_logout
 from src.core.database import SessionTransfer
+from src.gate.api_client import TowerClient
+from src.gate.config import GateConfig
 
 # Logging
 logging.basicConfig(
@@ -38,74 +39,258 @@ logger = logging.getLogger('ssh_proxy')
 
 
 class SSHSessionRecorder:
-    """Records SSH session I/O to file with live writing"""
+    """Records SSH session I/O and streams to Tower API in JSONL format.
     
-    def __init__(self, session_id: str, username: str, server_ip: str):
+    JSONL Format (JSON Lines - one event per line):
+    {"type":"session_start","timestamp":"2026-01-07T12:00:00.000Z","username":"p.mojski","server":"10.0.160.4"}
+    {"type":"client","timestamp":"2026-01-07T12:00:01.123Z","data":"ls -la\n"}
+    {"type":"server","timestamp":"2026-01-07T12:00:01.245Z","data":"total 24\ndrwxr-xr-x..."}
+    {"type":"session_end","timestamp":"2026-01-07T12:05:30.456Z","duration":330}
+    
+    - Buffers JSONL events in memory (~50 events)
+    - Flushes to Tower every 3 seconds or when buffer full
+    - Falls back to /tmp/ storage if Tower offline
+    - Auto-uploads buffered recordings when Tower back online
+    """
+    
+    def __init__(self, session_id: str, username: str, server_ip: str, server_name: str, tower_client):
         self.session_id = session_id
         self.username = username
         self.server_ip = server_ip
-        self.start_time = datetime.now()
+        self.server_name = server_name
+        self.tower_client = tower_client
+        self.start_time = datetime.now(pytz.UTC)
         
-        # Create recording file
-        timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{username}_{server_ip.replace('.', '_')}_{session_id}.log"
-        self.log_file = Path(f"/var/log/jumphost/ssh_recordings/{filename}")
-        self.recording_file = str(self.log_file)  # For compatibility
+        # JSONL event buffer (list of event dicts)
+        self.events_buffer = []
+        self.buffer_max_events = 50  # Max events before flush
+        self.chunk_index = 0
+        self.total_events = 0
+        self.total_bytes = 0
+        self.last_flush = time.time()
+        self.flush_interval = 3.0  # Flush every 3 seconds
+        self.recording_path = None  # Will be set by Tower
+        self.tower_online = True
+        self.offline_file = None
+        self.offline_path = None
         
-        # Initialize file with metadata header
-        self.metadata = {
-            'session_id': session_id,
+        # Write session_start event
+        self._write_event({
+            'type': 'session_start',
+            'timestamp': self.start_time.isoformat(),
             'username': username,
-            'server_ip': server_ip,
-            'start_time': self.start_time.isoformat(),
-            'events': []
-        }
+            'server': server_ip,
+            'server_name': server_name
+        })
         
-        # Create file immediately and write initial structure
-        with open(self.log_file, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
-        
-        self.event_count = 0
-        logger.info(f"Recording session to: {self.log_file}")
+        # Try to start recording on Tower
+        try:
+            response = self.tower_client.start_recording(
+                session_id=session_id,
+                person_username=username,
+                server_name=server_name,
+                server_ip=server_ip
+            )
+            self.recording_path = response.get('recording_path')
+            self.recording_file = self.recording_path  # For compatibility
+            logger.info(f"Recording streaming to Tower: {self.recording_path}")
+            
+        except Exception as e:
+            logger.warning(f"Tower unavailable for recording start: {e}. Using offline mode.")
+            self.tower_online = False
+            # Fallback to /tmp/ storage
+            self.offline_path = f"/tmp/gate-recordings/{session_id}.jsonl"
+            os.makedirs("/tmp/gate-recordings", exist_ok=True)
+            self.offline_file = open(self.offline_path, 'a')  # Append mode for JSONL
+            self.recording_file = self.offline_path
+            logger.info(f"Recording to offline buffer: {self.offline_path}")
     
     def record_event(self, event_type: str, data: str):
-        """Record an event and write immediately to file"""
-        event = {
-            'timestamp': datetime.now().isoformat(),
+        """Record a named event (session_start, session_end, etc.)"""
+        self._write_event({
             'type': event_type,
-            'data': data if len(data) < 1000 else data[:1000] + '... [truncated]'
-        }
+            'timestamp': datetime.now(pytz.UTC).isoformat(),
+            'data': data
+        })
+    
+    def write_data(self, data: bytes, direction: str):
+        """Write terminal I/O data as JSONL event
         
-        # Read current file, add event, write back
+        Args:
+            data: Raw bytes from terminal
+            direction: 'client' or 'server'
+        """
         try:
-            with open(self.log_file, 'r') as f:
-                file_data = json.load(f)
-            
-            file_data['events'].append(event)
-            
-            with open(self.log_file, 'w') as f:
-                json.dump(file_data, f, indent=2)
-                f.flush()  # Force write to disk
-            
-            self.event_count += 1
+            # Decode bytes to string (replace invalid UTF-8)
+            data_str = data.decode('utf-8', errors='replace')
         except Exception as e:
-            logger.error(f"Failed to write event to recording: {e}")
+            logger.warning(f"Failed to decode data: {e}")
+            data_str = repr(data)  # Fallback to repr
+        
+        self._write_event({
+            'type': direction,
+            'timestamp': datetime.now(pytz.UTC).isoformat(),
+            'data': data_str
+        })
+    
+    def _write_event(self, event: dict):
+        """Write single event to buffer"""
+        if self.tower_online:
+            # Add to buffer
+            self.events_buffer.append(event)
+            self.total_events += 1
+            
+            # Check if flush needed
+            now = time.time()
+            buffer_full = len(self.events_buffer) >= self.buffer_max_events
+            time_to_flush = (now - self.last_flush) >= self.flush_interval
+            
+            if buffer_full or time_to_flush:
+                self.flush()
+        else:
+            # Offline mode - write directly to /tmp/ as JSONL
+            if self.offline_file:
+                jsonl_line = json.dumps(event, separators=(',', ':')) + '\n'
+                self.offline_file.write(jsonl_line)
+                self.offline_file.flush()
+                self.total_events += 1
+                self.total_bytes += len(jsonl_line)
+    
+    def flush(self):
+        """Flush JSONL events buffer to Tower"""
+        if len(self.events_buffer) == 0:
+            return
+        
+        try:
+            # Convert events to JSONL (newline-delimited JSON)
+            jsonl_data = '\n'.join(json.dumps(event, separators=(',', ':')) for event in self.events_buffer) + '\n'
+            jsonl_bytes = jsonl_data.encode('utf-8')
+            
+            # Upload chunk to Tower
+            self.tower_client.upload_recording_chunk(
+                session_id=self.session_id,
+                recording_path=self.recording_path,
+                chunk_data=jsonl_bytes,
+                chunk_index=self.chunk_index
+            )
+            
+            logger.debug(f"Flushed {len(self.events_buffer)} events ({len(jsonl_bytes)} bytes) to Tower (chunk {self.chunk_index})")
+            
+            # Clear buffer
+            self.total_bytes += len(jsonl_bytes)
+            self.events_buffer.clear()
+            self.chunk_index += 1
+            self.last_flush = time.time()
+            
+        except Exception as e:
+            logger.error(f"Failed to flush recording chunk: {e}")
+            # Switch to offline mode
+            if self.tower_online:
+                logger.warning("Switching to offline recording mode")
+                self.tower_online = False
+                self.offline_path = f"/tmp/gate-recordings/{self.session_id}.jsonl"
+                os.makedirs("/tmp/gate-recordings", exist_ok=True)
+                self.offline_file = open(self.offline_path, 'a')
+                # Write buffered events to offline file
+                for event in self.events_buffer:
+                    jsonl_line = json.dumps(event, separators=(',', ':')) + '\n'
+                    self.offline_file.write(jsonl_line)
+                self.offline_file.flush()
+                self.events_buffer.clear()
     
     def save(self):
-        """Finalize recording with end metadata"""
+        """Finalize recording"""
+        # Write session_end event
+        duration = int((datetime.now(pytz.UTC) - self.start_time).total_seconds())
+        self._write_event({
+            'type': 'session_end',
+            'timestamp': datetime.now(pytz.UTC).isoformat(),
+            'duration': duration
+        })
+        
+        # Final flush
+        if self.tower_online and len(self.events_buffer) > 0:
+            self.flush()
+        
+        # Close offline file if used
+        if self.offline_file:
+            self.offline_file.close()
+            logger.info(f"Offline recording saved: {self.offline_path} ({self.total_events} events, {self.total_bytes} bytes)")
+            
+            # Try to upload offline recording
+            self._upload_offline_recording()
+        
+        # Notify Tower that recording is complete
+        if self.tower_online and self.recording_path:
+            try:
+                self.tower_client.finalize_recording(
+                    session_id=self.session_id,
+                    recording_path=self.recording_path,
+                    total_bytes=self.total_bytes,
+                    duration_seconds=duration
+                )
+                logger.info(f"Recording finalized on Tower: {self.total_events} events, {self.total_bytes} bytes")
+            except Exception as e:
+                logger.error(f"Failed to finalize recording: {e}")
+    
+    def _upload_offline_recording(self):
+        """Upload offline JSONL recording to Tower when it comes back online"""
+        if not self.offline_path or not os.path.exists(self.offline_path):
+            return
+        
         try:
-            with open(self.log_file, 'r') as f:
-                file_data = json.load(f)
+            # Try to start recording on Tower
+            response = self.tower_client.start_recording(
+                session_id=self.session_id,
+                person_username=self.username,
+                server_name=self.server_name,
+                server_ip=self.server_ip
+            )
+            recording_path = response.get('recording_path')
             
-            file_data['end_time'] = datetime.now().isoformat()
-            file_data['duration_seconds'] = (datetime.now() - self.start_time).total_seconds()
+            # Upload file in chunks (read ~50 lines at a time)
+            chunk_index = 0
+            lines_per_chunk = 50
             
-            with open(self.log_file, 'w') as f:
-                json.dump(file_data, f, indent=2)
+            with open(self.offline_path, 'r') as f:
+                while True:
+                    lines = []
+                    for _ in range(lines_per_chunk):
+                        line = f.readline()
+                        if not line:
+                            break
+                        lines.append(line.rstrip('\n'))
+                    
+                    if not lines:
+                        break
+                    
+                    # Join lines with newline and add final newline
+                    jsonl_chunk = '\n'.join(lines) + '\n'
+                    
+                    self.tower_client.upload_recording_chunk(
+                        session_id=self.session_id,
+                        recording_path=recording_path,
+                        chunk_data=jsonl_chunk.encode('utf-8'),
+                        chunk_index=chunk_index
+                    )
+                    chunk_index += 1
             
-            logger.info(f"Session recording saved: {self.log_file} ({self.event_count} events)")
+            # Finalize
+            duration = int((datetime.now(pytz.UTC) - self.start_time).total_seconds())
+            self.tower_client.finalize_recording(
+                session_id=self.session_id,
+                recording_path=recording_path,
+                total_bytes=self.total_bytes,
+                duration_seconds=duration
+            )
+            
+            # Delete offline file
+            os.remove(self.offline_path)
+            logger.info(f"Offline JSONL recording uploaded and deleted: {self.offline_path}")
+            
         except Exception as e:
-            logger.error(f"Failed to finalize recording: {e}")
+            logger.error(f"Failed to upload offline recording: {e}. Will retry later.")
+            # Keep file for manual recovery or next startup
 
 
 class SSHProxyHandler(paramiko.ServerInterface):
@@ -115,7 +300,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.source_ip = source_ip
         self.dest_ip = dest_ip  # NEW: destination IP client connected to
         self.db = db_session
-        self.access_control = AccessControl()
+        self.tower_client = TowerClient(GateConfig())
         self.authenticated_user = None
         self.target_server = None
         self.matching_policies = []  # Policies that granted access
@@ -129,27 +314,20 @@ class SSHProxyHandler(paramiko.ServerInterface):
         # This allows us to show banner early if IP has no access at all
         logger.info(f"SSHProxyHandler init: early check for {source_ip} -> {dest_ip}")
         try:
-            backend_lookup = self.access_control.find_backend_by_proxy_ip(self.db, self.dest_ip)
-            if not backend_lookup:
-                logger.warning(f"No backend found for {self.dest_ip}")
-                self.no_grant_reason = "No backend server configuration found"
+            # Call Tower API for access check (without ssh_login for early check)
+            result = self.tower_client.check_grant(
+                source_ip=self.source_ip,
+                destination_ip=self.dest_ip,
+                protocol='ssh',
+                ssh_login=None  # Early check without specific username
+            )
+            
+            if not result.get('allowed'):
+                logger.warning(f"No grant for IP {self.source_ip} to {self.dest_ip}: {result.get('reason')}")
+                self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
             else:
-                # Quick check: does this source IP have ANY active grant to this backend?
-                # We use empty username - check_access_v2 will look for any matching policy
-                result = self.access_control.check_access_v2(
-                    self.db,
-                    self.source_ip,
-                    self.dest_ip,
-                    'ssh',
-                    ''  # Empty username = check for any grant from this IP
-                )
+                logger.info(f"Grant found for {self.source_ip}, proceeding with auth")
                 
-                if not result['has_access']:
-                    logger.warning(f"No grant for IP {self.source_ip} to {self.dest_ip}: {result['reason']}")
-                    self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
-                else:
-                    logger.info(f"Grant found for {self.source_ip}, proceeding with auth")
-                    
         except Exception as e:
             logger.error(f"Error in early grant check: {e}", exc_info=True)
         
@@ -179,47 +357,36 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         # Pre-check: does this user have ANY active policy?
         try:
-            backend_lookup = self.access_control.find_backend_by_proxy_ip(self.db, self.dest_ip)
-            if not backend_lookup:
-                logger.warning(f"No backend found for {self.dest_ip}, denying {username} from {self.source_ip}")
-                self.no_grant_reason = "No backend server configuration found"
-                logger.info(f"check_auth_none: SET no_grant_reason='{self.no_grant_reason}'")
-                # Return FAILED but banner will be shown
-                return paramiko.AUTH_FAILED
-            
-            logger.info(f"check_auth_none: backend found, checking access...")
-            # Quick access check
-            result = self.access_control.check_access_v2(
-                self.db,
-                self.source_ip,
-                self.dest_ip,
-                'ssh',
-                username
+            logger.info(f"check_auth_none: checking access via Tower API...")
+            # Call Tower API for access check
+            result = self.tower_client.check_grant(
+                source_ip=self.source_ip,
+                destination_ip=self.dest_ip,
+                protocol='ssh',
+                ssh_login=username
             )
             
-            logger.info(f"check_auth_none: access check result: has_access={result['has_access']}, reason={result.get('reason')}")
+            logger.info(f"check_auth_none: access check result: allowed={result.get('allowed')}, reason={result.get('reason')}")
             
-            if not result['has_access']:
-                logger.warning(f"No grant for {username} from {self.source_ip}: {result['reason']}")
+            if not result.get('allowed'):
+                logger.warning(f"No grant for {username} from {self.source_ip}: {result.get('reason')}")
                 
-                # Log denied session to database (v1.7.5)
+                # Log denied session to database via Tower API
                 try:
                     import uuid
                     session_id = str(uuid.uuid4())
                     
-                    # Get user and server if available
-                    user = result.get('user')
-                    server = result.get('server')
-                    selected_policy = result.get('selected_policy')
-                    
+                    # Create denied session via API
+                    # Note: Tower API /sessions/create requires valid person_id/server_id
+                    # For denied sessions, we'll log directly to DB for now
                     denied_session = DBSession(
                         session_id=session_id,
-                        user_id=user.id if user else None,
-                        server_id=server.id if server else None,
+                        user_id=result.get('person_id'),
+                        server_id=result.get('server_id'),
                         protocol='ssh',
                         source_ip=self.source_ip,
                         proxy_ip=self.dest_ip,
-                        backend_ip=server.ip_address if server else None,
+                        backend_ip=result.get('server_ip'),
                         backend_port=22,
                         ssh_username=username,
                         started_at=datetime.utcnow(),
@@ -228,7 +395,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
                         connection_status='denied',
                         denial_reason=result.get('denial_reason', 'access_denied'),
                         denial_details=result.get('reason', 'Access denied'),
-                        policy_id=selected_policy.id if selected_policy else None,
+                        policy_id=result.get('grant_id'),
                         protocol_version=None  # Could extract from transport later
                     )
                     self.db.add(denied_session)
@@ -255,44 +422,31 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """Check password authentication"""
         logger.info(f"Auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
         
-        # First, find backend server by destination IP
-        backend_lookup = self.access_control.find_backend_by_proxy_ip(self.db, self.dest_ip)
-        if not backend_lookup:
-            logger.error(f"No backend server found for destination IP {self.dest_ip}")
-            return paramiko.AUTH_FAILED
-        
-        backend_server = backend_lookup['server']
-        
-        # Check access permissions using V2 engine
-        result = self.access_control.check_access_v2(
-            self.db, 
-            self.source_ip, 
-            self.dest_ip, 
-            'ssh',
-            username  # SSH login
+        # Check access permissions using Tower API
+        # Tower will find backend server by destination_ip and return it
+        result = self.tower_client.check_grant(
+            source_ip=self.source_ip,
+            destination_ip=self.dest_ip,
+            protocol='ssh',
+            ssh_login=username
         )
         
-        if not result['has_access']:
-            logger.warning(f"Access denied for {username} from {self.source_ip}: {result['reason']}")
+        if not result.get('allowed'):
+            logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
             
-            # Log denied session to database (v1.7.5)
+            # Log denied session to database
             try:
                 import uuid
                 session_id = str(uuid.uuid4())
                 
-                # Get user and server if available
-                user = result.get('user')
-                server = result.get('server')
-                selected_policy = result.get('selected_policy')
-                
                 denied_session = DBSession(
                     session_id=session_id,
-                    user_id=user.id if user else None,
-                    server_id=server.id if server else None,
+                    user_id=result.get('person_id'),
+                    server_id=result.get('server_id'),
                     protocol='ssh',
                     source_ip=self.source_ip,
                     proxy_ip=self.dest_ip,
-                    backend_ip=server.ip_address if server else None,
+                    backend_ip=result.get('server_ip'),
                     backend_port=22,
                     ssh_username=username,
                     started_at=datetime.utcnow(),
@@ -301,8 +455,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
                     connection_status='denied',
                     denial_reason=result.get('denial_reason', 'access_denied'),
                     denial_details=result.get('reason', 'Access denied'),
-                    policy_id=selected_policy.id if selected_policy else None,
-                    protocol_version=None  # Could extract from transport later
+                    policy_id=result.get('grant_id'),
+                    protocol_version=None
                 )
                 self.db.add(denied_session)
                 self.db.commit()
@@ -315,10 +469,18 @@ class SSHProxyHandler(paramiko.ServerInterface):
             self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
             return paramiko.AUTH_FAILED
         
-        # All checks passed
-        self.target_server = result['server']
-        self.authenticated_user = result['user']
-        self.matching_policies = result.get('policies', [])
+        # All checks passed - store result data
+        # Build target_server and authenticated_user objects from API response
+        self.target_server = type('Server', (), {
+            'id': result['server_id'],
+            'name': result['server_name'],
+            'ip_address': result['server_ip']
+        })()
+        self.authenticated_user = type('User', (), {
+            'id': result['person_id'],
+            'username': result['person_username'],
+            'full_name': result.get('person_fullname')
+        })()
         self.access_result = result  # Store full result for effective_end_time
         self.ssh_login = username  # SSH login for backend (e.g., "ideo")
         self.client_password = password
@@ -337,25 +499,16 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.info(f"Pubkey auth attempt: {username} from {self.source_ip} to {self.dest_ip}, key type: {key.get_name()}")
         
-        # First, find backend server by destination IP
-        backend_lookup = self.access_control.find_backend_by_proxy_ip(self.db, self.dest_ip)
-        if not backend_lookup:
-            logger.error(f"No backend server found for destination IP {self.dest_ip}")
-            return paramiko.AUTH_FAILED
-        
-        backend_server = backend_lookup['server']
-        
-        # Check access permissions using V2 engine
-        result = self.access_control.check_access_v2(
-            self.db,
-            self.source_ip,
-            self.dest_ip,
-            'ssh',
-            username  # SSH login
+        # Check access permissions using Tower API
+        result = self.tower_client.check_grant(
+            source_ip=self.source_ip,
+            destination_ip=self.dest_ip,
+            protocol='ssh',
+            ssh_login=username
         )
         
-        if not result['has_access']:
-            logger.warning(f"Access denied for {username} from {self.source_ip}: {result['reason']}")
+        if not result.get('allowed'):
+            logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
             # Store reason for banner
             self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
             return paramiko.AUTH_FAILED
@@ -364,14 +517,128 @@ class SSHProxyHandler(paramiko.ServerInterface):
         # If agent fails, we'll disconnect properly for password retry
         logger.info(f"Pubkey accepted - will verify agent forwarding in backend")
         
-        # Store authentication info
-        self.target_server = result['server']
-        self.authenticated_user = result['user']
-        self.matching_policies = result.get('policies', [])
+        # Store authentication info from API response
+        self.target_server = type('Server', (), {
+            'id': result['server_id'],
+            'name': result['server_name'],
+            'ip_address': result['server_ip']
+        })()
+        self.authenticated_user = type('User', (), {
+            'id': result['person_id'],
+            'username': result['person_username'],
+            'full_name': result.get('person_fullname')
+        })()
         self.access_result = result  # Store full result for effective_end_time
         self.ssh_login = username  # SSH login for backend (e.g., "ideo")
         self.client_key = key
         
+        return paramiko.AUTH_SUCCESSFUL
+    
+    def check_auth_interactive(self, username, submethods):
+        """Check keyboard-interactive authentication (for switches, telnet-like devices).
+        
+        Some devices (especially switches) use keyboard-interactive method
+        where they send custom prompts (e.g. "User Name:", "Password:").
+        
+        IMPORTANT: OpenSSH client prefers keyboard-interactive over password auth.
+        We must distinguish between:
+        1. Real keyboard-interactive devices (switches) - accept this method
+        2. Normal Linux servers - reject this method to force client to use password
+        
+        We detect switches by attempting to connect to backend and check if it
+        accepts auth_none (no SSH authentication, telnet-like).
+        """
+        logger.info(f"Interactive auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
+        
+        # Check access permissions using Tower API
+        result = self.tower_client.check_grant(
+            source_ip=self.source_ip,
+            destination_ip=self.dest_ip,
+            protocol='ssh',
+            ssh_login=username
+        )
+        
+        if not result.get('allowed'):
+            logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
+            self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
+            return paramiko.AUTH_FAILED
+        
+        # Quick test: Try to detect if backend is a switch (accepts auth_none)
+        # This prevents normal Linux servers from accepting keyboard-interactive
+        # when client should be using password auth
+        import socket
+        try:
+            backend_ip = result['server_ip']
+            logger.info(f"Testing if {backend_ip} is a switch (accepts auth_none)...")
+            
+            # Quick connection test
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_sock.settimeout(2.0)
+            test_sock.connect((backend_ip, 22))
+            
+            test_transport = paramiko.Transport(test_sock)
+            test_transport.start_client()
+            
+            # Try auth_none - switches accept this
+            try:
+                test_transport.auth_none(username)
+                # Success - this is a switch!
+                logger.info(f"Backend {backend_ip} accepts auth_none - detected as switch/telnet-like device")
+                test_transport.close()
+                is_switch = True
+            except paramiko.BadAuthenticationType as e:
+                # Backend requires real auth - this is a normal server
+                logger.info(f"Backend {backend_ip} requires auth - this is NOT a switch, rejecting keyboard-interactive")
+                test_transport.close()
+                is_switch = False
+            except Exception as e:
+                logger.warning(f"Backend auth test failed: {e}, assuming NOT a switch")
+                test_transport.close()
+                is_switch = False
+        
+        except Exception as e:
+            logger.error(f"Failed to test backend: {e}, assuming NOT a switch")
+            is_switch = False
+        
+        # If not a switch, reject keyboard-interactive to force client to use password
+        if not is_switch:
+            logger.info(f"Rejecting keyboard-interactive for normal server, client should try password")
+            return paramiko.AUTH_FAILED
+        
+        # This is a switch - accept keyboard-interactive
+        logger.info(f"Backend is a switch - accepting keyboard-interactive")
+        
+        # Store authentication info from API response
+        self.target_server = type('Server', (), {
+            'id': result['server_id'],
+            'name': result['server_name'],
+            'ip_address': result['server_ip']
+        })()
+        self.authenticated_user = type('User', (), {
+            'id': result['person_id'],
+            'username': result['person_username'],
+            'full_name': result.get('person_fullname')
+        })()
+        self.access_result = result
+        self.ssh_login = username
+        self.client_interactive = True  # Flag for backend auth
+        
+        # Return interactive response - backend will send prompts
+        # InteractiveQuery takes *prompts as varargs, not keyword argument
+        # For now, return empty query - we'll proxy backend's prompts later
+        logger.info(f"Interactive auth accepted for {username}, backend will handle prompts")
+        return paramiko.InteractiveQuery('', '')
+    
+    def check_auth_interactive_response(self, responses):
+        """Process keyboard-interactive responses.
+        
+        Called after user provides responses to prompts.
+        For switch authentication, we accept the responses and will
+        forward them to backend during connection.
+        """
+        logger.info(f"Interactive auth responses received: {len(responses)} responses")
+        # Store responses to forward to backend
+        self.interactive_responses = responses
         return paramiko.AUTH_SUCCESSFUL
     
     def get_allowed_auths(self, username):
@@ -380,13 +647,18 @@ class SSHProxyHandler(paramiko.ServerInterface):
         This is called AFTER check_auth_none. If check_auth_none already
         determined there's no grant, we return ONLY "publickey" (which will fail)
         to prevent password prompt from appearing.
+        
+        We support:
+        - publickey: Standard SSH key authentication
+        - password: Standard password authentication
+        - keyboard-interactive: For switches and devices with custom prompts
         """
         if self.no_grant_reason:
             logger.info(f"get_allowed_auths: no grant detected, returning 'publickey' only (will fail)")
             return "publickey"
         
-        logger.info(f"get_allowed_auths: grant OK, allowing publickey,password")
-        return "publickey,password"
+        logger.info(f"get_allowed_auths: grant OK, allowing publickey,password,keyboard-interactive")
+        return "publickey,password,keyboard-interactive"
     
     def get_banner(self):
         """Return SSH banner message
@@ -487,14 +759,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.info(f"Remote forward request: bind {address}:{port} (destination unknown - SSH protocol limitation)")
         
-        # Check if user has port forwarding permission
-        access_control = AccessControl()
-        
-        allowed = access_control.check_port_forwarding_allowed(
-            self.db,
-            self.source_ip,
-            self.dest_ip
-        )
+        # Check if user has port forwarding permission (from Tower API result)
+        allowed = self.access_result.get('port_forwarding_allowed', False) if hasattr(self, 'access_result') else False
         
         if not allowed:
             logger.warning(f"Remote port forwarding denied for source {self.source_ip}")
@@ -527,14 +793,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.info(f"Direct-TCPIP request: {origin} -> {destination}")
         
-        # Check if user has port forwarding permission
-        access_control = AccessControl()
-        
-        allowed = access_control.check_port_forwarding_allowed(
-            self.db,
-            self.source_ip,
-            self.dest_ip
-        )
+        # Check if user has port forwarding permission (from Tower API result)
+        allowed = self.access_result.get('port_forwarding_allowed', False) if hasattr(self, 'access_result') else False
         
         if not allowed:
             logger.warning(f"Port forwarding denied for source {self.source_ip}")
@@ -555,6 +815,15 @@ class SSHProxyServer:
         self.host = host
         self.port = port
         self.host_key = self._load_or_generate_host_key()
+        self.tower_client = TowerClient(GateConfig())
+        self.heartbeat_interval = 30  # seconds
+        self.heartbeat_thread = None
+        self.running = False
+        # Registry of active connections: session_id -> (client_transport, backend_transport)
+        self.active_connections = {}
+        # Forced disconnection times: session_id -> datetime (UTC)
+        # Used by heartbeat to inject immediate/scheduled disconnections
+        self.session_forced_endtimes = {}
         
     def _load_or_generate_host_key(self):
         """Load or generate SSH host key"""
@@ -596,7 +865,8 @@ class SSHProxyServer:
                     backend_channel.send(data)
                     bytes_sent += len(data)
                     if recorder:
-                        recorder.record_event('client_to_server', data.decode('utf-8', errors='ignore'))
+                        # Stream client→server data to Tower as JSONL
+                        recorder.write_data(data, 'client')
                 
                 if backend_channel in r:
                     data = backend_channel.recv(4096)
@@ -605,7 +875,8 @@ class SSHProxyServer:
                     client_channel.send(data)
                     bytes_received += len(data)
                     if recorder:
-                        recorder.record_event('server_to_client', data.decode('utf-8', errors='ignore'))
+                        # Stream server→client data to Tower as JSONL
+                        recorder.write_data(data, 'server')
         
         except Exception as e:
             logger.debug(f"Channel forwarding ended: {e}")
@@ -1382,8 +1653,19 @@ class SSHProxyServer:
     
     def monitor_grant_expiry(self, channel, backend_channel, transport, backend_transport, 
                              grant_end_time, db_session_id, session_id):
-        """Monitor grant expiry and send warnings, then disconnect when grant expires."""
+        """Monitor grant expiry and send warnings, then disconnect when grant expires.
+        
+        Also checks for forced disconnection times injected by heartbeat.
+        """
         try:
+            # Check if there's a forced disconnection time (from heartbeat)
+            if session_id in self.session_forced_endtimes:
+                forced_end = self.session_forced_endtimes[session_id]
+                # Use the earlier time between grant expiry and forced disconnect
+                if forced_end < grant_end_time:
+                    logger.info(f"Session {session_id}: Using forced disconnect time {forced_end} instead of grant expiry {grant_end_time}")
+                    grant_end_time = forced_end
+            
             now = datetime.utcnow()
             remaining = (grant_end_time - now).total_seconds()
             
@@ -1397,10 +1679,36 @@ class SSHProxyServer:
             
             for warning_seconds, warning_text in warnings:
                 if remaining > warning_seconds:
-                    # Sleep until warning time
+                    # Sleep until warning time (in small increments to check for forced disconnect)
                     sleep_time = remaining - warning_seconds
                     logger.debug(f"Session {session_id}: Sleeping {sleep_time:.0f}s until {warning_text} warning")
-                    time.sleep(sleep_time)
+                    
+                    # Sleep in 1-second increments to check for forced disconnect
+                    for _ in range(int(sleep_time)):
+                        time.sleep(1)
+                        # Check if forced disconnect was injected
+                        if session_id in self.session_forced_endtimes:
+                            forced_end = self.session_forced_endtimes[session_id]
+                            now = datetime.utcnow()
+                            if forced_end <= now:
+                                logger.info(f"Session {session_id}: Forced disconnect detected, terminating immediately")
+                                # Jump to immediate disconnect
+                                remaining = 0
+                                break
+                            else:
+                                # Update grant_end_time to forced time
+                                grant_end_time = forced_end
+                                remaining = (grant_end_time - now).total_seconds()
+                                logger.info(f"Session {session_id}: Updated end_time to forced disconnect at {forced_end}")
+                                break
+                        # Check if session is still active
+                        if not transport.is_active() or not backend_transport.is_active():
+                            logger.info(f"Session {session_id}: Already disconnected during sleep")
+                            return
+                    
+                    # If forced disconnect caused break, skip to final disconnect
+                    if remaining <= 0:
+                        break
                     
                     # Check if session is still active
                     if not transport.is_active() or not backend_transport.is_active():
@@ -1427,21 +1735,60 @@ class SSHProxyServer:
                     
                     remaining = (grant_end_time - now).total_seconds()
             
-            # Sleep until expiry
+            # Sleep until expiry (in small increments to check for forced disconnect)
             if remaining > 0:
                 logger.debug(f"Session {session_id}: Sleeping {remaining:.0f}s until grant expiry")
-                time.sleep(remaining)
+                for _ in range(int(remaining)):
+                    time.sleep(1)
+                    # Check if forced disconnect was injected
+                    if session_id in self.session_forced_endtimes:
+                        forced_end = self.session_forced_endtimes[session_id]
+                        now = datetime.utcnow()
+                        if forced_end <= now:
+                            logger.info(f"Session {session_id}: Forced disconnect detected during final countdown")
+                            break
+                    # Check if session is still active
+                    if not transport.is_active() or not backend_transport.is_active():
+                        logger.info(f"Session {session_id}: Already disconnected during final countdown")
+                        return
             
             # Check if session is still active
             if not transport.is_active() or not backend_transport.is_active():
                 logger.info(f"Session {session_id}: Already disconnected before grant expiry")
                 return
             
+            # Determine disconnect reason by checking DB session
+            disconnect_reason = "Your access grant has expired"
+            termination_reason = 'grant_expired'
+            
+            if session_id in self.session_forced_endtimes:
+                # Check DB for actual termination reason
+                db = SessionLocal()
+                try:
+                    db_sess = db.query(DBSession).filter(DBSession.id == db_session_id).first()
+                    if db_sess and db_sess.termination_reason:
+                        termination_reason = db_sess.termination_reason
+                        
+                        # Set user-friendly message based on reason
+                        if termination_reason == 'gate_maintenance':
+                            disconnect_reason = "Gate entering maintenance mode"
+                        elif termination_reason == 'backend_maintenance':
+                            disconnect_reason = "Backend server entering maintenance mode"
+                        elif termination_reason == 'access_revoked':
+                            disconnect_reason = "Access has been revoked"
+                        else:
+                            disconnect_reason = f"Session terminated: {termination_reason}"
+                finally:
+                    db.close()
+                
+                # Clean up forced endtime
+                del self.session_forced_endtimes[session_id]
+            
             # Send final disconnection message
             final_message = (
                 f"\r\n\r\n"
                 f"{'='*70}\r\n"
-                f"  *** Your access grant has expired ***\r\n"
+                f"  *** {disconnect_reason} ***\r\n"
                 f"  Disconnecting now...\r\n"
                 f"{'='*70}\r\n\r\n"
             )
@@ -1474,21 +1821,33 @@ class SSHProxyServer:
             except:
                 pass
             
-            # Update database session
-            db = SessionLocal()
+            # Update session via Tower API
             try:
-                db_sess = db.query(DBSession).filter(DBSession.id == db_session_id).first()
-                if db_sess and db_sess.is_active:
-                    db_sess.ended_at = datetime.utcnow()
-                    db_sess.is_active = False
-                    db_sess.duration_seconds = int((db_sess.ended_at - db_sess.started_at).total_seconds())
-                    db_sess.termination_reason = 'grant_expired'
-                    db.commit()
-                    logger.info(f"Session {session_id}: Updated database with termination_reason='grant_expired'")
+                tower_client = TowerClient(GateConfig())
+                tower_client.update_session(
+                    session_id=session_id,
+                    ended_at=datetime.utcnow().isoformat(),
+                    is_active=False,
+                    termination_reason=termination_reason
+                )
+                logger.info(f"Session {session_id}: Updated via Tower API with termination_reason='{termination_reason}'")
             except Exception as e:
-                logger.error(f"Session {session_id}: Failed to update database: {e}")
-            finally:
-                db.close()
+                logger.error(f"Session {session_id}: Failed to update via Tower API: {e}")
+                # Fallback to direct DB update
+                db = SessionLocal()
+                try:
+                    db_sess = db.query(DBSession).filter(DBSession.id == db_session_id).first()
+                    if db_sess and db_sess.is_active:
+                        db_sess.ended_at = datetime.utcnow()
+                        db_sess.is_active = False
+                        db_sess.duration_seconds = int((db_sess.ended_at - db_sess.started_at).total_seconds())
+                        db_sess.termination_reason = termination_reason
+                        db.commit()
+                        logger.info(f"Session {session_id}: Updated database (fallback) with termination_reason='{termination_reason}'")
+                except Exception as e2:
+                    logger.error(f"Session {session_id}: Failed to update database: {e2}")
+                finally:
+                    db.close()
                 
         except Exception as e:
             logger.error(f"Session {session_id}: Error in grant expiry monitor: {e}", exc_info=True)
@@ -1718,7 +2077,32 @@ class SSHProxyServer:
                         channel.send(b"ERROR: Password failed on backend.\r\n")
                         channel.close()
                         return
+                
+                # If client used keyboard-interactive (switches, telnet-like devices)
+                elif hasattr(server_handler, 'client_interactive') and server_handler.client_interactive:
+                    try:
+                        # For keyboard-interactive, switches often don't use SSH auth at all
+                        # They expect raw connection and send prompts in the session itself (like telnet)
+                        # Try auth_none first - some switches accept this
+                        logger.info("Using keyboard-interactive for backend (switch/telnet-like)")
+                        try:
+                            backend_transport.auth_none(server_handler.ssh_login)
+                            logger.info(f"Backend accepted auth_none (switch mode)")
+                            authenticated = True
+                        except paramiko.BadAuthenticationType as e:
+                            # If switch doesn't accept auth_none, try interactive_dumb
+                            logger.info(f"Backend rejected auth_none, trying interactive_dumb: {e}")
+                            backend_transport.auth_interactive_dumb(server_handler.ssh_login)
+                            logger.info(f"Backend auth with keyboard-interactive succeeded")
+                            authenticated = True
+                    except Exception as e:
+                        logger.error(f"Backend keyboard-interactive auth failed: {e}")
+                        channel.send(b"ERROR: Interactive authentication failed on backend.\r\n")
+                        channel.close()
+                        return
+                
                 else:
+                    logger.error("No authentication method available for backend")
                     channel.close()
                     return
                     
@@ -1826,41 +2210,94 @@ class SSHProxyServer:
             # Start session recording (only for interactive sessions)
             recorder = None
             if should_record:
-                recorder = SSHSessionRecorder(session_id, user.username, target_server.ip_address)
+                recorder = SSHSessionRecorder(
+                    session_id=session_id,
+                    username=user.username,
+                    server_ip=target_server.ip_address,
+                    server_name=target_server.name,
+                    tower_client=server_handler.tower_client
+                )
                 recorder.record_event('session_start', f"User {user.username} connecting to {target_server.ip_address}")
             
-            # Get policy_id from access_result
-            selected_policy = server_handler.access_result.get('selected_policy') if hasattr(server_handler, 'access_result') else None
-            policy_id = selected_policy.id if selected_policy else None
+            # Get policy_id from access_result (Tower API response)
+            grant_id = server_handler.access_result.get('grant_id') if hasattr(server_handler, 'access_result') else None
             
             # Get SSH protocol version from client
             client_version = transport.remote_version if hasattr(transport, 'remote_version') else None
             protocol_version = client_version.decode('utf-8') if isinstance(client_version, bytes) else str(client_version) if client_version else None
             
-            # Create session record in database
-            db_session = DBSession(
-                session_id=session_id,
-                user_id=user.id,
-                server_id=target_server.id,
-                protocol='ssh',
-                source_ip=source_ip,
-                proxy_ip=dest_ip,
-                backend_ip=target_server.ip_address,
-                backend_port=22,
-                ssh_username=server_handler.ssh_login,
-                subsystem_name=server_handler.subsystem_name.decode('utf-8') if server_handler.subsystem_name and isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name,
-                ssh_agent_used=bool(server_handler.agent_channel),
-                started_at=datetime.utcnow(),
-                is_active=True,
-                recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
-                policy_id=policy_id,  # NEW v1.7.5: Track which policy granted access
-                connection_status='active',  # NEW v1.7.5: Connection status
-                protocol_version=protocol_version  # NEW v1.7.5: SSH client version
-            )
-            db.add(db_session)
-            db.commit()
-            db.refresh(db_session)
-            logger.info(f"Session {session_id} tracked in database (ID: {db_session.id})")
+            # Start stay via Tower API
+            try:
+                stay_response = server_handler.tower_client.start_stay(
+                    person_id=user.id,
+                    server_id=target_server.id,
+                    grant_id=grant_id
+                )
+                stay_id = stay_response.get('stay_id')
+                logger.info(f"Stay {stay_id} started via Tower API")
+            except Exception as e:
+                logger.error(f"Failed to start stay via Tower API: {e}")
+                stay_id = None
+            
+            # Create session record via Tower API
+            try:
+                subsystem = server_handler.subsystem_name
+                if subsystem and isinstance(subsystem, bytes):
+                    subsystem = subsystem.decode('utf-8')
+                
+                session_response = server_handler.tower_client.create_session(
+                    session_id=session_id,
+                    stay_id=stay_id,
+                    person_id=user.id,
+                    server_id=target_server.id,
+                    protocol='ssh',
+                    source_ip=source_ip,
+                    proxy_ip=dest_ip,
+                    backend_ip=target_server.ip_address,
+                    backend_port=22,
+                    grant_id=grant_id,
+                    ssh_username=server_handler.ssh_login,
+                    subsystem_name=subsystem,
+                    ssh_agent_used=bool(server_handler.agent_channel),
+                    recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
+                    protocol_version=protocol_version
+                )
+                db_session_id = session_response.get('db_session_id')
+                logger.info(f"Session {session_id} created via Tower API (DB ID: {db_session_id})")
+                
+                # Create local session object for compatibility
+                db_session = type('Session', (), {
+                    'id': db_session_id,
+                    'session_id': session_id,
+                    'user_id': user.id,
+                    'server_id': target_server.id
+                })()
+                
+            except Exception as e:
+                logger.error(f"Failed to create session via Tower API: {e}", exc_info=True)
+                # Fallback to direct DB insert
+                db_session = DBSession(
+                    session_id=session_id,
+                    user_id=user.id,
+                    server_id=target_server.id,
+                    protocol='ssh',
+                    source_ip=source_ip,
+                    proxy_ip=dest_ip,
+                    backend_ip=target_server.ip_address,
+                    backend_port=22,
+                    ssh_username=server_handler.ssh_login,
+                    subsystem_name=subsystem if 'subsystem' in locals() else None,
+                    ssh_agent_used=bool(server_handler.agent_channel),
+                    started_at=datetime.utcnow(),
+                    is_active=True,
+                    recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
+                    policy_id=grant_id,
+                    connection_status='active',
+                    protocol_version=protocol_version
+                )
+                db.add(db_session)
+                db.commit()
+                db.refresh(db_session)
             
             # Pass db_session to server_handler for port forwarding logging
             server_handler.db_session = db_session
@@ -1885,16 +2322,27 @@ class SSHProxyServer:
             write_utmp_login(session_id, user.username, tty_name, source_ip, backend_display)
             logger.info(f"Session {session_id} registered in utmp as {tty_name}")
             
+            # Register connection in active connections registry for heartbeat monitoring
+            self.active_connections[session_id] = (transport, backend_transport)
+            logger.debug(f"Session {session_id} registered in active connections")
+            
             # Check grant expiry for interactive shell sessions
             grant_end_time = None
-            if server_handler.channel_type == 'shell' and server_handler.matching_policies:
-                # Use effective_end_time from access control if available
+            if server_handler.channel_type == 'shell':
+                # Use effective_end_time from access control if available (Tower API)
                 # This considers both policy end_time AND schedule window end
                 if hasattr(server_handler, 'access_result') and server_handler.access_result:
-                    grant_end_time = server_handler.access_result.get('effective_end_time')
+                    effective_end_str = server_handler.access_result.get('effective_end_time')
+                    if effective_end_str:
+                        # Parse ISO format datetime string from API
+                        from dateutil import parser as dateparser
+                        grant_end_time = dateparser.isoparse(effective_end_str)
+                        # Convert to naive UTC for calculations
+                        if grant_end_time.tzinfo is not None:
+                            grant_end_time = grant_end_time.replace(tzinfo=None)
                 
-                # Fallback to old behavior (earliest policy end_time)
-                if grant_end_time is None:
+                # Fallback to old behavior (earliest policy end_time) - for legacy code paths
+                if grant_end_time is None and hasattr(server_handler, 'matching_policies') and server_handler.matching_policies:
                     end_times = [p.end_time for p in server_handler.matching_policies if p.end_time]
                     if end_times:
                         grant_end_time = min(end_times)
@@ -1907,11 +2355,16 @@ class SSHProxyServer:
                     remaining = grant_end_time - now
                     remaining_seconds = remaining.total_seconds()
                     
-                    # Format time remaining - show minutes if < 1 hour, else show hours
-                    if remaining_seconds < 3600:
-                        time_str = f"{remaining_seconds/60:.1f} minutes"
+                    # Format time remaining in hours and minutes
+                    hours = int(remaining_seconds // 3600)
+                    minutes = int((remaining_seconds % 3600) // 60)
+                    
+                    if hours > 0 and minutes > 0:
+                        time_str = f"{hours} hours and {minutes} minutes"
+                    elif hours > 0:
+                        time_str = f"{hours} hours"
                     else:
-                        time_str = f"{remaining_seconds/3600:.1f} hours"
+                        time_str = f"{minutes} minutes"
                     
                     # Convert UTC to Europe/Warsaw for display
                     warsaw_tz = pytz.timezone('Europe/Warsaw')
@@ -1951,19 +2404,50 @@ class SSHProxyServer:
                       (server_handler.subsystem_name.decode('utf-8') if isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name) == 'sftp')
             self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp)
             
-            # Close session in database
-            db_session.ended_at = datetime.utcnow()
-            db_session.is_active = False
-            db_session.duration_seconds = int((db_session.ended_at - db_session.started_at).total_seconds())
-            db_session.termination_reason = 'normal'
-            if recorder and hasattr(recorder, 'recording_file') and os.path.exists(recorder.recording_file):
-                db_session.recording_size = os.path.getsize(recorder.recording_file)
-            db.commit()
-            logger.info(f"Session {session_id} ended normally (duration: {db_session.duration_seconds}s)")
+            # Calculate session duration
+            started_at = datetime.utcnow() - timedelta(seconds=0)  # Will be calculated by Tower API
+            ended_at = datetime.utcnow()
+            
+            # Update session via Tower API
+            try:
+                update_payload = {
+                    'ended_at': ended_at.isoformat(),
+                    'is_active': False,
+                    'termination_reason': 'normal'
+                }
+                
+                if recorder and hasattr(recorder, 'recording_file') and os.path.exists(recorder.recording_file):
+                    update_payload['recording_path'] = recorder.recording_file
+                    update_payload['recording_size'] = os.path.getsize(recorder.recording_file)
+                
+                server_handler.tower_client.update_session(session_id, **update_payload)
+                logger.info(f"Session {session_id} ended normally via Tower API")
+            except Exception as e:
+                logger.error(f"Failed to update session via Tower API: {e}")
+                # Fallback to direct DB update
+                try:
+                    db_session_obj = db.query(DBSession).filter(DBSession.session_id == session_id).first()
+                    if db_session_obj:
+                        db_session_obj.ended_at = ended_at
+                        db_session_obj.is_active = False
+                        db_session_obj.duration_seconds = int((ended_at - db_session_obj.started_at).total_seconds())
+                        db_session_obj.termination_reason = 'normal'
+                        if recorder and hasattr(recorder, 'recording_file') and os.path.exists(recorder.recording_file):
+                            db_session_obj.recording_size = os.path.getsize(recorder.recording_file)
+                        db.commit()
+                        logger.info(f"Session {session_id} ended normally (fallback DB update)")
+                except Exception as e2:
+                    logger.error(f"Failed fallback DB update: {e2}")
+                    db.rollback()
             
             # Write logout to utmp/wtmp
             write_utmp_logout(tty_name, user.username)
             logger.info(f"Session {session_id} removed from utmp")
+            
+            # Unregister from active connections
+            if session_id in self.active_connections:
+                del self.active_connections[session_id]
+                logger.debug(f"Session {session_id} unregistered from active connections")
             
             # Save recording (only if we were recording)
             if recorder:
@@ -1972,18 +2456,34 @@ class SSHProxyServer:
         
         except Exception as e:
             logger.error(f"Error handling client {source_ip}: {e}", exc_info=True)
-            # Try to close session in database on error
+            # Try to close session via Tower API on error
             try:
-                db_session_error = db.query(DBSession).filter(DBSession.session_id == session_id).first()
-                if db_session_error and db_session_error.is_active:
-                    db_session_error.ended_at = datetime.utcnow()
-                    db_session_error.is_active = False
-                    db_session_error.duration_seconds = int((db_session_error.ended_at - db_session_error.started_at).total_seconds())
-                    db_session_error.termination_reason = 'error'
-                    db.commit()
-                    logger.info(f"Session {session_id} closed due to error")
-                    
-                    # Write logout to utmp
+                if 'session_id' in locals() and 'server_handler' in locals() and hasattr(server_handler, 'tower_client'):
+                    try:
+                        server_handler.tower_client.update_session(
+                            session_id=session_id,
+                            ended_at=datetime.utcnow().isoformat(),
+                            is_active=False,
+                            termination_reason='error'
+                        )
+                        logger.info(f"Session {session_id} closed due to error via Tower API")
+                    except Exception as api_err:
+                        logger.error(f"Failed to close session via API: {api_err}")
+                        # Fallback to DB
+                        db_session_error = db.query(DBSession).filter(DBSession.session_id == session_id).first()
+                        if db_session_error and db_session_error.is_active:
+                            db_session_error.ended_at = datetime.utcnow()
+                            db_session_error.is_active = False
+                            db_session_error.duration_seconds = int((db_session_error.ended_at - db_session_error.started_at).total_seconds())
+                            db_session_error.termination_reason = 'error'
+                            db.commit()
+                            logger.info(f"Session {session_id} closed due to error (fallback DB)")
+                
+                # Write logout to utmp
+                if 'db_session' in locals() and hasattr(db_session, 'id'):
+                    tty_name = f"ssh{db_session.id % 100}"
+                    write_utmp_logout(tty_name, user.username if 'user' in locals() else "")
+                elif 'db_session_error' in locals() and hasattr(db_session_error, 'id'):
                     tty_name = f"ssh{db_session_error.id % 100}"
                     write_utmp_logout(tty_name, user.username if 'user' in locals() else "")
                     
@@ -1996,9 +2496,165 @@ class SSHProxyServer:
             db.close()
             client_socket.close()
     
+    def send_heartbeat_loop(self):
+        """Send periodic heartbeats to Tower and check for sessions to terminate"""
+        logger.info(f"Heartbeat thread started (interval: {self.heartbeat_interval}s)")
+        
+        while self.running:
+            try:
+                # Count active sessions and stays via database
+                db = SessionLocal()
+                try:
+                    active_sessions = db.query(DBSession).filter(DBSession.is_active == True).count()
+                    
+                    # Import Stay here to avoid circular import
+                    from src.core.database import Stay
+                    active_stays = db.query(Stay).filter(Stay.is_active == True).count()
+                    
+                    # Send heartbeat to Tower
+                    self.tower_client.heartbeat(
+                        active_stays=active_stays,
+                        active_sessions=active_sessions
+                    )
+                    logger.info(f"Heartbeat sent: {active_stays} stays, {active_sessions} sessions")
+                    
+                    # Check for sessions that should be terminated
+                    # 1. Grant expired/cancelled
+                    # 2. User deactivated
+                    # 3. Policy changed
+                    self.check_and_terminate_sessions(db)
+                    
+                except Exception as e:
+                    logger.error(f"Error sending heartbeat: {e}")
+                finally:
+                    db.close()
+                
+            except Exception as e:
+                logger.error(f"Heartbeat thread error: {e}")
+            
+            # Sleep in small increments to allow quick shutdown
+            for _ in range(self.heartbeat_interval):
+                if not self.running:
+                    break
+                time.sleep(1)
+        
+        logger.info("Heartbeat thread stopped")
+    
+    def check_and_terminate_sessions(self, db):
+        """Check active sessions and terminate those that should be killed
+        
+        Reasons for termination:
+        - Grant expired or cancelled (checked via Tower API)
+        - User deactivated (checked via Tower API)
+        - Policy changed (checked via Tower API)
+        - Maintenance mode (termination_reason already set by API)
+        """
+        try:
+            # Get all active sessions
+            active_sessions = db.query(DBSession).filter(DBSession.is_active == True).all()
+            
+            for session in active_sessions:
+                should_terminate = False
+                reason = None
+                disconnect_at = None
+                
+                # FIRST: Check if session already marked for termination (maintenance mode)
+                if session.termination_reason:
+                    should_terminate = True
+                    
+                    # Try to parse denial_details as JSON (maintenance mode)
+                    try:
+                        import json
+                        details = json.loads(session.denial_details) if session.denial_details else {}
+                        reason = details.get('reason', session.termination_reason)
+                        
+                        # Get disconnect_at from details if available
+                        disconnect_at_str = details.get('disconnect_at')
+                        if disconnect_at_str:
+                            from dateutil import parser as dateparser
+                            disconnect_at = dateparser.isoparse(disconnect_at_str)
+                            if disconnect_at.tzinfo is not None:
+                                disconnect_at = disconnect_at.replace(tzinfo=None)
+                        else:
+                            # Fallback: disconnect in 5 seconds
+                            disconnect_at = datetime.utcnow() + timedelta(seconds=5)
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        # Old format: denial_details is plain text or None
+                        reason = session.denial_details or session.termination_reason
+                        disconnect_at = datetime.utcnow() + timedelta(seconds=5)
+                    
+                    logger.warning(
+                        f"Session {session.session_id} marked for termination: {reason}"
+                    )
+                else:
+                    # SECOND: Check via Tower API if grant still valid
+                    try:
+                        result = self.tower_client.check_grant(
+                            source_ip=session.source_ip,
+                            destination_ip=session.proxy_ip,
+                            protocol=session.protocol,
+                            ssh_login=session.ssh_username
+                        )
+                        
+                        if not result.get('allowed'):
+                            should_terminate = True
+                            reason = result.get('reason', 'Access revoked')
+                            # Get disconnect_at from API response
+                            disconnect_at_str = result.get('disconnect_at')
+                            if disconnect_at_str:
+                                from dateutil import parser as dateparser
+                                disconnect_at = dateparser.isoparse(disconnect_at_str)
+                                if disconnect_at.tzinfo is not None:
+                                    disconnect_at = disconnect_at.replace(tzinfo=None)
+                            logger.warning(
+                                f"Session {session.session_id} should be terminated: {reason}"
+                            )
+                    
+                    except Exception as e:
+                        logger.error(f"Error checking session {session.session_id}: {e}")
+                        continue
+                
+                # Terminate session if needed
+                if should_terminate:
+                    try:
+                        # Default disconnect time if not set
+                        if not disconnect_at:
+                            disconnect_at = datetime.utcnow() + timedelta(seconds=5)
+                        
+                        logger.info(
+                            f"Session {session.session_id}: Injecting forced disconnect at {disconnect_at} "
+                            f"(reason: {reason})"
+                        )
+                        
+                        # Inject forced disconnect time - monitor_grant_expiry thread will handle it
+                        self.session_forced_endtimes[session.session_id] = disconnect_at
+                        
+                        # Mark session for termination in DB (will be finalized when actually disconnected)
+                        if not session.termination_reason:
+                            session.termination_reason = 'access_revoked'
+                            session.denial_details = reason
+                            db.commit()
+                        
+                        logger.info(
+                            f"Session {session.session_id}: Forced disconnect injected, "
+                            f"will disconnect at {disconnect_at}"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Error terminating session {session.session_id}: {e}")
+                        db.rollback()
+        
+        except Exception as e:
+            logger.error(f"Error in check_and_terminate_sessions: {e}")
+    
     def start(self):
         """Start the proxy server"""
         logger.info(f"Starting SSH Proxy Server on {self.host}:{self.port}")
+        
+        # Start heartbeat thread
+        self.running = True
+        self.heartbeat_thread = threading.Thread(target=self.send_heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
         
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2019,26 +2675,32 @@ class SSHProxyServer:
         
         except KeyboardInterrupt:
             logger.info("Shutting down SSH Proxy Server...")
+            self.running = False  # Stop heartbeat thread
+            if self.heartbeat_thread:
+                self.heartbeat_thread.join(timeout=5)
         
         finally:
             server_socket.close()
 
 
 def cleanup_stale_sessions():
-    """Clean up active sessions from previous runs on startup"""
+    """Clean up active sessions and stays from previous runs on startup"""
     try:
-        from src.core.database import SessionLocal, Session
+        from src.core.database import SessionLocal, Session, Stay
         from datetime import datetime
         
+        # Note: In Tower/Gate architecture, this cleanup should ideally be done
+        # by Tower on Gate startup (via heartbeat with status). For now, fallback to direct DB.
         db = SessionLocal()
         try:
+            now = datetime.utcnow()
+            
             # Find all active sessions (is_active=True or ended_at=NULL)
             stale_sessions = db.query(Session).filter(
                 (Session.is_active == True) | (Session.ended_at == None)
             ).all()
             
             if stale_sessions:
-                now = datetime.utcnow()
                 for session in stale_sessions:
                     session.is_active = False
                     session.ended_at = now
@@ -2052,10 +2714,30 @@ def cleanup_stale_sessions():
                 logger.info(f"Cleaned up {len(stale_sessions)} stale sessions from previous run")
             else:
                 logger.info("No stale sessions to clean up")
+            
+            # Find all active stays (is_active=True or ended_at=NULL)
+            stale_stays = db.query(Stay).filter(
+                (Stay.is_active == True) | (Stay.ended_at == None)
+            ).all()
+            
+            if stale_stays:
+                for stay in stale_stays:
+                    stay.is_active = False
+                    stay.ended_at = now
+                    stay.termination_reason = 'service_restart'
+                    
+                    # Calculate duration if we have start time
+                    if stay.started_at:
+                        stay.duration_seconds = int((now - stay.started_at).total_seconds())
+                
+                db.commit()
+                logger.info(f"Cleaned up {len(stale_stays)} stale stays from previous run")
+            else:
+                logger.info("No stale stays to clean up")
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"Failed to clean up stale sessions: {e}")
+        logger.error(f"Failed to clean up stale sessions/stays: {e}")
 
 
 def main():

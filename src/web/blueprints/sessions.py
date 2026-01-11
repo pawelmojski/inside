@@ -107,8 +107,12 @@ def parse_ssh_recording(file_path):
 
 def parse_ssh_recording_internal(file_path):
     """
-    Internal parser - Parse SSH recording JSON/log file and return human-readable log entries.
+    Internal parser - Parse SSH recording file (JSON or raw binary).
     Returns dict with session info and list of log entries.
+    
+    Supports two formats:
+    1. Legacy JSON format: {events: [{timestamp, type, data}]}
+    2. New raw binary format: direct terminal stream from Tower API
     """
     if not os.path.exists(file_path):
         return None
@@ -202,114 +206,364 @@ def parse_ssh_recording_internal(file_path):
         
         return ''.join(result)
     
+    # Detect file format
     try:
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-        
-        events = data.get('events', [])
-        start_time_str = data.get('start_time') or data.get('session_start', '')
-        end_time_str = data.get('end_time', '')
-        
-        # Parse start time
-        if start_time_str:
-            session_start = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-        else:
-            session_start = datetime.now()
-        
-        log_entries = []
-        
-        for event in events:
-            # Parse event timestamp
-            event_ts_str = event.get('timestamp', '')
-            if event_ts_str:
-                event_ts = datetime.fromisoformat(event_ts_str.replace('Z', '+00:00'))
-                # Calculate elapsed seconds from session start
-                elapsed_seconds = (event_ts - session_start).total_seconds()
-            else:
-                elapsed_seconds = 0
+        with open(file_path, 'rb') as f:
+            header = f.read(100)
+            f.seek(0)
             
-            event_type = event.get('type', 'unknown')
-            content = event.get('data', '')
+            # Check format: JSONL (one JSON per line), JSON (single object), or raw
+            first_line = header.split(b'\n')[0]
             
-            # Skip client_to_server events that don't contain newline/return
-            # (these are individual keystrokes that will be echoed by server anyway)
-            if event_type == 'client_to_server':
-                if '\n' not in content and '\r' not in content and len(content) < 2:
-                    continue  # Skip single character keystrokes
-            
-            # Format elapsed time
-            if elapsed_seconds < 60:
-                elapsed_str = f"{int(elapsed_seconds)}s"
-            elif elapsed_seconds < 3600:
-                minutes = int(elapsed_seconds // 60)
-                seconds = int(elapsed_seconds % 60)
-                elapsed_str = f"{minutes}m {seconds}s"
-            else:
-                hours = int(elapsed_seconds // 3600)
-                minutes = int((elapsed_seconds % 3600) // 60)
-                elapsed_str = f"{hours}h {minutes}m"
-            
-            # Clean up content - remove excessive whitespace and control chars for display
-            display_content = content
-            if event_type in ['server_to_client', 'client_to_server']:
-                # Truncate before conversion (to avoid huge HTML)
-                original_length = len(content)
-                truncated = False
-                if original_length > 2000:
-                    content = content[:2000]
-                    truncated = True
+            if first_line.startswith(b'{"type":') or b'"timestamp"' in first_line:
+                # JSONL format (JSON Lines - one event per line)
+                events = []
+                for line in f:
+                    line_str = line.decode('utf-8', errors='replace').strip()
+                    if line_str:
+                        try:
+                            event = json.loads(line_str)
+                            events.append(event)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSONL line: {e}")
+                            continue
                 
-                # Convert ANSI escape sequences to HTML
-                display_content = ansi_to_html(content)
+                # Extract session metadata from first event (session_start)
+                session_start_event = events[0] if events and events[0].get('type') == 'session_start' else None
+                if session_start_event:
+                    start_time_str = session_start_event.get('timestamp', '')
+                    username = session_start_event.get('username', 'unknown')
+                    server_ip = session_start_event.get('server', 'unknown')
+                else:
+                    start_time_str = events[0].get('timestamp', '') if events else ''
+                    username = 'unknown'
+                    server_ip = 'unknown'
                 
-                if truncated:
-                    display_content += '... (truncated)'
+                # Parse start time
+                if start_time_str:
+                    session_start = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                else:
+                    session_start = datetime.now()
+                
+                # Find session_end for duration
+                session_end_event = events[-1] if events and events[-1].get('type') == 'session_end' else None
+                if session_end_event:
+                    end_time_str = session_end_event.get('timestamp', '')
+                    duration = session_end_event.get('duration', 0)
+                else:
+                    end_time_str = ''
+                    duration = 0
+                
+                log_entries = []
+                
+                for event in events:
+                    event_type = event.get('type', 'unknown')
+                    
+                    # Skip metadata events
+                    if event_type in ['session_start', 'session_end']:
+                        continue
+                    
+                    # Parse event timestamp
+                    event_ts_str = event.get('timestamp', '')
+                    if event_ts_str:
+                        event_ts = datetime.fromisoformat(event_ts_str.replace('Z', '+00:00'))
+                        elapsed_seconds = (event_ts - session_start).total_seconds()
+                    else:
+                        elapsed_seconds = 0
+                    
+                    content = event.get('data', '')
+                    
+                    # Skip single keystrokes
+                    if event_type == 'client':
+                        if '\n' not in content and '\r' not in content and len(content) < 2:
+                            continue
+                    
+                    # Format elapsed time
+                    if elapsed_seconds < 60:
+                        elapsed_str = f"{int(elapsed_seconds)}s"
+                    elif elapsed_seconds < 3600:
+                        minutes = int(elapsed_seconds // 60)
+                        seconds = int(elapsed_seconds % 60)
+                        elapsed_str = f"{minutes}m {seconds}s"
+                    else:
+                        hours = int(elapsed_seconds // 3600)
+                        minutes = int((elapsed_seconds % 3600) // 60)
+                        elapsed_str = f"{hours}h {minutes}m"
+                    
+                    # Format timestamp
+                    event_ts_str = event_ts.strftime('%H:%M:%S') if 'event_ts' in locals() else ''
+                    
+                    # Convert ANSI to HTML for display
+                    display_content = content
+                    if event_type in ['server', 'client']:
+                        original_length = len(content)
+                        truncated = False
+                        if original_length > 2000:
+                            content = content[:2000]
+                            truncated = True
+                        
+                        display_content = ansi_to_html(content)
+                        
+                        if truncated:
+                            display_content += '... (truncated)'
+                    
+                    entry = {
+                        'timestamp': event_ts_str,
+                        'elapsed': elapsed_str,
+                        'elapsed_seconds': elapsed_seconds,
+                        'type': event_type,
+                        'content': display_content,
+                        'content_length': len(content),
+                        'raw': event
+                    }
+                    
+                    log_entries.append(entry)
+                
+                # Group consecutive events of the same type within 100ms
+                grouped_entries = []
+                for entry in log_entries:
+                    if entry['type'] in ['session_start', 'session_end']:
+                        grouped_entries.append(entry)
+                        continue
+                    
+                    # Try to merge with previous entry if same type and within 100ms
+                    if (grouped_entries and 
+                        grouped_entries[-1]['type'] == entry['type'] and
+                        entry['elapsed_seconds'] - grouped_entries[-1]['elapsed_seconds'] < 0.1):
+                        # Merge content
+                        grouped_entries[-1]['content'] += entry['content']
+                        grouped_entries[-1]['content_length'] += entry['content_length']
+                    else:
+                        grouped_entries.append(entry)
+                
+                return {
+                    'session_start': start_time_str,
+                    'session_end': end_time_str,
+                    'total_duration': f"{int(duration)}s" if duration else 'streaming',
+                    'total_events': len(events),
+                    'log_entries': grouped_entries,
+                    'username': username,
+                    'server_ip': server_ip,
+                    'format': 'jsonl'
+                }
             
-            entry = {
-                'timestamp': event_ts_str,
-                'elapsed': elapsed_str,
-                'elapsed_seconds': elapsed_seconds,
-                'type': event_type,
-                'content': display_content,
-                'content_length': len(content),
-                'raw': event
-            }
+            elif header.startswith(b'{') or b'"events"' in header:
+                # Legacy JSON format (single object with events array)
+                data = json.load(f)
+                events = data.get('events', [])
+                start_time_str = data.get('start_time') or data.get('session_start', '')
+                end_time_str = data.get('end_time', '')
+                
+                # Parse start time
+                if start_time_str:
+                    session_start = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                else:
+                    session_start = datetime.now()
+                
+                log_entries = []
+                
+                for event in events:
+                    # Parse event timestamp
+                    event_ts_str = event.get('timestamp', '')
+                    if event_ts_str:
+                        event_ts = datetime.fromisoformat(event_ts_str.replace('Z', '+00:00'))
+                        elapsed_seconds = (event_ts - session_start).total_seconds()
+                    else:
+                        elapsed_seconds = 0
+                    
+                    event_type = event.get('type', 'unknown')
+                    content = event.get('data', '')
+                    
+                    # Skip single keystrokes
+                    if event_type == 'client':
+                        if '\n' not in content and '\r' not in content and len(content) < 2:
+                            continue
+                    
+                    # Format elapsed time
+                    if elapsed_seconds < 60:
+                        elapsed_str = f"{int(elapsed_seconds)}s"
+                    elif elapsed_seconds < 3600:
+                        minutes = int(elapsed_seconds // 60)
+                        seconds = int(elapsed_seconds % 60)
+                        elapsed_str = f"{minutes}m {seconds}s"
+                    else:
+                        hours = int(elapsed_seconds // 3600)
+                        minutes = int((elapsed_seconds % 3600) // 60)
+                        elapsed_str = f"{hours}h {minutes}m"
+                    
+                    # Format timestamp
+                    event_ts_str = event_ts.strftime('%H:%M:%S') if 'event_ts' in locals() else ''
+                    
+                    # Convert ANSI to HTML for display
+                    display_content = content
+                    if event_type in ['server', 'client']:
+                        original_length = len(content)
+                        truncated = False
+                        if original_length > 2000:
+                            content = content[:2000]
+                            truncated = True
+                        
+                        display_content = ansi_to_html(content)
+                        
+                        if truncated:
+                            display_content += '... (truncated)'
+                    
+                    entry = {
+                        'timestamp': event_ts_str,
+                        'elapsed': elapsed_str,
+                        'elapsed_seconds': elapsed_seconds,
+                        'type': event_type,
+                        'content': display_content,
+                        'content_length': len(content),
+                        'raw': event
+                    }
+                    
+                    log_entries.append(entry)
+                
+                # Group consecutive events
+                grouped_entries = []
+                for entry in log_entries:
+                    if entry['type'] in ['session_start', 'session_end']:
+                        grouped_entries.append(entry)
+                        continue
+                    
+                    if (grouped_entries and 
+                        grouped_entries[-1]['type'] == entry['type'] and
+                        entry['elapsed_seconds'] - grouped_entries[-1]['elapsed_seconds'] < 0.1):
+                        grouped_entries[-1]['content'] += entry['content']
+                        grouped_entries[-1]['content_length'] += entry['content_length']
+                    else:
+                        grouped_entries.append(entry)
+                
+                # Calculate duration
+                if end_time_str:
+                    end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                    duration_seconds = (end_time - session_start).total_seconds()
+                else:
+                    duration_seconds = data.get('duration_seconds', 0)
+                
+                return {
+                    'session_start': start_time_str,
+                    'session_end': end_time_str,
+                    'total_duration': f"{int(duration_seconds)}s",
+                    'total_events': len(events),
+                    'log_entries': grouped_entries,
+                    'username': data.get('username', 'unknown'),
+                    'server_ip': data.get('server_ip', 'unknown'),
+                    'format': 'json'
+                }
             
-            log_entries.append(entry)
-        
-        # Group consecutive events of the same type within 100ms
-        grouped_entries = []
-        for entry in log_entries:
-            if entry['type'] in ['session_start', 'session_end']:
-                grouped_entries.append(entry)
-                continue
+            elif b'Session Recording' in header:
+                # New raw binary format with header
+                raw_content = f.read()
+                
+                # Parse header (first few lines before empty line)
+                header_text = raw_content.decode('utf-8', errors='ignore').split('\n\n')[0]
+                
+                # Extract metadata from header
+                username = 'unknown'
+                server_ip = 'unknown'
+                start_time_str = ''
+                
+                for line in header_text.split('\n'):
+                    if line.startswith('User:'):
+                        username = line.split(':', 1)[1].strip()
+                    elif line.startswith('Server:'):
+                        parts = line.split('(')
+                        if len(parts) > 1:
+                            server_ip = parts[1].rstrip(')')
+                    elif line.startswith('Started:'):
+                        start_time_str = line.split(':', 1)[1].strip()
+                
+                # Read raw terminal data (after header)
+                terminal_data = b'\n\n'.join(raw_content.split(b'\n\n')[1:])
+                
+                # Convert raw terminal output to HTML
+                terminal_text = terminal_data.decode('utf-8', errors='ignore')
+                display_content = ansi_to_html(terminal_text)
+                
+                # Create single entry with all output
+                log_entries = [{
+                    'timestamp': '00:00:00',
+                    'elapsed': '0s',
+                    'elapsed_seconds': 0,
+                    'type': 'terminal_output',
+                    'content': display_content,
+                    'content_length': len(terminal_text),
+                    'raw': None
+                }]
+                
+                file_size = os.path.getsize(file_path)
+                
+                return {
+                    'session_start': start_time_str,
+                    'session_end': '',
+                    'total_duration': 'streaming',
+                    'total_events': 1,
+                    'log_entries': log_entries,
+                    'username': username,
+                    'server_ip': server_ip,
+                    'format': 'raw',
+                    'file_size': file_size
+                }
             
-            # Try to merge with previous entry if same type and within 100ms
-            if (grouped_entries and 
-                grouped_entries[-1]['type'] == entry['type'] and
-                entry['elapsed_seconds'] - grouped_entries[-1]['elapsed_seconds'] < 0.1):
-                # Merge content
-                grouped_entries[-1]['content'] += entry['content']
-                grouped_entries[-1]['content_length'] += entry['content_length']
             else:
-                grouped_entries.append(entry)
+                # Unknown format - treat as raw binary
+                raw_content = f.read()
+                terminal_text = raw_content.decode('utf-8', errors='ignore')
+                display_content = ansi_to_html(terminal_text)
+                
+                log_entries = [{
+                    'timestamp': '00:00:00',
+                    'elapsed': '0s',
+                    'elapsed_seconds': 0,
+                    'type': 'raw_output',
+                    'content': display_content,
+                    'content_length': len(terminal_text),
+                    'raw': None
+                }]
+                
+                return {
+                    'session_start': '',
+                    'session_end': '',
+                    'total_duration': 'unknown',
+                    'total_events': 1,
+                    'log_entries': log_entries,
+                    'username': 'unknown',
+                    'server_ip': 'unknown',
+                    'format': 'raw',
+                    'file_size': os.path.getsize(file_path)
+                }
         
-        # Calculate total duration
-        if end_time_str:
-            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-            duration_seconds = (end_time - session_start).total_seconds()
-        else:
-            duration_seconds = data.get('duration_seconds', 0)
+    except json.JSONDecodeError:
+        # Not JSON - treat as raw
+        with open(file_path, 'rb') as f:
+            raw_content = f.read()
+        terminal_text = raw_content.decode('utf-8', errors='ignore')
+        display_content = ansi_to_html(terminal_text)
+        
+        log_entries = [{
+            'timestamp': '00:00:00',
+            'elapsed': '0s',
+            'elapsed_seconds': 0,
+            'type': 'raw_output',
+            'content': display_content,
+            'content_length': len(terminal_text),
+            'raw': None
+        }]
         
         return {
-            'session_start': start_time_str,
-            'session_end': end_time_str,
-            'total_duration': f"{int(duration_seconds)}s",
-            'total_events': len(events),
-            'log_entries': grouped_entries,
-            'username': data.get('username', 'unknown'),
-            'server_ip': data.get('server_ip', 'unknown')
+            'session_start': '',
+            'session_end': '',
+            'total_duration': 'unknown',
+            'total_events': 1,
+            'log_entries': log_entries,
+            'username': 'unknown',
+            'server_ip': 'unknown',
+            'format': 'raw',
+            'file_size': os.path.getsize(file_path)
         }
+    
     except Exception as e:
         return {'error': str(e)}
 

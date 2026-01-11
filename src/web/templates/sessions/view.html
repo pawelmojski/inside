@@ -23,8 +23,8 @@
                     <h6 class="text-muted">Connection Details</h6>
                     <table class="table table-sm">
                         <tr>
-                            <th style="width: 40%;">User:</th>
-                            <td><strong>{{ session.user.username if session.user else 'Unknown' }}</strong></td>
+                            <th style="width: 40%;">Person:</th>
+                            <td><strong>{{ session.user.full_name or session.user.username if session.user else 'Unknown' }}</strong></td>
                         </tr>
                         <tr>
                             <th>Server:</th>
@@ -124,6 +124,24 @@
                                 {% endif %}
                             </td>
                         </tr>
+                        {% if session.gate_id %}
+                        <tr>
+                            <th>Gate:</th>
+                            <td>
+                                <span class="badge bg-info">
+                                    <i class="bi bi-hdd-network"></i> {{ session.gate.name if session.gate else 'Gate ' + session.gate_id|string }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% if session.stay_id %}
+                        <tr>
+                            <th>Stay:</th>
+                            <td>
+                                <span class="badge bg-secondary">Stay #{{ session.stay_id }}</span>
+                            </td>
+                        </tr>
+                        {% endif %}
                         {% if session.connection_status == 'denied' %}
                         <tr>
                             <th>Denial Reason:</th>
@@ -476,8 +494,8 @@
                             {% if entry.type not in ['session_start', 'session_end'] %}
                             <div class="log-entry log-{{ entry.type }}" data-timestamp="{{ entry.elapsed_seconds }}">
                                 <span class="log-time">[{{ entry.elapsed }}]</span>
-                                <span class="log-type badge bg-{{ 'success' if entry.type == 'client_to_server' else 'info' if entry.type == 'server_to_client' else 'secondary' }}">
-                                    {% if entry.type == 'client_to_server' %}Client{% elif entry.type == 'server_to_client' %}Server{% else %}{{ entry.type.replace('_', ' ').title() }}{% endif %}
+                                <span class="log-type badge bg-{{ 'success' if entry.type == 'client' else 'info' if entry.type == 'server' else 'secondary' }}">
+                                    {% if entry.type == 'client' %}Client{% elif entry.type == 'server' %}Server{% else %}{{ entry.type.replace('_', ' ').title() }}{% endif %}
                                 </span>
                                 <span class="log-content">{{ entry.content|safe }}</span>
                                 {% if entry.content_length > 500 %}
@@ -728,11 +746,11 @@
 }
 
 /* Type-specific styling */
-.log-client_to_server {
+.log-client {
     border-left-color: #28a745;
 }
 
-.log-server_to_client {
+.log-server {
     border-left-color: #17a2b8;
 }
 
@@ -758,8 +776,8 @@ document.addEventListener('DOMContentLoaded', function() {
         
         logEntries.forEach(entry => {
             const content = entry.textContent.toLowerCase();
-            const isClient = entry.classList.contains('log-client_to_server');
-            const isServer = entry.classList.contains('log-server_to_client');
+            const isClient = entry.classList.contains('log-client');
+            const isServer = entry.classList.contains('log-server');
             
             // Check type filter
             let typeMatch = true;
@@ -866,10 +884,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             
                             let typeLabel = entry.type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
                             let badgeClass = 'secondary';
-                            if (entry.type === 'client_to_server') {
+                            if (entry.type === 'client') {
                                 badgeClass = 'success';
                                 typeLabel = 'Client';
-                            } else if (entry.type === 'server_to_client') {
+                            } else if (entry.type === 'server') {
                                 badgeClass = 'info';
                                 typeLabel = 'Server';
                             }

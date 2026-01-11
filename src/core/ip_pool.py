@@ -15,24 +15,48 @@ load_dotenv()
 class IPPoolManager:
     """Manages IP pool allocation and deallocation."""
     
-    def __init__(self):
-        """Initialize IP pool manager."""
-        self.network = ipaddress.IPv4Network(os.getenv("IP_POOL_NETWORK", "10.0.160.128/25"))
-        self.pool_start = ipaddress.IPv4Address(os.getenv("IP_POOL_START", "10.0.160.129"))
-        self.pool_end = ipaddress.IPv4Address(os.getenv("IP_POOL_END", "10.0.160.254"))
+    def __init__(self, gate=None):
+        """Initialize IP pool manager.
         
-    def get_available_ips(self, db: Session) -> List[str]:
-        """Get list of available IPs from the pool."""
+        Args:
+            gate: Gate object with IP pool configuration. If None, uses env vars (legacy).
+        """
+        if gate and gate.ip_pool_network:
+            # Use gate-specific configuration
+            self.network = ipaddress.IPv4Network(gate.ip_pool_network)
+            self.pool_start = ipaddress.IPv4Address(gate.ip_pool_start)
+            self.pool_end = ipaddress.IPv4Address(gate.ip_pool_end)
+        else:
+            # Fallback to environment variables (legacy/default)
+            self.network = ipaddress.IPv4Network(os.getenv("IP_POOL_NETWORK", "10.0.160.128/25"))
+            self.pool_start = ipaddress.IPv4Address(os.getenv("IP_POOL_START", "10.0.160.129"))
+            self.pool_end = ipaddress.IPv4Address(os.getenv("IP_POOL_END", "10.0.160.254"))
+        
+    def get_available_ips(self, db: Session, gate_id: Optional[int] = None) -> List[str]:
+        """Get list of available IPs from the pool for a specific gate.
+        
+        Args:
+            db: Database session
+            gate_id: Optional gate ID to filter by (if None, checks all gates)
+        
+        Returns:
+            List of available IP addresses
+        """
         from sqlalchemy import or_
         
-        # Get all currently allocated IPs (both permanent and temporary)
-        allocated = db.query(IPAllocation.allocated_ip).filter(
+        # Get all currently allocated IPs for this gate (or all gates if gate_id=None)
+        query = db.query(IPAllocation.allocated_ip).filter(
             IPAllocation.is_active == True,
             or_(
                 IPAllocation.expires_at.is_(None),  # Permanent allocations
                 IPAllocation.expires_at > datetime.utcnow()  # Active temporary allocations
             )
-        ).all()
+        )
+        
+        if gate_id is not None:
+            query = query.filter(IPAllocation.gate_id == gate_id)
+        
+        allocated = query.all()
         allocated_ips = {ip[0] for ip in allocated}
         
         # Generate list of available IPs
@@ -50,16 +74,21 @@ class IPPoolManager:
         self,
         db: Session,
         server_id: int,
+        gate_id: int = 1,  # Default to gate-1 for backward compatibility
         specific_ip: Optional[str] = None
     ) -> Optional[str]:
         """
-        Allocate a permanent IP for a server (no expiration).
+        Allocate a permanent IP for a server on a specific gate (no expiration).
+        
+        IP pools are per-gate and can overlap between gates.
+        The same IP (e.g., 10.0.160.129) can be used on multiple gates simultaneously.
         
         Used for static server assignments via CLI assign-proxy-ip command.
         
         Args:
             db: Database session
             server_id: Target server ID
+            gate_id: Gate ID (IP pools are per-gate)
             specific_ip: Optional specific IP to allocate (must be in pool)
             
         Returns:
@@ -72,9 +101,10 @@ class IPPoolManager:
             if ip_obj < self.pool_start or ip_obj > self.pool_end:
                 return None
             
-            # Check if already allocated
+            # Check if already allocated ON THIS GATE
             existing = db.query(IPAllocation).filter(
                 IPAllocation.allocated_ip == specific_ip,
+                IPAllocation.gate_id == gate_id,
                 IPAllocation.is_active == True
             ).first()
             if existing:
@@ -82,8 +112,8 @@ class IPPoolManager:
             
             allocated_ip = specific_ip
         else:
-            # Auto-allocate from available pool
-            available_ips = self.get_available_ips(db)
+            # Auto-allocate from available pool (for this gate)
+            available_ips = self.get_available_ips(db, gate_id=gate_id)
             
             if not available_ips:
                 return None
@@ -94,6 +124,7 @@ class IPPoolManager:
         allocation = IPAllocation(
             allocated_ip=allocated_ip,
             server_id=server_id,
+            gate_id=gate_id,  # NEW: Assign to specific gate
             user_id=None,
             source_ip=None,
             allocated_at=datetime.utcnow(),

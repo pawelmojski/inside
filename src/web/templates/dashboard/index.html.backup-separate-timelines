@@ -1,0 +1,589 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - {{ super() }}{% endblock %}
+
+{% block extra_css %}
+<style>
+.stay-timeline {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stay-timeline:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.timeline-container {
+    position: relative;
+    margin-top: 10px;
+}
+
+.session-bar {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.session-bar:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+    z-index: 10;
+}
+
+.stay-bar {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Pulsing effect for active sessions */
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+}
+
+.session-bar[style*="linear-gradient"] {
+    animation: pulse 2s ease-in-out infinite;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="mb-4">
+            <i class="bi bi-speedometer2"></i> Dashboard
+        </h1>
+    </div>
+</div>
+
+<!-- Service Status -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-gear"></i> Service Status</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {% for service in services %}
+                    <div class="col-md-4">
+                        <div class="d-flex align-items-center mb-2">
+                            <span class="service-status {{ service.status }}"></span>
+                            <strong>{{ service.name }}</strong>
+                            <span class="ms-2 badge bg-secondary">Port {{ service.port }}</span>
+                        </div>
+                        {% if service.uptime %}
+                        <small class="text-muted">Uptime: {{ service.uptime }}</small>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Statistics Cards -->
+<div class="row mb-4" id="dashboardStats">
+    <div class="col-md-2 mb-3">
+        <div class="card stats-card bg-primary text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value">{{ stats.total_users }}</p>
+                        <p class="stat-label mb-0">Total Users</p>
+                    </div>
+                    <i class="bi bi-people stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-2 mb-3">
+        <div class="card stats-card bg-success text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value">{{ stats.total_servers }}</p>
+                        <p class="stat-label mb-0">Total Servers</p>
+                    </div>
+                    <i class="bi bi-hdd-network stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-2 mb-3">
+        <div class="card stats-card bg-info text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value">{{ stats.active_policies }}</p>
+                        <p class="stat-label mb-0">Active Policies</p>
+                    </div>
+                    <i class="bi bi-key stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-success text-white border border-success border-3">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value">{{ active_stays|length if active_stays else 0 }}</p>
+                        <p class="stat-label mb-0"><i class="bi bi-door-open"></i> People Inside</p>
+                    </div>
+                    <i class="bi bi-person-badge stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-warning text-dark">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value" id="todayConnections">{{ stats.today_connections }}</p>
+                        <p class="stat-label mb-0">Today's Connections</p>
+                    </div>
+                    <i class="bi bi-arrow-right-circle stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Active Stays Timeline -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">
+                    <i class="bi bi-door-open"></i> Live: Who is Inside 
+                    <span class="badge bg-light text-dark ms-2" id="staysCount">{{ active_stays|length }} people</span>
+                </h5>
+            </div>
+            <div class="card-body" id="staysTimeline">
+                {% for stay in active_stays %}
+                {% set stay_duration = (now - stay.started_at).total_seconds()|int %}
+                {% set stay_duration_minutes = stay_duration // 60 %}
+                
+                <div class="stay-timeline mb-4 p-3 border border-success border-2 rounded bg-light">
+                    <!-- Stay Header -->
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="mb-1">
+                                <i class="bi bi-person-badge text-success"></i> 
+                                <strong>{{ stay.user.full_name or stay.user.username }}</strong>
+                                <span class="badge bg-success ms-2">INSIDE</span>
+                            </h6>
+                            <small class="text-muted">
+                                Stay #{{ stay.id }} | 
+                                Started: {{ stay.started_at.strftime('%H:%M:%S') }} | 
+                                Duration: 
+                                {% set hours = stay_duration // 3600 %}
+                                {% set minutes = (stay_duration % 3600) // 60 %}
+                                {% if hours > 0 %}{{ hours }}h {% endif %}{{ minutes }}m
+                                | {{ stay.sessions|length }} session(s)
+                            </small>
+                        </div>
+                        <a href="{{ url_for('stays.detail', stay_id=stay.id) }}" class="btn btn-sm btn-outline-success">
+                            <i class="bi bi-eye"></i> Details
+                        </a>
+                    </div>
+                    
+                    <!-- Timeline Visualization -->
+                    <div class="timeline-container">
+                        <!-- Time axis with arrow -->
+                        <div class="d-flex align-items-center mb-2" style="font-size: 0.75rem;">
+                            <span class="text-muted">{{ stay.started_at.strftime('%H:%M') }}</span>
+                            <div class="timeline-arrow position-relative mx-2 flex-grow-1" style="height: 2px; background: #28a745;">
+                                <div class="position-absolute" style="right: -8px; top: -3px; width: 0; height: 0; border-left: 8px solid #28a745; border-top: 4px solid transparent; border-bottom: 4px solid transparent;"></div>
+                            </div>
+                            <span class="text-muted">Now ({{ now.strftime('%H:%M') }})</span>
+                        </div>
+                        
+                        <!-- Sessions timeline -->
+                        {% set timeline_height = (stay.sessions|length * 35) + 10 %}
+                        <div class="sessions-timeline position-relative" style="height: {{ timeline_height }}px; min-height: 60px;">
+                            {% for session in stay.sessions %}
+                            {% set session_start_offset = (session.started_at - stay.started_at).total_seconds() %}
+                            {% if session.ended_at %}
+                                {% set session_duration = (session.ended_at - session.started_at).total_seconds() %}
+                            {% else %}
+                                {% set session_duration = (now - session.started_at).total_seconds() %}
+                            {% endif %}
+                            {% set session_left_percent = (session_start_offset / stay_duration * 100)|round(2) if stay_duration > 0 else 0 %}
+                            {% set session_width_percent = (session_duration / stay_duration * 100)|round(2) if stay_duration > 0 else 0 %}
+                            
+                            {# Build detailed tooltip #}
+                            {% set tooltip_parts = [] %}
+                            {% if session.protocol %}{% set _ = tooltip_parts.append('Protocol: ' ~ session.protocol.upper()) %}{% endif %}
+                            {% if session.ssh_username %}{% set _ = tooltip_parts.append('SSH User: ' ~ session.ssh_username) %}{% endif %}
+                            {% if session.server %}{% set _ = tooltip_parts.append('Server: ' ~ session.server.name) %}{% endif %}
+                            {% if session.backend_ip %}{% set _ = tooltip_parts.append('Backend IP: ' ~ session.backend_ip) %}{% endif %}
+                            {% if session.source_ip %}{% set _ = tooltip_parts.append('Source IP: ' ~ session.source_ip) %}{% endif %}
+                            {% if session.subsystem_name %}{% set _ = tooltip_parts.append('Subsystem: ' ~ session.subsystem_name) %}{% endif %}
+                            {% if session.port_forwards_count and session.port_forwards_count > 0 %}
+                                {% set _ = tooltip_parts.append('Port Forwards: ' ~ session.port_forwards_count) %}
+                            {% endif %}
+                            {% set _ = tooltip_parts.append('Started: ' ~ session.started_at.strftime('%H:%M:%S')) %}
+                            {% if session.ended_at %}
+                                {% set _ = tooltip_parts.append('Ended: ' ~ session.ended_at.strftime('%H:%M:%S')) %}
+                                {% set duration_seconds = (session.ended_at - session.started_at).total_seconds()|int %}
+                                {% set duration_minutes = duration_seconds // 60 %}
+                                {% set duration_secs = duration_seconds % 60 %}
+                                {% set _ = tooltip_parts.append('Duration: ' ~ duration_minutes ~ 'm ' ~ duration_secs ~ 's') %}
+                            {% else %}
+                                {% set _ = tooltip_parts.append('Status: ACTIVE') %}
+                            {% endif %}
+                            {% if session.session_id %}{% set _ = tooltip_parts.append('Session ID: ' ~ session.session_id) %}{% endif %}
+                            
+                            <div class="session-bar position-absolute d-flex align-items-center justify-content-between" 
+                                 style="left: {{ session_left_percent }}%; 
+                                        width: {{ session_width_percent }}%; 
+                                        height: 30px; 
+                                        background: {% if session.is_active %}linear-gradient(90deg, #007bff 0%, #0056b3 100%){% else %}#6c757d{% endif %}; 
+                                        border: 2px solid {% if session.is_active %}#0056b3{% else %}#495057{% endif %}; 
+                                        border-radius: 4px;
+                                        top: {{ loop.index0 * 35 }}px;
+                                        cursor: pointer;"
+                                 onclick="window.location='{{ url_for('sessions.view', session_id=session.session_id) }}';"
+                                 data-bs-toggle="tooltip" 
+                                 data-bs-html="true"
+                                 data-bs-placement="top"
+                                 title="{{ tooltip_parts|join('<br>') }}">
+                                <div class="px-2 text-white" style="font-size: 0.65rem;">
+                                    {{ session.started_at.strftime('%H:%M:%S') }}
+                                </div>
+                                <div class="px-2 text-white text-center flex-grow-1" style="font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                                    <i class="bi bi-{% if session.protocol == 'ssh' %}terminal{% else %}display{% endif %}"></i>
+                                    {% if session.ssh_username %}{{ session.ssh_username }}@{% endif %}{{ session.server.name if session.server else session.backend_ip|truncate(12) }}
+                                </div>
+                                <div class="px-2 text-white text-end" style="font-size: 0.65rem;">
+                                    {% if session.ended_at %}
+                                        {{ session.ended_at.strftime('%H:%M:%S') }}
+                                    {% else %}
+                                        <span class="badge bg-success" style="font-size: 0.6rem;">LIVE</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Today's Activity -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-activity"></i> Today's Activity</h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6">
+                        <h3 class="text-success" id="todayConnections">{{ stats.today_connections }}</h3>
+                        <p class="text-muted mb-0">Granted</p>
+                    </div>
+                    <div class="col-6">
+                        <h3 class="text-danger" id="todayDenied">{{ stats.today_denied }}</h3>
+                        <p class="text-muted mb-0">Denied</p>
+                    </div>
+                </div>
+                <hr>
+                <div class="text-center">
+                    <p class="mb-0">Success Rate: <strong id="successRate">{{ stats.success_rate }}%</strong></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Servers with IP Pool Allocations -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-hdd-network"></i> Servers & IP Pool Allocations</h5>
+                <a href="{{ url_for('servers.index') }}" class="btn btn-sm btn-outline-primary">Manage Servers</a>
+            </div>
+            <div class="card-body">
+                {% if server_allocations %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Server Name</th>
+                                <th>Backend IP</th>
+                                <th>SSH Port</th>
+                                <th>RDP Port</th>
+                                <th>IP Pool Allocation</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in server_allocations %}
+                            <tr>
+                                <td>
+                                    <a href="{{ url_for('servers.view', server_id=item.server.id) }}">
+                                        <strong>{{ item.server.name }}</strong>
+                                    </a>
+                                </td>
+                                <td><code>{{ item.server.ip_address }}</code></td>
+                                <td><span class="badge bg-secondary">{{ item.server.ssh_port or 22 }}</span></td>
+                                <td><span class="badge bg-secondary">{{ item.server.rdp_port or 3389 }}</span></td>
+                                <td>
+                                    {% if item.allocation %}
+                                        <span class="badge bg-success" style="cursor: pointer;" 
+                                              onclick="copyToClipboard('{{ item.allocation.allocated_ip }}', this)"
+                                              title="Click to copy">
+                                            <i class="bi bi-check-circle"></i> {{ item.allocation.allocated_ip }}
+                                        </span>
+                                    {% else %}
+                                        <span class="text-muted">Not allocated</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if item.server.is_active %}
+                                        <span class="badge badge-active">Active</span>
+                                    {% else %}
+                                        <span class="badge badge-inactive">Inactive</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted mb-0">No servers configured</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity section REMOVED - using Recent Sessions instead -->
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function copyToClipboard(text, element) {
+    // Try modern clipboard API first
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+            showCopiedFeedback(element);
+        }).catch(function(err) {
+            // Fallback to older method
+            fallbackCopy(text, element);
+        });
+    } else {
+        // Fallback for older browsers
+        fallbackCopy(text, element);
+    }
+}
+
+function fallbackCopy(text, element) {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.select();
+    
+    try {
+        document.execCommand('copy');
+        showCopiedFeedback(element);
+    } catch (err) {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy: ' + text);
+    }
+    
+    document.body.removeChild(textArea);
+}
+
+function showCopiedFeedback(element) {
+    const originalHTML = element.innerHTML;
+    element.innerHTML = '<i class="bi bi-clipboard-check"></i> Copied!';
+    element.classList.remove('bg-success');
+    element.classList.add('bg-info');
+    
+    setTimeout(function() {
+        element.innerHTML = originalHTML;
+        element.classList.remove('bg-info');
+        element.classList.add('bg-success');
+    }, 1500);
+}
+
+// Auto-refresh dashboard stats and stays timeline
+function refreshDashboard() {
+    // Refresh statistics
+    fetch('/api/stats')
+        .then(response => response.json())
+        .then(data => {
+            // Update stats cards
+            document.querySelector('#todayConnections').textContent = data.today_connections || '0';
+            
+            const deniedEl = document.querySelector('#todayDenied');
+            if (deniedEl) deniedEl.textContent = data.today_denied || '0';
+            
+            const successRateEl = document.querySelector('#successRate');
+            if (successRateEl) successRateEl.textContent = (data.success_rate || '0') + '%';
+        })
+        .catch(err => console.error('Failed to refresh stats:', err));
+    
+    // Refresh stays timeline
+    fetch('/api/stays')
+        .then(response => response.json())
+        .then(data => {
+            refreshStaysTimeline(data);
+            document.getElementById('staysCount').textContent = data.stays.filter(s => s.is_active).length + ' people';
+        })
+        .catch(err => console.error('Failed to refresh stays:', err));
+}
+
+// Simple timeAgo function
+function timeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+}
+
+function refreshStaysTimeline(data) {
+    const container = document.getElementById('staysTimeline');
+    if (!container) return;
+    
+    const now = new Date(data.now);
+    let html = '';
+    
+    if (data.stays.length === 0) {
+        html = '<p class="text-muted mb-0">No active or recent stays</p>';
+    } else {
+        data.stays.forEach(stay => {
+            const stayStarted = new Date(stay.started_at);
+            const stayDuration = stay.duration;
+            const hours = Math.floor(stayDuration / 3600);
+            const minutes = Math.floor((stayDuration % 3600) / 60);
+            const timelineHeight = (stay.sessions.length * 35) + 10;
+            
+            html += `
+                <div class="stay-timeline mb-4 p-3 border border-${stay.is_active ? 'success' : 'secondary'} border-2 rounded bg-light">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="mb-1">
+                                <i class="bi bi-person-badge text-${stay.is_active ? 'success' : 'secondary'}"></i> 
+                                <strong>${stay.user_name}</strong>
+                                <span class="badge bg-${stay.is_active ? 'success' : 'secondary'} ms-2">${stay.is_active ? 'INSIDE' : 'Left'}</span>
+                            </h6>
+                            <small class="text-muted">
+                                Stay #${stay.id} | 
+                                Started: ${formatTime(stayStarted)} | 
+                                Duration: ${hours > 0 ? hours + 'h ' : ''}${minutes}m
+                                | ${stay.sessions.length} session(s)
+                            </small>
+                        </div>
+                        <a href="/stays/${stay.id}" class="btn btn-sm btn-outline-${stay.is_active ? 'success' : 'secondary'}">
+                            <i class="bi bi-eye"></i> Details
+                        </a>
+                    </div>
+                    
+                    <div class="timeline-container">
+                        <div class="d-flex align-items-center mb-2" style="font-size: 0.75rem;">
+                            <span class="text-muted">${formatTime(stayStarted)}</span>
+                            <div class="timeline-arrow position-relative mx-2 flex-grow-1" style="height: 2px; background: #28a745;">
+                                <div class="position-absolute" style="right: -8px; top: -3px; width: 0; height: 0; border-left: 8px solid #28a745; border-top: 4px solid transparent; border-bottom: 4px solid transparent;"></div>
+                            </div>
+                            <span class="text-muted">${stay.is_active ? 'Now (' + formatTime(now) + ')' : formatTime(new Date(stay.ended_at))}</span>
+                        </div>
+                        
+                        <div class="sessions-timeline position-relative" style="height: ${timelineHeight}px; min-height: 60px;">
+            `;
+            
+            stay.sessions.forEach((session, idx) => {
+                const sessionLeft = (session.start_offset / stayDuration * 100).toFixed(2);
+                const sessionWidth = (session.duration / stayDuration * 100).toFixed(2);
+                const sessionStarted = new Date(session.started_at);
+                const sessionEnded = session.ended_at ? new Date(session.ended_at) : null;
+                
+                const tooltipLines = [
+                    `Protocol: ${session.protocol.toUpperCase()}`,
+                    session.ssh_username ? `SSH User: ${session.ssh_username}` : null,
+                    session.server_name ? `Server: ${session.server_name}` : null,
+                    session.backend_ip ? `Backend IP: ${session.backend_ip}` : null,
+                    session.source_ip ? `Source IP: ${session.source_ip}` : null,
+                    session.subsystem_name ? `Subsystem: ${session.subsystem_name}` : null,
+                    session.port_forwards_count > 0 ? `Port Forwards: ${session.port_forwards_count}` : null,
+                    `Started: ${formatTimeWithSeconds(sessionStarted)}`,
+                    sessionEnded ? `Ended: ${formatTimeWithSeconds(sessionEnded)}` : 'Status: ACTIVE',
+                    `Session ID: ${session.session_id}`
+                ].filter(l => l !== null).join('<br>');
+                
+                html += `
+                    <div class="session-bar position-absolute d-flex align-items-center justify-content-between" 
+                         style="left: ${sessionLeft}%; width: ${sessionWidth}%; height: 30px; 
+                                background: ${session.is_active ? 'linear-gradient(90deg, #007bff 0%, #0056b3 100%)' : '#6c757d'}; 
+                                border: 2px solid ${session.is_active ? '#0056b3' : '#495057'}; 
+                                border-radius: 4px; top: ${idx * 35}px; cursor: pointer;"
+                         onclick="window.location='/sessions/${session.session_id}';"
+                         data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="top"
+                         title="${tooltipLines}">
+                        <div class="px-2 text-white" style="font-size: 0.65rem;">${formatTimeWithSeconds(sessionStarted)}</div>
+                        <div class="px-2 text-white text-center flex-grow-1" style="font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                            <i class="bi bi-${session.protocol === 'ssh' ? 'terminal' : 'display'}"></i>
+                            ${session.ssh_username ? session.ssh_username + '@' : ''}${session.server_name || session.backend_ip}
+                        </div>
+                        <div class="px-2 text-white text-end" style="font-size: 0.65rem;">
+                            ${sessionEnded ? formatTimeWithSeconds(sessionEnded) : '<span class="badge bg-success" style="font-size: 0.6rem;">LIVE</span>'}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `</div></div></div>`;
+        });
+    }
+    
+    container.innerHTML = html;
+    
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach(function (tooltipTriggerEl) {
+        new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+}
+
+function formatTime(date) {
+    return date.toTimeString().substring(0, 5);
+}
+
+function formatTimeWithSeconds(date) {
+    return date.toTimeString().substring(0, 8);
+}
+
+// Refresh every 5 seconds
+setInterval(refreshDashboard, 5000);
+
+// Initial refresh after 2 seconds
+setTimeout(refreshDashboard, 2000);
+
+// Initialize Bootstrap tooltips on page load
+document.addEventListener('DOMContentLoaded', function() {
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+});
+
+
+
+</script>
+{% endblock %}

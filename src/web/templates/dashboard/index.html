@@ -2,6 +2,48 @@
 
 {% block title %}Dashboard - {{ super() }}{% endblock %}
 
+{% block extra_css %}
+<style>
+.stay-timeline {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stay-timeline:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.timeline-container {
+    position: relative;
+    margin-top: 10px;
+}
+
+.session-bar {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.session-bar:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+    z-index: 10;
+}
+
+.stay-bar {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Pulsing effect for active sessions */
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+}
+
+.session-bar[style*="linear-gradient"] {
+    animation: pulse 2s ease-in-out infinite;
+}
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="row">
     <div class="col-12">
@@ -40,7 +82,7 @@
 
 <!-- Statistics Cards -->
 <div class="row mb-4" id="dashboardStats">
-    <div class="col-md-3 mb-3">
+    <div class="col-md-2 mb-3">
         <div class="card stats-card bg-primary text-white">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
@@ -54,7 +96,7 @@
         </div>
     </div>
     
-    <div class="col-md-3 mb-3">
+    <div class="col-md-2 mb-3">
         <div class="card stats-card bg-success text-white">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
@@ -68,7 +110,7 @@
         </div>
     </div>
     
-    <div class="col-md-3 mb-3">
+    <div class="col-md-2 mb-3">
         <div class="card stats-card bg-info text-white">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
@@ -83,6 +125,20 @@
     </div>
     
     <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-success text-white border border-success border-3">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <p class="stat-value">{{ active_stays|length if active_stays else 0 }}</p>
+                        <p class="stat-label mb-0"><i class="bi bi-door-open"></i> People Inside</p>
+                    </div>
+                    <i class="bi bi-person-badge stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
         <div class="card stats-card bg-warning text-dark">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
@@ -91,6 +147,197 @@
                         <p class="stat-label mb-0">Today's Connections</p>
                     </div>
                     <i class="bi bi-arrow-right-circle stat-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Active Stays Timeline - Unified Daily View -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">
+                    <i class="bi bi-calendar-day"></i> Today's Timeline: Who Was/Is Inside 
+                    <span class="badge bg-light text-dark ms-2" id="staysCount">{{ active_stays|length }} active</span>
+                </h5>
+            </div>
+            <div class="card-body" id="staysTimeline">
+                
+                <!-- Stays Timeline - Each stay has its own timeline -->
+                <div class="unified-timeline-container mb-3">
+                    
+                    <!-- Stays rows - each with own timeline -->
+                    {% if active_stays %}
+                    <div class="stays-rows position-relative">
+                        {% for stay in active_stays %}
+                        {# Each stay has its own timeline: from start to end/now #}
+                        {% set stay_end_time = stay.ended_at if not stay.is_active else now %}
+                        {% set stay_duration = (stay_end_time - stay.started_at).total_seconds()|int %}
+                        
+                        <!-- Stay row -->
+                        <div class="stay-row mb-3 p-2 border border-{{ 'success' if stay.is_active else 'secondary' }} rounded" style="background: #f8f9fa;">
+                            <!-- Person label -->
+                            <div class="d-flex align-items-center mb-2">
+                                <div style="width: 100%;">
+                                    <span class="badge bg-{{ 'success' if stay.is_active else 'secondary' }} me-2">
+                                        {{ 'INSIDE' if stay.is_active else 'Left' }}
+                                    </span>
+                                    <strong>{{ stay.user.full_name or stay.user.username }}</strong>
+                                    <small class="text-muted ms-2">
+                                        Stay #{{ stay.id }} | 
+                                        {{ stay.started_at|localtime|truncate(5, True, '') }} - 
+                                        {% if stay.is_active %}Now{% else %}{{ stay.ended_at|localtime|truncate(5, True, '') }}{% endif %}
+                                        ({% set hours = stay_duration // 3600 %}{% set minutes = (stay_duration % 3600) // 60 %}{{ hours }}h {{ minutes }}m)
+                                        | {{ stay.sessions|length }} session(s)
+                                    </small>
+                                    <a href="{{ url_for('stays.detail', stay_id=stay.id) }}" class="btn btn-sm btn-outline-{{ 'success' if stay.is_active else 'secondary' }} float-end">
+                                        <i class="bi bi-eye"></i> Details
+                                    </a>
+                                </div>
+                            </div>
+                            
+                            {# Stay's own timeline axis #}
+                            <div class="d-flex align-items-center mb-2" style="font-size: 0.75rem;">
+                                <span class="text-muted">{{ stay.started_at|time_short }}</span>
+                                <div class="timeline-arrow position-relative mx-2 flex-grow-1" style="height: 2px; background: {% if stay.is_active %}#28a745{% else %}#6c757d{% endif %};">
+                                    <div class="position-absolute" style="right: -8px; top: -3px; width: 0; height: 0; border-left: 8px solid {% if stay.is_active %}#28a745{% else %}#6c757d{% endif %}; border-top: 4px solid transparent; border-bottom: 4px solid transparent;"></div>
+                                </div>
+                                <span class="text-muted"><strong>{% if stay.is_active %}Now ({{ now|time_short }}){% else %}{{ stay.ended_at|time_short }}{% endif %}</strong></span>
+                            </div>
+                            
+                            <!-- Stay timeline with sessions grouped by backend -->
+                            {# First group sessions and calculate tracks #}
+                            {% set sessions_by_backend = {} %}
+                            {% for session in stay.sessions %}
+                                {% set backend_key = session.server.name if session.server else session.backend_ip %}
+                                {% if backend_key not in sessions_by_backend %}
+                                    {% set _ = sessions_by_backend.update({backend_key: []}) %}
+                                {% endif %}
+                                {% set _ = sessions_by_backend[backend_key].append(session) %}
+                            {% endfor %}
+                            
+                            {% set ns = namespace(total_tracks=0) %}
+                            {% for backend_name, backend_sessions in sessions_by_backend.items() %}
+                                {# Sort sessions by start time #}
+                                {% set sorted_sessions = backend_sessions|sort(attribute='started_at') %}
+                                
+                                {# Pack sessions into non-overlapping tracks #}
+                                {% set tracks = [] %}
+                                {% for session in sorted_sessions %}
+                                    {% set placed = False %}
+                                    {% for track in tracks %}
+                                        {% if not placed %}
+                                            {% set last_session = track[-1] %}
+                                            {% if last_session.ended_at and session.started_at >= last_session.ended_at %}
+                                                {% set _ = track.append(session) %}
+                                                {% set placed = True %}
+                                            {% endif %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    {% if not placed %}
+                                        {% set _ = tracks.append([session]) %}
+                                    {% endif %}
+                                {% endfor %}
+                                {% set _ = sessions_by_backend.update({backend_name: tracks}) %}
+                                {% set ns.total_tracks = ns.total_tracks + tracks|length %}
+                            {% endfor %}
+                            
+                            {% set sessions_height = (ns.total_tracks * 40) + 10 %}
+                            <div class="sessions-in-stay position-relative" style="height: {{ sessions_height }}px; min-height: 45px;">
+                                <!-- Stay background bar (full width of its own timeline) -->
+                                <div class="stay-bg-bar position-absolute" 
+                                     style="left: 0%; 
+                                            width: 100%; 
+                                            height: 100%;
+                                            background: {% if stay.is_active %}rgba(40, 167, 69, 0.1){% else %}rgba(108, 117, 125, 0.1){% endif %};
+                                            border: 2px solid {% if stay.is_active %}#28a745{% else %}#6c757d{% endif %};
+                                            border-radius: 4px;">
+                                </div>
+                                
+                                <!-- Render sessions grouped by backend in tracks -->
+                                <div class="backend-groups">
+                                {% for backend_name, tracks in sessions_by_backend.items() %}
+                                    {# Each track is a row of non-overlapping sessions #}
+                                    {% for track in tracks %}
+                                    <div class="backend-row position-relative" style="height: 35px; margin-bottom: 5px;">
+                                        {% for session in track %}
+                                    {% set session_start_offset = (session.started_at - stay.started_at).total_seconds() %}
+                                    {# For active sessions, use stay end time (now or ended_at) #}
+                                    {% set session_end = session.ended_at if session.ended_at else stay_end_time %}
+                                    {% set session_duration = (session_end - session.started_at).total_seconds() %}
+                                    {% set session_left_percent = (session_start_offset / stay_duration * 100)|round(2) if stay_duration > 0 else 0 %}
+                                    {% set session_width_percent = (session_duration / stay_duration * 100)|round(2) if stay_duration > 0 else 0 %}
+                                
+                                {# Build interactive popover content #}
+                                {% set popover_content %}
+                                <table class="table table-sm table-borderless mb-0" style="font-size: 0.75rem;">
+                                    <tr><td><strong>Person:</strong></td><td><a href="{{ url_for('users.view', user_id=stay.user.id) }}" class="text-white">{{ stay.user.full_name or stay.user.username }}</a></td></tr>
+                                    <tr><td><strong>Protocol:</strong></td><td>{{ session.protocol.upper() }}</td></tr>
+                                    {% if session.ssh_username %}<tr><td><strong>SSH User:</strong></td><td>{{ session.ssh_username }}</td></tr>{% endif %}
+                                    {% if session.server %}<tr><td><strong>Server:</strong></td><td><a href="{{ url_for('servers.view', server_id=session.server.id) }}" class="text-white">{{ session.server.name }}</a></td></tr>{% endif %}
+                                    <tr><td><strong>Backend IP:</strong></td><td>{{ session.backend_ip }}</td></tr>
+                                    <tr><td><strong>Source IP:</strong></td><td>{{ session.source_ip }}</td></tr>
+                                    {% if session.subsystem_name %}<tr><td><strong>Subsystem:</strong></td><td>{{ session.subsystem_name }}</td></tr>{% endif %}
+                                    {% if session.port_forwards_count and session.port_forwards_count > 0 %}<tr><td><strong>Port Forwards:</strong></td><td>{{ session.port_forwards_count }}</td></tr>{% endif %}
+                                    <tr><td><strong>Started:</strong></td><td>{{ session.started_at|localtime }}</td></tr>
+                                    {% if session.ended_at %}
+                                        <tr><td><strong>Ended:</strong></td><td>{{ session.ended_at|localtime }}</td></tr>
+                                        {% set duration_seconds = (session.ended_at - session.started_at).total_seconds()|int %}
+                                        {% set duration_minutes = duration_seconds // 60 %}
+                                        {% set duration_secs = duration_seconds % 60 %}
+                                        <tr><td><strong>Duration:</strong></td><td>{{ duration_minutes }}m {{ duration_secs }}s</td></tr>
+                                    {% else %}
+                                        <tr><td><strong>Status:</strong></td><td><span class="badge bg-success">ACTIVE</span></td></tr>
+                                    {% endif %}
+                                    <tr><td colspan="2" class="pt-2"><a href="{{ url_for('sessions.view', session_id=session.session_id) }}" class="btn btn-sm btn-light w-100">View Details</a></td></tr>
+                                </table>
+                                {% endset %}
+                                
+                                <div class="session-bar position-absolute d-flex align-items-center justify-content-between" 
+                                     style="left: {{ session_left_percent }}%; 
+                                            width: max({{ session_width_percent }}%, 50px);
+                                            max-width: calc(100% - {{ session_left_percent }}%);
+                                            min-width: 50px;
+                                            height: 30px; 
+                                            background: {% if session.is_active %}linear-gradient(90deg, #007bff 0%, #0056b3 100%){% else %}#6c757d{% endif %}; 
+                                            border: 2px solid {% if session.is_active %}#0056b3{% else %}#495057{% endif %}; 
+                                            border-radius: 4px;
+                                            top: 0px;
+                                            cursor: pointer;
+                                            z-index: 10;
+                                            overflow: hidden;"
+                                     data-bs-toggle="popover" 
+                                     data-bs-trigger="hover focus"
+                                     data-bs-html="true"
+                                     data-bs-container="body"
+                                     data-bs-placement="top"
+                                     data-bs-content="{{ popover_content|escape }}">
+                                    <div class="px-2 text-white" style="font-size: 0.65rem;">
+                                        {{ session.started_at|time_only }}
+                                    </div>
+                                    <div class="px-2 text-white text-center flex-grow-1" style="font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                                        <i class="bi bi-{% if session.protocol == 'ssh' %}terminal{% else %}display{% endif %}"></i>
+                                        {% if session.ssh_username %}{{ session.ssh_username }}@{% endif %}{{ session.server.name if session.server else session.backend_ip|truncate(12) }}
+                                    </div>
+                                    <div class="px-2 text-white text-end" style="font-size: 0.65rem; min-width: 35px;">
+                                        {% if session.ended_at %}
+                                            {{ session.ended_at|time_only }}
+                                        {% else %}
+                                            <span class="badge bg-success" style="font-size: 0.55rem; padding: 1px 3px;">●</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                {% endfor %}
+                                </div>
+                                {% endfor %}                                {% endfor %}                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0 ms-3">No stays today</p>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -119,117 +366,6 @@
                 <div class="text-center">
                     <p class="mb-0">Success Rate: <strong id="successRate">{{ stats.success_rate }}%</strong></p>
                 </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-clock-history"></i> Active Sessions</h5>
-            </div>
-            <div class="card-body">
-                {% if active_sessions %}
-                <div class="table-responsive">
-                    <table class="table table-sm mb-0" id="activeSessionsTable">
-                        <thead>
-                            <tr>
-                                <th>Protocol</th>
-                                <th>User</th>
-                                <th>Server</th>
-                                <th>Backend IP</th>
-                                <th>Source IP</th>
-                                <th>SSH Agent</th>
-                                <th>Started</th>
-                                <th>Duration</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="activeSessionsBody">
-                            {% for session in active_sessions[:5] %}
-                            <tr style="cursor: pointer;" onclick="window.location='{{ url_for('sessions.view', session_id=session.session_id) }}'">
-                                <td><span class="badge bg-{{ 'primary' if session.protocol == 'SSH' else 'success' }}">{{ session.protocol }}</span></td>
-                                <td>{{ session.user }}</td>
-                                <td><strong>{{ session.server }}</strong></td>
-                                <td><code>{{ session.backend_ip }}</code></td>
-                                <td><code>{{ session.source_ip }}</code></td>
-                                <td class="text-center">
-                                    {% if session.ssh_agent is not none %}
-                                        {% if session.ssh_agent %}
-                                            <span class="text-success">✓</span>
-                                        {% else %}
-                                            <span class="text-danger">✗</span>
-                                        {% endif %}
-                                    {% else %}
-                                        <span class="text-muted">-</span>
-                                    {% endif %}
-                                </td>
-                                <td>
-                                    <span title="{{ session.started|localtime }}">
-                                        {{ session.started|timeago }}
-                                    </span>
-                                </td>
-                                <td>
-                                    <span class="badge bg-warning text-dark">LIVE</span>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                {% else %}
-                <p class="text-muted mb-0" id="noActiveSessionsMsg">No active sessions</p>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-    
-    <!-- Recent Sessions -->
-    <div class="col-md-6">
-        <div class="card shadow-sm">
-            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
-                <h5 class="mb-0">Recent Sessions (Last 10 Closed)</h5>
-                <a href="{{ url_for('sessions.index') }}" class="btn btn-sm btn-light">View All</a>
-            </div>
-            <div class="card-body">
-                {% if recent_sessions %}
-                <div class="table-responsive">
-                    <table class="table table-sm table-hover">
-                        <thead>
-                            <tr>
-                                <th>Protocol</th>
-                                <th>User</th>
-                                <th>Server</th>
-                                <th>Started</th>
-                                <th>Duration</th>
-                                <th>Ended</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for session in recent_sessions[:10] %}
-                            <tr style="cursor: pointer;" onclick="window.location='{{ url_for('sessions.view', session_id=session.session_id) }}'">
-                                <td><span class="badge bg-{{ 'primary' if session.protocol == 'SSH' else 'success' }}">{{ session.protocol }}</span></td>
-                                <td>{{ session.user }}</td>
-                                <td><strong>{{ session.server }}</strong></td>
-                                <td>
-                                    <span title="{{ session.started|localtime if session.started else '' }}">
-                                        {{ session.started|timeago if session.started else '-' }}
-                                    </span>
-                                </td>
-                                <td>{{ session.duration }}</td>
-                                <td>
-                                    <span title="{{ session.ended|localtime if session.ended else '' }}">
-                                        {{ session.ended|timeago if session.ended else '-' }}
-                                    </span>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                {% else %}
-                <p class="text-muted mb-0">No recent sessions</p>
-                {% endif %}
             </div>
         </div>
     </div>
@@ -352,7 +488,7 @@ function showCopiedFeedback(element) {
     }, 1500);
 }
 
-// Auto-refresh dashboard stats and active sessions
+// Auto-refresh dashboard stats and stays timeline
 function refreshDashboard() {
     // Refresh statistics
     fetch('/api/stats')
@@ -369,47 +505,14 @@ function refreshDashboard() {
         })
         .catch(err => console.error('Failed to refresh stats:', err));
     
-    // Refresh active sessions
-    fetch('/api/active-sessions')
+    // Refresh stays timeline
+    fetch('/api/stays')
         .then(response => response.json())
         .then(data => {
-            const tbody = document.querySelector('#activeSessionsBody');
-            if (!tbody || !data.sessions) return;
-            
-            if (data.sessions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-muted">No active sessions</td></tr>';
-                return;
-            }
-            
-            // Update table rows
-            let html = '';
-            data.sessions.slice(0, 5).forEach(session => {
-                const protocolBadge = session.protocol === 'SSH' ? 'primary' : 'success';
-                const sshAgentIcon = session.ssh_agent === true ? '<span class="text-success">✓</span>' : 
-                                    session.ssh_agent === false ? '<span class="text-danger">✗</span>' : 
-                                    '<span class="text-muted">-</span>';
-                
-                const startedDate = session.started ? new Date(session.started) : null;
-                const startedDisplay = startedDate ? timeAgo(startedDate) : '-';
-                const startedTitle = startedDate ? startedDate.toLocaleString() : '';
-                
-                html += `
-                    <tr style="cursor: pointer;" onclick="window.location='/sessions/${session.session_id}'">
-                        <td><span class="badge bg-${protocolBadge}">${session.protocol}</span></td>
-                        <td>${session.user}</td>
-                        <td><strong>${session.server}</strong></td>
-                        <td><code>${session.backend_ip}</code></td>
-                        <td><code>${session.source_ip}</code></td>
-                        <td class="text-center">${sshAgentIcon}</td>
-                        <td><span title="${startedTitle}">${startedDisplay}</span></td>
-                        <td><span class="badge bg-warning text-dark">LIVE</span></td>
-                    </tr>
-                `;
-            });
-            
-            tbody.innerHTML = html;
+            refreshStaysTimeline(data);
+            document.getElementById('staysCount').textContent = data.stays.filter(s => s.is_active).length + ' people';
         })
-        .catch(err => console.error('Failed to refresh active sessions:', err));
+        .catch(err => console.error('Failed to refresh stays:', err));
 }
 
 // Simple timeAgo function
@@ -422,19 +525,263 @@ function timeAgo(date) {
     return Math.floor(seconds / 86400) + 'd ago';
 }
 
-// Refresh every 5 seconds
-setInterval(refreshDashboard, 5000);
-
-// Initial refresh after 1 second
-setTimeout(refreshDashboard, 1000);
-
-// Clear server-rendered tbody on page load (will be replaced by AJAX)
-document.addEventListener('DOMContentLoaded', function() {
-    const tbody = document.querySelector('#activeSessionsBody');
-    if (tbody) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center"><em>Loading...</em></td></tr>';
+function refreshStaysTimeline(data) {
+    const container = document.getElementById('staysTimeline');
+    if (!container) return;
+    
+    const now = new Date(data.now);
+    
+    let html = '';
+    
+    // Container
+    html += `<div class="unified-timeline-container mb-3">`;
+    
+    if (data.stays.length === 0) {
+        html += '<p class="text-muted mb-0 ms-3">No stays today</p>';
+    } else {
+        html += '<div class="stays-rows position-relative">';
+        
+        data.stays.forEach(stay => {
+            const stayStarted = new Date(stay.started_at);
+            const stayEnded = stay.ended_at ? new Date(stay.ended_at) : null;
+            // For ended stays, use stay end time; for active, use now
+            const stayEndTime = stayEnded || now;
+            const stayDuration = (stayEndTime - stayStarted) / 1000; // in seconds
+            const hours = Math.floor(stayDuration / 3600);
+            const minutes = Math.floor((stayDuration % 3600) / 60);
+            
+            // Group sessions by backend and pack into non-overlapping tracks
+            const sessionsByBackend = {};
+            stay.sessions.forEach(session => {
+                const backendKey = session.server_name || session.backend_ip;
+                if (!sessionsByBackend[backendKey]) {
+                    sessionsByBackend[backendKey] = [];
+                }
+                sessionsByBackend[backendKey].push(session);
+            });
+            
+            // Pack sessions into tracks (rows) to avoid overlaps
+            let totalTracks = 0;
+            const backendTracks = {};
+            for (const [backendName, sessions] of Object.entries(sessionsByBackend)) {
+                // Sort by start time
+                const sortedSessions = sessions.sort((a, b) => 
+                    new Date(a.started_at) - new Date(b.started_at)
+                );
+                
+                // Pack into non-overlapping tracks
+                const tracks = [];
+                sortedSessions.forEach(session => {
+                    let placed = false;
+                    for (const track of tracks) {
+                        const lastSession = track[track.length - 1];
+                        const lastEnded = lastSession.ended_at ? new Date(lastSession.ended_at) : null;
+                        const sessionStarted = new Date(session.started_at);
+                        
+                        if (lastEnded && sessionStarted >= lastEnded) {
+                            track.push(session);
+                            placed = true;
+                            break;
+                        }
+                    }
+                    if (!placed) {
+                        tracks.push([session]);
+                    }
+                });
+                
+                backendTracks[backendName] = tracks;
+                totalTracks += tracks.length;
+            }
+            
+            const sessionsHeight = (totalTracks * 40) + 10;
+            
+            html += `
+                <div class="stay-row mb-3 p-2 border border-${stay.is_active ? 'success' : 'secondary'} rounded" style="background: #f8f9fa;">
+                    <div class="d-flex align-items-center mb-2">
+                        <div style="width: 100%;">
+                            <span class="badge bg-${stay.is_active ? 'success' : 'secondary'} me-2">
+                                ${stay.is_active ? 'INSIDE' : 'Left'}
+                            </span>
+                            <strong>${stay.user_name}</strong>
+                            <small class="text-muted ms-2">
+                                Stay #${stay.id} | 
+                                ${formatTime(stayStarted)} - ${stay.is_active ? 'Now' : formatTime(stayEnded)}
+                                (${hours}h ${minutes}m)
+                                | ${stay.sessions.length} session(s)
+                            </small>
+                            <a href="/stays/${stay.id}" class="btn btn-sm btn-outline-${stay.is_active ? 'success' : 'secondary'} float-end">
+                                <i class="bi bi-eye"></i> Details
+                            </a>
+                        </div>
+                    </div>
+                    
+                    <div class="d-flex align-items-center mb-2" style="font-size: 0.75rem;">
+                        <span class="text-muted">${formatTime(stayStarted)}</span>
+                        <div class="timeline-arrow position-relative mx-2 flex-grow-1" style="height: 2px; background: ${stay.is_active ? '#28a745' : '#6c757d'};">
+                            <div class="position-absolute" style="right: -8px; top: -3px; width: 0; height: 0; border-left: 8px solid ${stay.is_active ? '#28a745' : '#6c757d'}; border-top: 4px solid transparent; border-bottom: 4px solid transparent;"></div>
+                        </div>
+                        <span class="text-muted"><strong>${stay.is_active ? 'Now (' + formatTime(now) + ')' : formatTime(stayEnded)}</strong></span>
+                    </div>
+                    
+                    <div class="sessions-in-stay position-relative" style="height: ${sessionsHeight}px; min-height: 45px;">
+                        <div class="stay-bg-bar position-absolute" 
+                             style="left: 0%; width: 100%; height: 100%;
+                                    background: ${stay.is_active ? 'rgba(40, 167, 69, 0.1)' : 'rgba(108, 117, 125, 0.1)'};
+                                    border: 2px solid ${stay.is_active ? '#28a745' : '#6c757d'};
+                                    border-radius: 4px;">
+                        </div>
+            `;
+            
+            // Iterate over backends and their tracks
+            let trackIdx = 0;
+            for (const [backendName, tracks] of Object.entries(backendTracks)) {
+                tracks.forEach(track => {
+                    html += `<div class="backend-row position-relative" style="height: 35px; margin-bottom: 5px;">`;
+                    
+                    track.forEach((session) => {
+                        const sessionStarted = new Date(session.started_at);
+                        const sessionEnded = session.ended_at ? new Date(session.ended_at) : null;
+                        
+                        // Calculate session position relative to THIS stay's timeline
+                        const sessionStartOffset = (sessionStarted - stayStarted) / 1000;
+                        // For active sessions, use stay end time (ended or now)
+                        const sessionEnd = sessionEnded || stayEndTime;
+                        const sessionDuration = (sessionEnd - sessionStarted) / 1000;
+                        const sessionLeftPercent = ((sessionStartOffset / stayDuration) * 100).toFixed(2);
+                        const sessionWidthPercent = ((sessionDuration / stayDuration) * 100).toFixed(2);
+                        
+                        // Build popover content with interactive table
+                        const durationMinutes = Math.floor(sessionDuration / 60);
+                const durationSeconds = Math.floor(sessionDuration % 60);
+                
+                const popoverContent = `
+                    <table class="table table-sm table-borderless mb-0" style="font-size: 0.75rem;">
+                        <tr><td><strong>Person:</strong></td><td><a href="/users/${stay.user_id}" class="text-primary">${stay.user_name}</a></td></tr>
+                        <tr><td><strong>Protocol:</strong></td><td>${session.protocol.toUpperCase()}</td></tr>
+                        ${session.ssh_username ? `<tr><td><strong>SSH User:</strong></td><td>${session.ssh_username}</td></tr>` : ''}
+                        ${session.server_name ? `<tr><td><strong>Server:</strong></td><td><a href="/servers/${session.server_id || '#'}" class="text-primary">${session.server_name}</a></td></tr>` : ''}
+                        <tr><td><strong>Backend IP:</strong></td><td>${session.backend_ip}</td></tr>
+                        <tr><td><strong>Source IP:</strong></td><td>${session.source_ip}</td></tr>
+                        ${session.subsystem_name ? `<tr><td><strong>Subsystem:</strong></td><td>${session.subsystem_name}</td></tr>` : ''}
+                        ${session.port_forwards_count > 0 ? `<tr><td><strong>Port Forwards:</strong></td><td>${session.port_forwards_count}</td></tr>` : ''}
+                        <tr><td><strong>Started:</strong></td><td>${formatTimeWithSeconds(sessionStarted)}</td></tr>
+                        ${sessionEnded 
+                            ? `<tr><td><strong>Ended:</strong></td><td>${formatTimeWithSeconds(sessionEnded)}</td></tr>
+                               <tr><td><strong>Duration:</strong></td><td>${durationMinutes}m ${durationSeconds}s</td></tr>`
+                            : `<tr><td><strong>Status:</strong></td><td><span class="badge bg-success">ACTIVE</span></td></tr>`
+                        }
+                        <tr><td colspan="2" class="pt-2"><a href="/sessions/${session.session_id}" class="btn btn-sm btn-primary w-100">View Details</a></td></tr>
+                    </table>
+                `;
+                
+                html += `
+                    <div class="session-bar position-absolute d-flex align-items-center justify-content-between" 
+                         style="left: ${sessionLeftPercent}%; width: max(${sessionWidthPercent}%, 50px); max-width: calc(100% - ${sessionLeftPercent}%); min-width: 50px; height: 30px; 
+                                background: ${session.is_active ? 'linear-gradient(90deg, #007bff 0%, #0056b3 100%)' : '#6c757d'}; 
+                                border: 2px solid ${session.is_active ? '#0056b3' : '#495057'}; 
+                                border-radius: 4px; top: 0px; cursor: pointer; z-index: 10; overflow: hidden;"
+                         data-session-id="${session.session_id}"
+                         data-bs-toggle="popover" 
+                         data-bs-trigger="hover focus"
+                         data-bs-html="true" 
+                         data-bs-container="body"
+                         data-bs-placement="top"
+                         data-bs-content="${popoverContent.replace(/"/g, '&quot;')}">
+                        <div class="px-2 text-white" style="font-size: 0.65rem;">${formatTimeWithSeconds(sessionStarted)}</div>
+                        <div class="px-2 text-white text-center flex-grow-1" style="font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                            <i class="bi bi-${session.protocol === 'ssh' ? 'terminal' : 'display'}"></i>
+                            ${session.ssh_username ? session.ssh_username + '@' : ''}${session.server_name || session.backend_ip}
+                        </div>
+                        <div class="px-2 text-white text-end" style="font-size: 0.65rem; min-width: 35px;">
+                            ${sessionEnded ? formatTimeWithSeconds(sessionEnded) : '<span class="badge bg-success" style="font-size: 0.55rem; padding: 1px 3px;">●</span>'}
+                        </div>
+                    </div>
+                `;
+                    });
+                    
+                    html += `</div>`; // close backend-row
+                    trackIdx++;
+                });
+            }
+            
+            html += `</div></div>`;
+        });
+        
+        html += '</div>'; // close stays-rows
     }
+    
+    html += '</div>'; // close unified-timeline-container
+    
+    container.innerHTML = html;
+    
+    // Initialize Bootstrap popovers (not tooltips)
+    var popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'));
+    popoverTriggerList.forEach(function (popoverTriggerEl) {
+        var popover = new bootstrap.Popover(popoverTriggerEl, {
+            sanitize: false  // Allow links in popover
+        });
+        
+        // Close other popovers when this one is shown
+        popoverTriggerEl.addEventListener('show.bs.popover', function () {
+            popoverTriggerList.forEach(function (otherEl) {
+                if (otherEl !== popoverTriggerEl) {
+                    var otherPopover = bootstrap.Popover.getInstance(otherEl);
+                    if (otherPopover) {
+                        otherPopover.hide();
+                    }
+                }
+            });
+        });
+    });
+}
+
+function formatTime(date) {
+    return date.toTimeString().substring(0, 5);
+}
+
+function formatTimeWithSeconds(date) {
+    return date.toTimeString().substring(0, 8);
+}
+
+// Initialize Bootstrap tooltips and popovers, and auto-refresh on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize tooltips (for other elements)
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+    
+    // Initialize popovers (for session bars)
+    var popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'));
+    var popoverList = popoverTriggerList.map(function (popoverTriggerEl) {
+        var popover = new bootstrap.Popover(popoverTriggerEl, {
+            sanitize: false  // Allow links in popover
+        });
+        
+        // Close other popovers when this one is shown
+        popoverTriggerEl.addEventListener('show.bs.popover', function () {
+            popoverTriggerList.forEach(function (otherEl) {
+                if (otherEl !== popoverTriggerEl) {
+                    var otherPopover = bootstrap.Popover.getInstance(otherEl);
+                    if (otherPopover) {
+                        otherPopover.hide();
+                    }
+                }
+            });
+        });
+        
+        return popover;
+    });
+    
+    // Start auto-refresh every 5 seconds
+    setInterval(refreshDashboard, 5000);
+    
+    // Initial refresh after 2 seconds
+    setTimeout(refreshDashboard, 2000);
+    
+    console.log('Dashboard auto-refresh initialized (every 5 seconds)');
 });
+
 
 
 </script>

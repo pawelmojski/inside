@@ -80,6 +80,32 @@ def format_localtime(value):
     local_time = value.astimezone(warsaw_tz)
     return local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
 
+@app.template_filter('time_only')
+def format_time_only(value):
+    """Convert UTC datetime to Europe/Warsaw timezone and return only HH:MM:SS"""
+    if value is None:
+        return ''
+    warsaw_tz = pytz.timezone('Europe/Warsaw')
+    # If naive datetime, assume it's UTC
+    if value.tzinfo is None:
+        value = pytz.utc.localize(value)
+    # Convert to Warsaw time
+    local_time = value.astimezone(warsaw_tz)
+    return local_time.strftime('%H:%M:%S')
+
+@app.template_filter('time_short')
+def format_time_short(value):
+    """Convert UTC datetime to Europe/Warsaw timezone and return only HH:MM"""
+    if value is None:
+        return ''
+    warsaw_tz = pytz.timezone('Europe/Warsaw')
+    # If naive datetime, assume it's UTC
+    if value.tzinfo is None:
+        value = pytz.utc.localize(value)
+    # Convert to Warsaw time
+    local_time = value.astimezone(warsaw_tz)
+    return local_time.strftime('%H:%M')
+
 @app.template_filter('date')
 def format_date(value):
     """Format date for display"""
@@ -142,7 +168,16 @@ from blueprints.policies import policies_bp
 from blueprints.sessions import sessions_bp
 from blueprints.monitoring import monitoring_bp
 from blueprints.auth import auth_bp
+from blueprints.gates import gates_bp as gates_ui_bp  # Web UI for gates management
+from blueprints.stays import stays_bp as stays_ui_bp  # Web UI for stays tracking
 from search import search_bp
+
+# Import Tower API blueprints
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from api.grants import grants_bp
+from api.stays import stays_bp as stays_api_bp  # API for gate communication
+from api.gates import gates_bp as gates_api_bp  # API for gate communication
+from api.maintenance import maintenance_bp  # API for maintenance mode
 
 app.register_blueprint(dashboard_bp, url_prefix='/')
 app.register_blueprint(users_bp, url_prefix='/users')
@@ -151,9 +186,23 @@ app.register_blueprint(groups_bp, url_prefix='/groups')
 app.register_blueprint(user_groups_bp, url_prefix='/user-groups')
 app.register_blueprint(policies_bp, url_prefix='/policies')
 app.register_blueprint(sessions_bp, url_prefix='/sessions')
+app.register_blueprint(stays_ui_bp, url_prefix='/stays')  # Web UI for stays
 app.register_blueprint(monitoring_bp, url_prefix='/monitoring')
 app.register_blueprint(auth_bp, url_prefix='/auth')
+app.register_blueprint(gates_ui_bp, url_prefix='/gates')  # Web UI for gates
 app.register_blueprint(search_bp, url_prefix='/search')
+
+# Register Tower API blueprints (for Gate communication)
+app.register_blueprint(grants_bp)
+app.register_blueprint(stays_api_bp, name='stays_api')  # API endpoint, unique name
+app.register_blueprint(gates_api_bp, name='gates_api')  # API for gates (/api/v1/gates/*) - unique name
+app.register_blueprint(maintenance_bp)  # Maintenance mode endpoints
+
+from src.api.sessions import api_sessions_bp
+app.register_blueprint(api_sessions_bp)
+
+from src.api.recordings import recordings_bp
+app.register_blueprint(recordings_bp)
 
 # Favicon route (prevent 404 errors)
 @app.route('/favicon.ico')

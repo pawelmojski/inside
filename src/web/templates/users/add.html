@@ -16,10 +16,17 @@
             <div class="card-body">
                 <form method="POST" action="{{ url_for('users.add') }}">
                     <div class="mb-3">
+                        <label for="full_name" class="form-label">Full Name <span class="required">*</span></label>
+                        <input type="text" class="form-control" id="full_name" name="full_name" 
+                               placeholder="Paweł Mojski" required autofocus>
+                        <small class="form-text text-muted">Real person name (e.g., "Paweł Mojski")</small>
+                    </div>
+                    
+                    <div class="mb-3">
                         <label for="username" class="form-label">Username <span class="required">*</span></label>
                         <input type="text" class="form-control" id="username" name="username" 
-                               placeholder="john.doe" required autofocus>
-                        <small class="form-text text-muted">Username for jumphost access</small>
+                               placeholder="p.mojski" required>
+                        <small class="form-text text-muted">System identifier (technical username)</small>
                     </div>
                     
                     <div class="mb-3">

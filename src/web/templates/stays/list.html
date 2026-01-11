@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}Stays - Person Presence Tracking{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row mb-3">
+        <div class="col-md-8">
+            <h2><i class="bi bi-door-open"></i> Stays - Who is Inside</h2>
+            <p class="text-muted">Track when people are inside the system (first session opens Stay, last session closes it)</p>
+        </div>
+        <div class="col-md-4 text-end">
+            <div class="card bg-light">
+                <div class="card-body py-2">
+                    <small class="text-muted">Total: {{ total_stays }}</small> | 
+                    <strong class="text-success">Active: {{ active_stays }}</strong>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-3">
+        <div class="card-body">
+            <form method="get" class="row g-3">
+                <div class="col-md-4">
+                    <label for="person" class="form-label">Person</label>
+                    <input type="text" class="form-control" id="person" name="person" 
+                           value="{{ person_filter }}" placeholder="Person name...">
+                </div>
+                <div class="col-md-3">
+                    <label for="status" class="form-label">Status</label>
+                    <select class="form-select" id="status" name="status">
+                        <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All Stays</option>
+                        <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active (Inside)</option>
+                        <option value="ended" {% if status_filter == 'ended' %}selected{% endif %}>Ended (Left)</option>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary me-2">
+                        <i class="bi bi-funnel"></i> Filter
+                    </button>
+                    <a href="{{ url_for('stays.list') }}" class="btn btn-secondary">
+                        <i class="bi bi-x-circle"></i> Clear
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Stays List with Session Tree -->
+    {% if stays %}
+    <div class="accordion" id="staysAccordion">
+        {% for stay in stays %}
+        <div class="accordion-item {% if stay.is_active %}border-success border-2{% endif %}">
+            <h2 class="accordion-header" id="heading{{ stay.id }}">
+                <button class="accordion-button {% if not loop.first %}collapsed{% endif %}" 
+                        type="button" 
+                        data-bs-toggle="collapse" 
+                        data-bs-target="#collapse{{ stay.id }}" 
+                        aria-expanded="{% if loop.first %}true{% else %}false{% endif %}" 
+                        aria-controls="collapse{{ stay.id }}">
+                    <div class="d-flex w-100 align-items-center">
+                        <!-- Status Badge -->
+                        <span class="me-3">
+                            {% if stay.is_active %}
+                                <span class="badge bg-success">
+                                    <i class="bi bi-circle-fill"></i> INSIDE
+                                </span>
+                            {% else %}
+                                <span class="badge bg-secondary">
+                                    <i class="bi bi-circle"></i> Left
+                                </span>
+                            {% endif %}
+                        </span>
+                        
+                        <!-- Person -->
+                        <strong class="me-3" style="min-width: 150px;">
+                            <i class="bi bi-person-badge"></i> {{ stay.user.full_name or stay.user.username }}
+                        </strong>
+                        
+                        <!-- Time Info -->
+                        <span class="text-muted me-3" style="min-width: 200px;">
+                            <i class="bi bi-clock"></i> {{ stay.started_at|localtime }}
+                            {% if stay.ended_at %}
+                                → {{ stay.ended_at|localtime }}
+                            {% else %}
+                                → <span class="text-success fw-bold">Active</span>
+                            {% endif %}
+                        </span>
+                        
+                        <!-- Duration -->
+                        <span class="badge bg-info text-dark me-3">
+                            {% if stay.duration_seconds %}
+                                {% set hours = stay.duration_seconds // 3600 %}
+                                {% set minutes = (stay.duration_seconds % 3600) // 60 %}
+                                {{ hours }}h {{ minutes }}m
+                            {% elif stay.is_active %}
+                                {% set duration = (now - stay.started_at).total_seconds()|int %}
+                                {% set hours = duration // 3600 %}
+                                {% set minutes = (duration % 3600) // 60 %}
+                                {{ hours }}h {{ minutes }}m (ongoing)
+                            {% endif %}
+                        </span>
+                        
+                        <!-- Session Count -->
+                        <span class="badge bg-primary">
+                            {{ stay.sessions|length }} sessions
+                        </span>
+                    </div>
+                </button>
+            </h2>
+            <div id="collapse{{ stay.id }}" 
+                 class="accordion-collapse collapse {% if loop.first %}show{% endif %}" 
+                 aria-labelledby="heading{{ stay.id }}" 
+                 data-bs-parent="#staysAccordion">
+                <div class="accordion-body">
+                    <!-- Sessions Table -->
+                    <table class="table table-sm table-hover">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="width: 80px;">Status</th>
+                                <th style="width: 120px;">Protocol</th>
+                                <th>Server</th>
+                                <th>SSH Login</th>
+                                <th>Started</th>
+                                <th>Ended</th>
+                                <th>Duration</th>
+                                <th style="width: 100px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for session in stay.sessions %}
+                            <tr class="{% if session.is_active %}table-success{% endif %}">
+                                <td>
+                                    {% if session.is_active %}
+                                        <span class="badge bg-success">
+                                            <i class="bi bi-play-circle-fill"></i> Active
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">
+                                            <i class="bi bi-stop-circle"></i> Ended
+                                        </span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge {% if session.protocol == 'ssh' %}bg-info{% else %}bg-warning{% endif %}">
+                                        {{ session.protocol|upper }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <strong>{{ session.server.name }}</strong>
+                                    <br><small class="text-muted">{{ session.backend_ip }}</small>
+                                </td>
+                                <td>
+                                    {% if session.ssh_username %}
+                                        <code>{{ session.ssh_username }}</code>
+                                        {% if session.subsystem_name %}
+                                            <br><small class="text-muted">{{ session.subsystem_name }}</small>
+                                        {% endif %}
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <small>{{ session.started_at.strftime('%H:%M:%S') }}</small>
+                                </td>
+                                <td>
+                                    {% if session.ended_at %}
+                                        <small>{{ session.ended_at.strftime('%H:%M:%S') }}</small>
+                                    {% else %}
+                                        <span class="text-success">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if session.duration_seconds %}
+                                        {% set minutes = session.duration_seconds // 60 %}
+                                        {% set seconds = session.duration_seconds % 60 %}
+                                        {{ minutes }}m {{ seconds }}s
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <a href="{{ url_for('sessions.view', session_id=session.session_id) }}" 
+                                       class="btn btn-sm btn-outline-primary" 
+                                       title="Session Details">
+                                        <i class="bi bi-eye"></i>
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    
+                    <!-- Stay Metadata -->
+                    <div class="mt-3 p-2 bg-light rounded">
+                        <small class="text-muted">
+                            <strong>Stay #{{ stay.id }}</strong> | 
+                            Gate: {{ stay.gate.name if stay.gate else 'N/A' }} | 
+                            Policy: #{{ stay.policy_id if stay.policy_id else 'N/A' }} | 
+                            First Server: {{ stay.server.name if stay.server else 'N/A' }}
+                            {% if stay.termination_reason %}
+                                | Termination: {{ stay.termination_reason }}
+                            {% endif %}
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle"></i> No stays found with current filters.
+    </div>
+    {% endif %}
+</div>
+
+<style>
+.accordion-button:not(.collapsed) {
+    background-color: #e7f1ff;
+    color: #0c63e4;
+}
+
+.accordion-button:focus {
+    border-color: #86b7fe;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+.accordion-item {
+    margin-bottom: 0.5rem;
+    border-radius: 0.375rem;
+}
+
+.accordion-body {
+    background-color: #f8f9fa;
+}
+</style>
+{% endblock %}

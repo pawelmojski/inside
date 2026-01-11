@@ -13,19 +13,25 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 - **Roadmap**: [ROADMAP.md](ROADMAP.md) - Development history and future plans
 - **Dependencies**: See [requirements.txt](requirements.txt) and [requirements-pyrdp-converter.txt](requirements-pyrdp-converter.txt)
 
-## Architecture (Current State - v1.6)
+## Architecture (Current State - v1.9 IN PROGRESS)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         JUMP HOST                                │
+│                         JUMP HOST (TOWER)                        │
 │                      (10.0.160.5)                                │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Web Management Interface (5000) - Systemd Service 🎯   │   │
 │  │                                                            │   │
 │  │  Flask Web GUI (Bootstrap 5)                              │   │
-│  │  - Dashboard: Auto-refresh stats, active sessions 🎯     │   │
-│  │  - Session History: List, filter, live view 🎯          │   │
+│  │  - Dashboard: Live timeline, stats, auto-refresh 🎯 v1.9│   │
+│  │    • Unified daily timeline (first stay → now)            │   │
+│  │    • All Stays as horizontal rows with sessions nested    │   │
+│  │    • Interactive popovers: clickable links to Person,     │   │
+│  │      Server, Session details with full metadata table     │   │
+│  │    • Auto-refresh every 5 seconds                         │   │
+│  │    • People Inside counter, real-time session tracking    │   │
+│  │  - Session History: List, filter, Gate/Stay columns 🎯  │   │
 │  │  - Live Session Viewer: Real-time SSH log streaming 🎯  │   │
 │  │  - RDP Session Viewer: MP4 conversion & video player 🎯 │   │
 │  │  - User Management: CRUD + multiple source IPs            │   │
@@ -40,18 +46,35 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Tower REST API (15 endpoints) 🎯 NEW v1.9              │   │
+│  │                                                            │   │
+│  │  - POST /api/v1/auth/check - AccessControlV2             │   │
+│  │  - POST /api/v1/sessions/create - Session + Stay mgmt  │   │
+│  │  - PATCH /api/v1/sessions/<id> - Session + Stay close  │   │
+│  │  - POST /api/v1/recordings/start - JSONL streaming 🎯   │   │
+│  │  - POST /api/v1/recordings/chunk - Real-time upload 🎯  │   │
+│  │  - POST /api/v1/recordings/finalize - Complete 🎯       │   │
+│  │  - POST /api/v1/stays/start - Person tracking (legacy)  │   │
+│  │  - POST /api/v1/gates/heartbeat - Gate monitoring        │   │
+│  │  - Authentication: Gate token (config/gate.conf)         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────────────┐   │
 │  │  SSH Access (10.0.160.129:22) - Systemd Service 🎯      │   │
 │  │                                                            │   │
-│  │  SSH Proxy (Paramiko)                                     │   │
+│  │  SSH Proxy (Paramiko) - Gate Mode 🎯 NEW v1.9           │   │
 │  │  - Source IP: 100.64.0.20 → User: p.mojski               │   │
 │  │  - Agent forwarding support (-A flag)                     │   │
-│  │  - Live session recording (JSONL) 🎯 NEW                │   │
-│  │  - Real-time session tracking 🎯                         │   │
-│  │  - Grant expiry auto-disconnect 🎯 NEW v1.5             │   │
-│  │  - Wall-style warnings (5 min, 1 min) 🎯 NEW v1.5      │   │
+│  │  - JSONL streaming recording 🎯 NEW v1.9                │   │
+│  │  - Recording format: JSON Lines (one event per line)     │   │
+│  │  - Buffer: 256KB, Flush: 3s, Latency: <5s 🎯           │   │
+│  │  - Offline mode: /tmp/ buffer + auto-upload 🎯          │   │
+│  │  - Real-time session tracking via API 🎯                │   │
+│  │  - Grant expiry auto-disconnect 🎯 v1.5                 │   │
+│  │  - Wall-style warnings (5 min, 1 min) 🎯 v1.5          │   │
 │  │  - UTMP/WTMP logging (ssh0-ssh99)                        │   │
 │  │  - Backend: 10.0.160.4 (Linux SSH)                        │   │
-│  │  - Access Control V2: Policy-based authorization          │   │
+│  │  - Access Control: API-based (Tower decision) 🎯        │   │
 │  │  - Service: jumphost-ssh-proxy.service                    │   │
 │  │  - Logs: /var/log/jumphost/ssh_proxy.log                  │   │
 │  └──────────────────────────────────────────────────────────┘   │
@@ -84,10 +107,21 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 │  │    - policy_schedules (recurring time windows) 🎯      │   │
 │  │    - policy_ssh_logins (SSH restrictions) ⭐             │   │
 │  │    - policy_audit_log (change history, JSONB) 🎯 NEW  │   │
-│  │    - ip_allocations (proxy IP assignments)               │   │
+│  │    - gates (gateway nodes with IP pools) 🎯 NEW v1.9  │   │
+│  │    - stays (person presence tracking) 🎯 NEW v1.9    │   │
+│  │    - ip_allocations (proxy IP per gate) 🎯 NEW v1.9  │   │
 │  │    - session_recordings (file paths)                     │   │
 │  │    - audit_logs (all actions logged)                     │   │
 │  │    - sessions (real-time tracking) 🎯                   │   │
+│  │                                                            │   │
+│  │  • Stay Management System 🎯 NEW v1.9                  │   │
+│  │    - Person-centric tracking (not per-server/policy)     │   │
+│  │    - First session opens Stay (started_at, is_active)    │   │
+│  │    - Additional sessions reuse Stay (shared stay_id)     │   │
+│  │    - Last session closes Stay (ended_at, duration)       │   │
+│  │    - Automatic management in Tower API (no gate changes) │   │
+│  │    - One person, multiple sessions = one Stay            │   │
+│  │    - Example: root@srv1 + shared@srv2 = same Stay       │   │
 │  │                                                            │   │
 │  │  • Access Control Engine V2 ⭐                           │   │
 │  │    - Policy-based authorization (group/server/service)   │   │
@@ -197,11 +231,13 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 
 ## Access Control Logic
 
-### SSH Access Control (with Schedule Support v1.6)
+### SSH Access Control (with Schedule Support v1.6, Gate-Specific v1.9)
 1. Client connects with username + source IP
-2. `AccessControlEngineV2.check_access_v2(db, source_ip, dest_ip, protocol='ssh', ssh_login, check_time)`
+2. `AccessControlEngineV2.check_access_v2(db, source_ip, dest_ip, protocol='ssh', gate_id, ssh_login, check_time)`
 3. Step 1: Find user by source_ip from user_source_ips table
-4. Step 2: Find backend server by dest_ip from ip_allocations table
+4. Step 2: Find backend server by dest_ip from ip_allocations table filtered by gate_id (v1.9)
+   - Query: `WHERE allocated_ip = dest_ip AND gate_id = gate_id`
+   - Enables same IP on different gates pointing to different servers
 5. Step 3: Find matching policies (user direct > group inheritance)
    - Validates: start_time <= now <= end_time (or NULL)
    - Protocol match: NULL (all) or 'ssh'
@@ -304,9 +340,40 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 - `start_time`, `end_time` - Temporal access window
 - `is_active`, `created_at`
 
+### gates (NEW in v1.9) 🎯
+Gateway nodes in distributed architecture:
+- `id` (PK), `name` (VARCHAR 100, unique, NOT NULL)
+- `description` (TEXT) - Optional description
+- `api_token` (VARCHAR 255, unique, NOT NULL) - Authentication token for Tower API
+- `ip_address` (VARCHAR 45) - Gate's public IP address
+- `last_heartbeat` (TIMESTAMP) - Last heartbeat from gate
+- `is_active` (BOOLEAN, default TRUE)
+- **IP Pool Configuration** (per-gate, overlapping allowed):
+  - `ip_pool_network` (VARCHAR 45, default '10.0.160.128/25') - Pool CIDR
+  - `ip_pool_start` (VARCHAR 45, default '10.0.160.129') - Pool start IP
+  - `ip_pool_end` (VARCHAR 45, default '10.0.160.254') - Pool end IP
+- `created_at`, `updated_at` (TIMESTAMP)
+
+**Features:**
+- Each gate has independent IP pool (can overlap with other gates)
+- Web UI CRUD at /gates/ with IP pool management
+- API token auto-generated on creation
+- Heartbeat monitoring for gate health
+- **Example**: Gate-1 and Gate-2 can both use 10.0.160.129 for different backends
+
+**Relationships:**
+- `gate.sessions` - Sessions handled by this gate (1:N)
+- `gate.stays` - Stays tracked by this gate (1:N)
+- `gate.ip_allocations` - IP allocations for this gate (1:N)
+
 ### ip_allocations
-- `id` (PK), `ip_address`, `server_id` (FK)
-- `allocated_at`, `released_at`
+- `id` (PK), `allocated_ip` (VARCHAR 45), `server_id` (FK to servers)
+- `gate_id` (FK to gates) - NEW v1.9: Each gate has its own IP pool
+- `user_id` (FK to users, nullable), `source_ip` (VARCHAR 45, nullable)
+- `allocated_at` (TIMESTAMP), `expires_at` (TIMESTAMP, nullable - permanent if NULL)
+- `is_active` (BOOLEAN), `session_id` (VARCHAR 255, nullable)
+- **Unique constraint**: `(allocated_ip, gate_id)` - Same IP can exist on different gates
+- **Example**: Gate-1 and Gate-2 can both use 10.0.160.129 pointing to different servers
 
 ### session_recordings
 - `id` (PK), `user_id` (FK), `server_id` (FK)
@@ -386,7 +453,9 @@ Full audit trail for all policy changes with JSONB snapshots:
 ### sessions (NEW in v1.1) ⭐
 Real-time session tracking for active and historical connections:
 - `id` (PK), `session_id` (unique) - Session identifier
-- `user_id` (FK), `server_id` (FK), `protocol` ('ssh' or 'rdp')
+- `user_id` (FK), `server_id` (FK), `stay_id` (FK) 🎯 NEW v1.9
+- `gate_id` (FK) 🎯 NEW v1.9 - Which gate handled this session
+- `protocol` ('ssh' or 'rdp')
 - `source_ip`, `proxy_ip`, `backend_ip`, `backend_port`
 - `ssh_username` - SSH login used for connection
 - `subsystem_name` - Subsystem type (sftp, scp, etc.)
@@ -409,10 +478,52 @@ Real-time session tracking for active and historical connections:
 - Visible in Web GUI Dashboard "Active Sessions"
 - **Live SSH Session Viewer**: Real-time log streaming with 2s polling 🎯
 - **Session History**: Filter by protocol, user, server, status 🎯
+- **Stay Integration**: Sessions linked to Stays via stay_id 🎯 NEW v1.9
 
 **SSH Proxy Integration:**
 - Creates session record after backend authentication
 - Updates session on disconnect (via channel close handler)
+
+### stays (NEW in v1.9) 🎯
+Person presence tracking - period when person is "inside" with ≥1 active session:
+- `id` (PK), `user_id` (FK to users, NOT NULL) - Which person
+- `policy_id` (FK to access_policies) - Policy used for first session
+- `gate_id` (FK to gates) - Which gate person entered through
+- `server_id` (FK to servers) - First server accessed (metadata only)
+- `started_at` (TIMESTAMP, NOT NULL) - When person entered (first session)
+- `ended_at` (TIMESTAMP, NULL) - When person left (last session ended)
+- `duration_seconds` (INTEGER) - Calculated on Stay close
+- `is_active` (BOOLEAN, default TRUE) - TRUE = person still inside
+- `termination_reason` (VARCHAR 255) - 'last_session_ended', 'grant_expired', etc.
+- `created_at`, `updated_at` (TIMESTAMP)
+
+**Stay Logic - Automatic Management:**
+1. **First session** of person → Tower creates Stay (started_at, is_active=True)
+2. **Additional sessions** → Reuse existing Stay (same stay_id for all sessions)
+3. **Session ends** → Check remaining active sessions for this person
+4. **Last session ends** → Close Stay (ended_at, duration_seconds, is_active=False)
+
+**Key Principles:**
+- **Per person**, not per server or per policy
+- One person can have multiple sessions in one Stay (different servers, different SSH logins)
+- Stay spans reconnects (disconnect/reconnect keeps same Stay if sessions overlap)
+- Fully automatic - no Gate/proxy changes needed
+- Tower API handles all Stay management in /sessions/create and /sessions/<id> PATCH
+
+**Example:**
+```
+Person: p.mojski
+08:00 - Connects as root@server1 → Session #1, Stay #1 opened
+09:30 - Connects as shared@server2 → Session #2, Stay #1 reused (same stay_id)
+10:00 - Disconnects from server1 → Session #1 ended, Stay #1 active (Session #2 running)
+14:14 - Disconnects from server2 → Session #2 ended, Stay #1 closed (last session)
+
+Result: Stay #1 duration = 08:00-14:14 (6h 14min), 2 sessions total
+```
+
+**Relationships:**
+- `stay.sessions` - All sessions in this Stay (1:N)
+- `session.stay` - Which Stay this session belongs to (N:1)
 - Tracks SSH username, subsystem (sftp/scp), SSH agent usage
 - Records session duration and file size on close
 - **JSONL Recording**: Streams events immediately to disk (not buffered) 🎯

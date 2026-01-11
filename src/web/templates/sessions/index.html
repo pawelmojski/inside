@@ -59,8 +59,9 @@
                     <thead>
                         <tr>
                             <th>Protocol</th>
-                            <th>User</th>
+                            <th>Person</th>
                             <th>Server</th>
+                            <th>Gate</th>
                             <th>Source IP</th>
                             <th>Backend IP</th>
                             <th>Started</th>
@@ -73,7 +74,7 @@
                         {% for session in sessions %}
                         <tr class="{% if session.is_active %}table-success{% endif %}">
                             <td><span class="badge bg-{{ 'primary' if session.protocol == 'ssh' else 'success' }}">{{ session.protocol.upper() }}</span></td>
-                            <td>{{ session.user.username if session.user else 'Unknown' }}</td>
+                            <td>{{ session.user.full_name or session.user.username if session.user else 'Unknown' }}</td>
                             <td>
                                 <strong>
                                     {% if session.protocol == 'ssh' and session.ssh_username %}
@@ -85,6 +86,15 @@
                                         {{ session.server.name if session.server else session.backend_ip }}
                                     {% endif %}
                                 </strong>
+                            </td>
+                            <td>
+                                {% if session.gate_id %}
+                                    <small class="text-muted">
+                                        <i class="bi bi-hdd-network"></i> {{ session.gate.name if session.gate else 'Gate ' + session.gate_id|string }}
+                                    </small>
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
                             </td>
                             <td><code>{{ session.source_ip }}</code></td>
                             <td><code>{{ session.backend_ip }}</code></td>

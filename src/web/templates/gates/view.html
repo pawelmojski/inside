@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+
+{% block title %}{{ gate.name }} - Gate Details{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="bi bi-hdd-network"></i> {{ gate.name }}</h2>
+        <div>
+            <a href="{{ url_for('gates.edit', gate_id=gate.id) }}" class="btn btn-warning">
+                <i class="bi bi-pencil"></i> Edit
+            </a>
+            <a href="{{ url_for('gates.list') }}" class="btn btn-secondary">
+                <i class="bi bi-arrow-left"></i> Back to List
+            </a>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Gate Information</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-borderless">
+                        <tr>
+                            <th style="width: 30%">Name:</th>
+                            <td>{{ gate.name }}</td>
+                        </tr>
+                        <tr>
+                            <th>Hostname:</th>
+                            <td><code>{{ gate.hostname }}</code></td>
+                        </tr>
+                        <tr>
+                            <th>Location:</th>
+                            <td>{{ gate.location or '-' }}</td>
+                        </tr>
+                        <tr>
+                            <th>Status:</th>
+                            <td>
+                                {% if gate.status == 'online' %}
+                                <span class="badge bg-success">Online</span>
+                                {% elif gate.status == 'offline' %}
+                                <span class="badge bg-secondary">Offline</span>
+                                {% else %}
+                                <span class="badge bg-danger">{{ gate.status|title }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Last Heartbeat:</th>
+                            <td>
+                                {% if gate.last_heartbeat %}
+                                {{ gate.last_heartbeat|localtime }}
+                                {% else %}
+                                <span class="text-muted">Never</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Version:</th>
+                            <td>{{ gate.version or '-' }}</td>
+                        </tr>
+                        <tr>
+                            <th>Active:</th>
+                            <td>
+                                {% if gate.is_active %}
+                                <span class="badge bg-success">Yes</span>
+                                {% else %}
+                                <span class="badge bg-danger">No</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Description:</th>
+                            <td>{{ gate.description or '-' }}</td>
+                        </tr>
+                        <tr>
+                            <th>Created:</th>
+                            <td>{{ gate.created_at|localtime }}</td>
+                        </tr>
+                        <tr>
+                            <th>Updated At:</th>
+                            <td>{{ gate.updated_at|localtime }}</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">IP Pool Configuration</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-borderless">
+                        <tr>
+                            <th style="width: 30%">Network:</th>
+                            <td><code>{{ gate.ip_pool_network }}</code></td>
+                        </tr>
+                        <tr>
+                            <th>Start IP:</th>
+                            <td><code>{{ gate.ip_pool_start }}</code></td>
+                        </tr>
+                        <tr>
+                            <th>End IP:</th>
+                            <td><code>{{ gate.ip_pool_end }}</code></td>
+                        </tr>
+                    </table>
+                    
+                    <h6 class="mt-4">Pool Usage</h6>
+                    <div class="progress mb-2" style="height: 30px;">
+                        {% set total = allocations|length + available_ips|length %}
+                        {% set usage_pct = (allocations|length / total * 100) if total > 0 else 0 %}
+                        <div class="progress-bar {% if usage_pct > 90 %}bg-danger{% elif usage_pct > 70 %}bg-warning{% else %}bg-success{% endif %}" 
+                             role="progressbar" 
+                             style="width: {{ usage_pct }}%">
+                            {{ allocations|length }} / {{ total }} allocated ({{ "%.1f"|format(usage_pct) }}%)
+                        </div>
+                    </div>
+                    <small class="text-muted">
+                        {{ available_ips|length }} IPs available
+                    </small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5 class="mb-0">Active IP Allocations</h5>
+        </div>
+        <div class="card-body">
+            {% if allocations %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>Proxy IP</th>
+                            <th>Server</th>
+                            <th>Server IP</th>
+                            <th>Allocated At</th>
+                            <th>Expires</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for alloc, server in allocations %}
+                        <tr>
+                            <td><code>{{ alloc.allocated_ip }}</code></td>
+                            <td>
+                                <a href="{{ url_for('servers.view', server_id=server.id) }}">
+                                    {{ server.name }}
+                                </a>
+                            </td>
+                            <td><code>{{ server.ip_address }}</code></td>
+                            <td>{{ alloc.allocated_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                            <td>
+                                {% if alloc.expires_at %}
+                                {{ alloc.expires_at.strftime('%Y-%m-%d %H:%M') }}
+                                {% else %}
+                                <span class="badge bg-info">Permanent</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> No active IP allocations for this gate.
+            </div>
+            {% endif %}
+            
+            {% if available_ips %}
+            <div class="mt-4">
+                <h6>Available IPs (showing first 20):</h6>
+                <div class="d-flex flex-wrap gap-2">
+                    {% for ip in available_ips %}
+                    <span class="badge bg-secondary"><code>{{ ip }}</code></span>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -92,7 +92,7 @@
                                     <option value="">-- Wszyscy --</option>
                                     {% for user in all_users %}
                                     <option value="{{ user.id }}" {% if filters.user_id == user.id %}selected{% endif %}>
-                                        {{ user.username }}
+                                        {{ user.full_name or user.username }}
                                     </option>
                                     {% endfor %}
                                 </select>
@@ -157,7 +157,7 @@
                                     <option value="">-- Wszystkie --</option>
                                     {% for policy in all_policies %}
                                     <option value="{{ policy.id }}" {% if filters.policy_id == policy.id %}selected{% endif %}>
-                                        #{{ policy.id }} - {{ policy.user.username if policy.user else policy.user_group.name }}
+                                        #{{ policy.id }} - {{ (policy.user.full_name or policy.user.username) if policy.user else policy.user_group.name }}
                                         → {{ policy.target_server.name if policy.target_server else policy.target_group.name }}
                                     </option>
                                     {% endfor %}
@@ -324,7 +324,7 @@
                             <tbody>
                                 {% for session in results %}
                                 <tr style="cursor: pointer;" onclick="window.location.href='{{ url_for('sessions.view', session_id=session.session_id) }}'">
-                                    <td>{{ session.user.username if session.user else 'N/A' }}</td>
+                                    <td>{{ session.user.full_name or session.user.username if session.user else 'N/A' }}</td>
                                     <td>
                                         {{ session.server.name if session.server else 'N/A' }}
                                         <small class="text-muted">({{ session.server.ip_address if session.server else '' }})</small>
@@ -373,10 +373,10 @@
                                         <code>{{ session.source_ip }}</code>
                                     </td>
                                     <td>
-                                        <small>{{ session.started_at.strftime('%Y-%m-%d %H:%M:%S') if session.started_at else '-' }}</small>
+                                        <small>{{ session.started_at|localtime if session.started_at else '-' }}</small>
                                     </td>
                                     <td>
-                                        <small>{{ session.ended_at.strftime('%Y-%m-%d %H:%M:%S') if session.ended_at else '-' }}</small>
+                                        <small>{{ session.ended_at|localtime if session.ended_at else '-' }}</small>
                                     </td>
                                 </tr>
                                 {% endfor %}

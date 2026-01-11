@@ -21,17 +21,20 @@ class AccessControlEngineV2:
     def find_backend_by_proxy_ip(
         self,
         db: Session,
-        proxy_ip: str
+        proxy_ip: str,
+        gate_id: int
     ) -> Optional[Dict]:
         """
-        Find backend server by proxy IP address (destination IP).
+        Find backend server by proxy IP address (destination IP) on specific gate.
         
         Looks up in ip_allocations table to find which backend server
-        is assigned to this proxy IP.
+        is assigned to this proxy IP on the given gate. Same IP can exist
+        on multiple gates pointing to different servers.
         
         Args:
             db: Database session
             proxy_ip: Destination IP that client connected to
+            gate_id: ID of the gate that received the connection
             
         Returns:
             Dict with server info or None if not found
@@ -44,12 +47,13 @@ class AccessControlEngineV2:
             allocation = db.query(IPAllocation).filter(
                 and_(
                     IPAllocation.allocated_ip == proxy_ip,
+                    IPAllocation.gate_id == gate_id,
                     IPAllocation.is_active == True
                 )
             ).first()
             
             if not allocation:
-                logger.warning(f"No active IP allocation found for proxy IP {proxy_ip}")
+                logger.warning(f"No active IP allocation found for proxy IP {proxy_ip} on gate {gate_id}")
                 return None
             
             server = db.query(Server).filter(
@@ -61,14 +65,14 @@ class AccessControlEngineV2:
                 logger.error(f"Server ID {allocation.server_id} not found or inactive for IP {proxy_ip}")
                 return None
             
-            logger.info(f"Proxy IP {proxy_ip} maps to backend server {server.ip_address} (ID: {server.id})")
+            logger.info(f"Proxy IP {proxy_ip} on gate {gate_id} maps to backend server {server.ip_address} (ID: {server.id})")
             return {
                 'server': server,
                 'allocation': allocation
             }
             
         except Exception as e:
-            logger.error(f"Error looking up backend for proxy IP {proxy_ip}: {e}", exc_info=True)
+            logger.error(f"Error looking up backend for proxy IP {proxy_ip} on gate {gate_id}: {e}", exc_info=True)
             return None
     
     def check_schedule_access(
@@ -129,6 +133,7 @@ class AccessControlEngineV2:
         source_ip: str,
         dest_ip: str,
         protocol: str,
+        gate_id: int,
         ssh_login: Optional[str] = None,
         check_time: Optional[datetime] = None
     ) -> dict:
@@ -140,6 +145,7 @@ class AccessControlEngineV2:
             source_ip: Client's source IP address
             dest_ip: Destination proxy IP (to identify target server)
             protocol: 'ssh' or 'rdp'
+            gate_id: ID of the gate that received the connection
             ssh_login: SSH login name (only for SSH protocol)
             check_time: Time to check access (default: now/utcnow)
             
@@ -157,6 +163,61 @@ class AccessControlEngineV2:
             check_time = datetime.utcnow()
         
         try:
+            # Step 0: Check gate maintenance mode FIRST
+            from .database import Gate, MaintenanceAccess
+            gate = db.query(Gate).filter(Gate.id == gate_id).first()
+            
+            if gate and gate.in_maintenance and gate.maintenance_scheduled_at:
+                from datetime import timedelta
+                now = check_time
+                grace_start = gate.maintenance_scheduled_at - timedelta(minutes=gate.maintenance_grace_minutes)
+                
+                # Check if in grace period or active maintenance
+                if now >= grace_start:
+                    # Find user first to check maintenance access
+                    user_ip = db.query(UserSourceIP).filter(
+                        UserSourceIP.source_ip == source_ip,
+                        UserSourceIP.is_active == True
+                    ).first()
+                    
+                    user = None
+                    if user_ip:
+                        user = db.query(User).filter(
+                            User.id == user_ip.user_id,
+                            User.is_active == True
+                        ).first()
+                    
+                    # Check if user has maintenance access
+                    has_maintenance_access = False
+                    if user:
+                        has_maintenance_access = db.query(MaintenanceAccess).filter(
+                            MaintenanceAccess.entity_type == 'gate',
+                            MaintenanceAccess.entity_id == gate_id,
+                            MaintenanceAccess.person_id == user.id
+                        ).first() is not None
+                    
+                    if not has_maintenance_access:
+                        # In grace period or maintenance - deny access
+                        if now >= gate.maintenance_scheduled_at:
+                            reason = f"Gate in maintenance mode: {gate.maintenance_reason}"
+                            denial_reason = 'gate_maintenance'
+                        else:
+                            minutes_until = int((gate.maintenance_scheduled_at - now).total_seconds() / 60)
+                            reason = f"Gate entering maintenance in {minutes_until} minutes"
+                            denial_reason = 'maintenance_grace_period'
+                        
+                        logger.warning(f"Access denied: {reason}")
+                        return {
+                            'has_access': False,
+                            'user': user,
+                            'user_ip': user_ip if user else None,
+                            'server': None,
+                            'policies': [],
+                            'selected_policy': None,
+                            'denial_reason': denial_reason,
+                            'reason': reason
+                        }
+            
             # Step 1: Find user by source_ip
             user_ip = db.query(UserSourceIP).filter(
                 UserSourceIP.source_ip == source_ip,
@@ -194,10 +255,10 @@ class AccessControlEngineV2:
                     'reason': f'User not found or inactive'
                 }
             
-            # Step 2: Find backend server by dest_ip
-            backend_info = self.find_backend_by_proxy_ip(db, dest_ip)
+            # Step 2: Find backend server by dest_ip on this gate
+            backend_info = self.find_backend_by_proxy_ip(db, dest_ip, gate_id)
             if not backend_info:
-                logger.warning(f"Access denied: No backend found for destination IP {dest_ip}")
+                logger.warning(f"Access denied: No backend found for destination IP {dest_ip} on gate {gate_id}")
                 return {
                     'has_access': False,
                     'user': user,
@@ -210,6 +271,43 @@ class AccessControlEngineV2:
                 }
             
             server = backend_info['server']
+            
+            # Step 2b: Check backend server maintenance mode
+            if server.in_maintenance and server.maintenance_scheduled_at:
+                from datetime import timedelta
+                now = check_time
+                grace_start = server.maintenance_scheduled_at - timedelta(minutes=server.maintenance_grace_minutes)
+                
+                # Check if in grace period or active maintenance
+                if now >= grace_start:
+                    # Check if user has maintenance access to this server
+                    has_maintenance_access = db.query(MaintenanceAccess).filter(
+                        MaintenanceAccess.entity_type == 'server',
+                        MaintenanceAccess.entity_id == server.id,
+                        MaintenanceAccess.person_id == user.id
+                    ).first() is not None
+                    
+                    if not has_maintenance_access:
+                        # In grace period or maintenance - deny access
+                        if now >= server.maintenance_scheduled_at:
+                            reason = f"Server in maintenance mode: {server.maintenance_reason}"
+                            denial_reason = 'backend_maintenance'
+                        else:
+                            minutes_until = int((server.maintenance_scheduled_at - now).total_seconds() / 60)
+                            reason = f"Server entering maintenance in {minutes_until} minutes"
+                            denial_reason = 'maintenance_grace_period'
+                        
+                        logger.warning(f"Access denied: {reason}")
+                        return {
+                            'has_access': False,
+                            'user': user,
+                            'user_ip': user_ip,
+                            'server': server,
+                            'policies': [],
+                            'selected_policy': None,
+                            'denial_reason': denial_reason,
+                            'reason': reason
+                        }
             
             # Step 3: Find matching policies with PRIORITY: user > group
             now = check_time
@@ -485,14 +583,14 @@ class AccessControlEngineV2:
                 'reason': f'Internal error: {str(e)}'
             }
     
-    def check_port_forwarding_allowed(self, db, source_ip: str, dest_ip: str) -> bool:
+    def check_port_forwarding_allowed(self, db, source_ip: str, dest_ip: str, gate_id: int) -> bool:
         """Check if user has port forwarding permission for this server
         
         Returns True if ANY matching policy has port_forwarding_allowed=True
         """
         try:
             # Use check_access_v2 to get matching policies
-            result = self.check_access_v2(db, source_ip, dest_ip, 'ssh', None)
+            result = self.check_access_v2(db, source_ip, dest_ip, 'ssh', gate_id, None)
             
             if not result['has_access']:
                 logger.warning(f"Port forwarding denied: No access to server")

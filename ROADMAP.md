@@ -1,6 +1,42 @@
 # Inside - Roadmap & TODO
 
-## Current Status: v1.8 (Mega-Wyszukiwarka) - January 2026 ✅
+# Inside - Roadmap & TODO
+
+## Current Status: v1.9 (JSONL Streaming) - January 2026 🔄 IN PROGRESS
+
+**Recent v1.9 Completions:**
+- ✅ Tower REST API: 15 endpoints implemented and tested
+- ✅ Recording API: start/chunk/finalize endpoints
+- ✅ ssh_proxy refactored: All AccessControlV2 → TowerClient API calls
+- ✅ Database schema: gates, stays, sessions.gate_id, sessions.stay_id, ip_allocations.gate_id
+- ✅ Web UI: Gate/Stay columns in sessions list and detail
+- ✅ Recording parser: Dual-format support (JSON legacy + JSONL streaming)
+- ✅ ANSI-to-HTML conversion: Terminal colors in Web UI
+- ✅ Format auto-detection: JSON vs JSONL vs raw binary
+- ✅ SSHSessionRecorder: JSONL streaming with buffering (50 events / 3s flush)
+- ✅ IP Pool per Gate: gate_id in ip_allocations, overlapping IPs between gates allowed
+- ✅ IPPoolManager: Gate-aware IP allocation with unique constraint (ip, gate_id)
+- ✅ AccessControlV2: Gate-specific IP resolution (find_backend_by_proxy_ip with gate_id)
+- ✅ Web UI: Gates management CRUD with IP pool configuration
+- ✅ Stay Logic: Person-centric tracking (first session opens Stay, last closes)
+- ✅ Tower API: Automatic Stay management in /sessions/create and /sessions/<id> PATCH
+- ✅ **Dashboard Live Timeline**: Unified daily visualization 🎯 NEW v1.9
+  - Timeline from first stay today → now (no wasted space)
+  - All Stays as horizontal rows with person badges
+  - Sessions nested inside Stay rows (positioned on daily timeline)
+  - Interactive popovers with rich metadata tables
+  - Clickable links: Person → user detail, Server → server detail
+  - "View Details" button → full session view
+  - Auto-close previous popover when opening new one
+  - Min-width 50px for sessions, max-width to prevent overflow
+  - Green dot (●) indicator for active sessions
+  - Auto-refresh every 5 seconds with smooth updates
+  - People Inside counter tracking active stays
+- 🔄 End-to-end testing: SSH connection with JSONL recording (next)
+
+````
+
+## Previous Status: v1.8 (Mega-Wyszukiwarka) - January 2026 ✅
 
 **Operational Services:**
 - ✅ SSH Proxy: `0.0.0.0:22` (systemd: jumphost-ssh-proxy.service)
@@ -38,22 +74,129 @@
 
 ## 🚀 Planned Features
 
-### v1.9 - Distributed Architecture & TPROXY (Q1 2026)
+### v1.9 - Distributed Architecture & JSONL Streaming (Q1 2026) 🔄 IN PROGRESS
+
+**Status**: 90% complete - JSONL recording format migration in progress
 
 **GUI Improvements:**
-- Dashboard tuning (better metrics, cleaner layout)
-- Refactor host/group/user pages (better UX, consistent navigation)
-- Search enhancements (save queries, more filters)
+- ✅ Gate/Stay columns added to sessions list
+- ✅ Gate/Stay info in session detail view
+- ✅ Recording viewer: Dual-format support (JSON + JSONL)
+- ✅ **Maintenance Mode v2**: Complete redesign with grace periods and personnel access 🎯 NEW
+  - Dedicated `in_maintenance` field (separate from `is_active`)
+  - Absolute time scheduling with grace period (minutes before maintenance)
+  - Grace period blocks new logins, scheduled time disconnects existing sessions
+  - Personnel whitelist (explicit user IDs, no groups)
+  - API endpoints: POST/DELETE for gates and backends (servers)
+  - GUI modal: DateTime picker with "Now" button, grace slider (5-60 min), personnel multi-select
+  - AJAX auto-refresh without closing modal
+  - Display: Maintenance status badges, "Until" time, Exit Maintenance button
+  - Backend: Session termination marking with `termination_reason='gate_maintenance'`
+- ✅ **Timezone Consistency**: Europe/Warsaw throughout GUI 🎯 NEW
+  - Template filters: `|localtime`, `|time_only`, `|time_short` for proper UTC→Warsaw conversion
+  - JavaScript datetime-local inputs: Use local time (not UTC)
+  - Dashboard: All session times in Warsaw timezone
+  - Database: Stores UTC (naive datetime), converts on display
+  - Filter handles naive UTC → Warsaw conversion with pytz
+- ⏳ Dashboard tuning (better metrics, cleaner layout)
+- ⏳ Refactor host/group/user pages (better UX, consistent navigation)
 
-**Distributed Jumphost Service:**
-- API layer separation (REST API for auth/policy/sessions)
-- Multi-jumphost support (single control plane, multiple data planes)
-- Jumphost registration & heartbeat system
-- Per-jumphost IP pools
-- Policy scoping (all/specific jumphost)
-- Local cache with TTL (offline mode support)
-- Session events batching & async upload
-- Recording upload after session end
+**Distributed Jumphost Service - Tower API:**
+- ✅ REST API layer (15 endpoints)
+- ✅ POST /api/v1/auth/check - AccessControlV2 authorization with gate_id
+- ✅ POST /api/v1/sessions/create - Session tracking with gate_id + automatic Stay management
+- ✅ PATCH /api/v1/sessions/<id> - Session updates + automatic Stay closure when last session ends
+- ✅ POST /api/v1/stays/start - Person entry tracking (legacy, deprecated by automatic Stay in /sessions)
+- ✅ POST /api/v1/gates/heartbeat - Gate alive monitoring
+- ✅ Database schema: gates, stays tables with relationships
+- ✅ IP Pool per Gate: gate_id in ip_allocations table
+- ✅ Gate-specific IP resolution: AccessControlV2 with gate_id parameter
+- ✅ Web UI: Gates CRUD with IP pool configuration (network CIDR, start IP, end IP)
+- ✅ Stay Logic Implementation: Per-person tracking (not per-server, not per-policy)
+- ✅ **Maintenance Mode v2**: POST/DELETE /api/v1/gates/<id>/maintenance and /backends/<id>/maintenance 🎯 NEW
+- ✅ **Maintenance Access Control**: Grace period blocking in AccessControlV2.check_access_v2() 🎯 NEW
+- ✅ **SSH Proxy Cleanup**: Closes stale sessions AND stays on startup (service_restart) 🎯 NEW
+- ⏳ Gate registration & management UI improvements
+- ⏳ Policy scoping (all gates vs specific gate)
+- ⏳ Dashboard: Active Stays widget with real-time person presence
+
+**Stay Logic - Person-Centric Tracking:**
+- ✅ **Stay** = period when person is "inside" (has ≥1 active session)
+- ✅ **First session** of person → creates Stay (started_at, is_active=True)
+- ✅ **Additional sessions** → reuse existing Stay (stay_id shared across sessions)
+- ✅ **Last session ends** → closes Stay (ended_at, duration_seconds, is_active=False)
+- ✅ One person can have multiple sessions in one Stay (different servers, different SSH usernames)
+- ✅ Stay spans across reconnects (disconnect/reconnect keeps same Stay if sessions overlap)
+- ✅ Fully automatic - no changes needed in Gate/proxy code
+
+**Stay Examples:**
+```
+Person: p.mojski
+08:00 - Connects: root@server1 → Session #1, Stay #1 opened
+09:30 - Connects: shared@server2 → Session #2, Stay #1 reused
+10:00 - Disconnects from server1 → Session #1 ended, Stay #1 still active (Session #2 running)
+14:14 - Disconnects from server2 → Session #2 ended, Stay #1 closed (last session)
+
+Result: Stay #1 duration = 08:00-14:14 (6h 14min)
+```
+
+**IP Pool Architecture:**
+- ✅ Each Gate has its own IP pool (10.0.160.128-255)
+- ✅ IP pools CAN overlap between gates (same IP range allowed)
+- ✅ IP unique only within one gate, not globally
+- ✅ Database: `ip_allocations.gate_id` foreign key to gates
+- ✅ Unique constraint: `(allocated_ip, gate_id)` not just `(allocated_ip)`
+- ✅ IPPoolManager: Gate-aware allocation with `gate_id` parameter
+- ✅ AccessControlV2: `find_backend_by_proxy_ip(dest_ip, gate_id)` 
+- ✅ Tower API: Passes `gate.id` to access control checks
+
+**Example Multi-Gate Scenario:**
+```
+Gate-1 (localhost):    10.0.160.129 → Server A (Test-SSH)
+Gate-2 (cloud-dmz):    10.0.160.129 → Server X (Prod-DB)
+
+# Same IP, different backends - resolution by gate_id
+find_backend_by_proxy_ip(db, '10.0.160.129', gate_id=1) → Server A
+find_backend_by_proxy_ip(db, '10.0.160.129', gate_id=2) → Server X
+```
+
+**Recording Streaming - JSONL Format:**
+- ✅ Tower API: 3 recording endpoints (start/chunk/finalize)
+- ✅ JSONL format specification (JSON Lines, one event per line)
+- 🔄 SSHSessionRecorder: Converting to JSONL streaming
+- 🔄 Web parser: Dual-format support (legacy JSON + new JSONL)
+- ✅ Streaming architecture: 256KB buffer, 3s flush, <5s latency
+- ✅ Offline mode: /tmp/ buffer + auto-upload when Tower returns
+- ✅ Base64 chunked upload (binary-safe over JSON API)
+- ⏳ End-to-end testing with real SSH connections
+
+**JSONL Recording Format:**
+```jsonl
+{"type":"session_start","timestamp":"2026-01-07T12:00:00.000Z","username":"p.mojski","server":"10.0.160.4"}
+{"type":"client","timestamp":"2026-01-07T12:00:01.123Z","data":"ls -la\n"}
+{"type":"server","timestamp":"2026-01-07T12:00:01.245Z","data":"total 24\ndrwxr-xr-x..."}
+{"type":"session_end","timestamp":"2026-01-07T12:05:30.456Z","duration":330}
+```
+
+**Event Types:**
+- `session_start`: Session metadata (username, server, timestamp)
+- `client`: Data from client → server (user input)
+- `server`: Data from server → client (command output)
+- `session_end`: Session completion (duration, timestamp)
+
+**Benefits:**
+- ✅ Append-only streaming (no JSON parsing overhead)
+- ✅ Real-time upload during session (not after end)
+- ✅ Streaming parser (no need to load full file)
+- ✅ Event-level timestamps and direction tracking
+- ✅ Industry standard format (Kafka, ELK compatible)
+
+**Next Steps:**
+- [ ] Complete SSHSessionRecorder JSONL migration
+- [ ] Test Web UI with JSONL recordings
+- [ ] Gate heartbeat daemon implementation
+- [ ] Gate cache (SQLite) for offline mode
+- [ ] Multi-gate deployment testing
 
 **TPROXY Support:**
 - Transparent proxy mode for Linux routers

@@ -31,7 +31,7 @@
                             <option value="">Select a user...</option>
                             {% for user in users %}
                             <option value="{{ user.id }}" {{ 'selected' if request.args.get('user_id') == user.id|string }}>
-                                {{ user.username }} ({{ user.email or 'no email' }})
+                                {{ user.full_name or user.username }} ({{ user.email or 'no email' }})
                             </option>
                             {% endfor %}
                         </select>

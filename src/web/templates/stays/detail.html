@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}Stay #{{ stay.id }} - {{ stay.user.full_name or stay.user.username }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row mb-3">
+        <div class="col-md-8">
+            <h2>
+                <i class="bi bi-door-open"></i> Stay #{{ stay.id }}
+                {% if stay.is_active %}
+                    <span class="badge bg-success">INSIDE</span>
+                {% else %}
+                    <span class="badge bg-secondary">Left</span>
+                {% endif %}
+            </h2>
+            <p class="text-muted">Person presence tracking - Session tree view</p>
+        </div>
+        <div class="col-md-4 text-end">
+            <a href="{{ url_for('stays.list') }}" class="btn btn-secondary">
+                <i class="bi bi-arrow-left"></i> Back to Stays
+            </a>
+        </div>
+    </div>
+
+    <!-- Stay Info Card -->
+    <div class="card mb-4">
+        <div class="card-header bg-primary text-white">
+            <h5 class="mb-0"><i class="bi bi-info-circle"></i> Stay Information</h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <dl class="row">
+                        <dt class="col-sm-4">Person:</dt>
+                        <dd class="col-sm-8">
+                            <strong>{{ stay.user.full_name or stay.user.username }}</strong>
+                            {% if stay.user.full_name and stay.user.username %}
+                                <br><small class="text-muted">{{ stay.user.username }}</small>
+                            {% endif %}
+                        </dd>
+
+                        <dt class="col-sm-4">Gate:</dt>
+                        <dd class="col-sm-8">{{ stay.gate.name if stay.gate else 'N/A' }}</dd>
+
+                        <dt class="col-sm-4">First Server:</dt>
+                        <dd class="col-sm-8">{{ stay.server.name if stay.server else 'N/A' }}</dd>
+
+                        <dt class="col-sm-4">Policy:</dt>
+                        <dd class="col-sm-8">#{{ stay.policy_id if stay.policy_id else 'N/A' }}</dd>
+                    </dl>
+                </div>
+                <div class="col-md-6">
+                    <dl class="row">
+                        <dt class="col-sm-4">Started:</dt>
+                        <dd class="col-sm-8">{{ stay.started_at|localtime }}</dd>
+
+                        <dt class="col-sm-4">Ended:</dt>
+                        <dd class="col-sm-8">
+                            {% if stay.ended_at %}
+                                {{ stay.ended_at|localtime }}
+                            {% else %}
+                                <span class="badge bg-success">Active - Still Inside</span>
+                            {% endif %}
+                        </dd>
+
+                        <dt class="col-sm-4">Duration:</dt>
+                        <dd class="col-sm-8">
+                            {% if stay.duration_seconds %}
+                                {% set hours = stay.duration_seconds // 3600 %}
+                                {% set minutes = (stay.duration_seconds % 3600) // 60 %}
+                                {% set seconds = stay.duration_seconds % 60 %}
+                                {{ hours }}h {{ minutes }}m {{ seconds }}s
+                            {% elif stay.is_active %}
+                                {% set duration = (now - stay.started_at).total_seconds()|int %}
+                                {% set hours = duration // 3600 %}
+                                {% set minutes = (duration % 3600) // 60 %}
+                                {% set seconds = duration % 60 %}
+                                {{ hours }}h {{ minutes }}m {{ seconds }}s (ongoing)
+                            {% endif %}
+                        </dd>
+
+                        <dt class="col-sm-4">Sessions:</dt>
+                        <dd class="col-sm-8">
+                            <span class="badge bg-primary">{{ sessions|length }} total</span>
+                            <span class="badge bg-success">{{ sessions|selectattr('is_active')|list|length }} active</span>
+                        </dd>
+
+                        {% if stay.termination_reason %}
+                        <dt class="col-sm-4">Termination:</dt>
+                        <dd class="col-sm-8">{{ stay.termination_reason }}</dd>
+                        {% endif %}
+                    </dl>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sessions Table -->
+    <div class="card">
+        <div class="card-header">
+            <h5 class="mb-0"><i class="bi bi-list-ul"></i> Sessions in this Stay</h5>
+        </div>
+        <div class="card-body">
+            <table class="table table-hover">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 80px;">Status</th>
+                        <th style="width: 100px;">Protocol</th>
+                        <th>Server</th>
+                        <th>SSH Login</th>
+                        <th>Started</th>
+                        <th>Ended</th>
+                        <th>Duration</th>
+                        <th style="width: 120px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for session in sessions %}
+                    <tr class="{% if session.is_active %}table-success{% endif %}">
+                        <td>
+                            {% if session.is_active %}
+                                <span class="badge bg-success">
+                                    <i class="bi bi-play-circle-fill"></i> Active
+                                </span>
+                            {% else %}
+                                <span class="badge bg-secondary">
+                                    <i class="bi bi-stop-circle"></i> Ended
+                                </span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="badge {% if session.protocol == 'ssh' %}bg-info{% else %}bg-warning{% endif %}">
+                                {{ session.protocol|upper }}
+                            </span>
+                        </td>
+                        <td>
+                            <strong>{{ session.server.name }}</strong>
+                            <br><small class="text-muted">{{ session.backend_ip }}:{{ session.backend_port }}</small>
+                        </td>
+                        <td>
+                            {% if session.ssh_username %}
+                                <code>{{ session.ssh_username }}</code>
+                                {% if session.subsystem_name %}
+                                    <br><small class="text-muted">{{ session.subsystem_name }}</small>
+                                {% endif %}
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ session.started_at.strftime('%H:%M:%S') }}</td>
+                        <td>
+                            {% if session.ended_at %}
+                                {{ session.ended_at.strftime('%H:%M:%S') }}
+                            {% else %}
+                                <span class="text-success">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if session.duration_seconds %}
+                                {% set minutes = session.duration_seconds // 60 %}
+                                {% set seconds = session.duration_seconds % 60 %}
+                                {{ minutes }}m {{ seconds }}s
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <a href="{{ url_for('sessions.view', session_id=session.session_id) }}" 
+                               class="btn btn-sm btn-outline-primary" 
+                               title="View Session Details">
+                                <i class="bi bi-eye"></i> Details
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,10 +1,11 @@
 """
 Servers Blueprint - Server management
 """
-from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort
+from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort, jsonify
 from flask_login import login_required
+import requests
 
-from src.core.database import Server, IPAllocation, ServerGroupMember
+from src.core.database import Server, IPAllocation, ServerGroupMember, User
 from src.core.ip_pool import IPPoolManager
 
 servers_bp = Blueprint('servers', __name__)
@@ -15,7 +16,8 @@ def index():
     """List all servers"""
     db = g.db
     servers = db.query(Server).order_by(Server.name).all()
-    return render_template('servers/index.html', servers=servers)
+    users = db.query(User).filter(User.is_active == True).order_by(User.full_name).all()
+    return render_template('servers/index.html', servers=servers, users=users)
 
 @servers_bp.route('/view/<int:server_id>')
 @login_required
@@ -139,3 +141,93 @@ def delete(server_id):
         flash(f'Error deleting server: {str(e)}', 'danger')
     
     return redirect(url_for('servers.index'))
+
+@servers_bp.route('/<int:server_id>/maintenance', methods=['POST'])
+@login_required
+def enter_maintenance(server_id):
+    """Schedule server maintenance via Tower API"""
+    db = g.db
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        return jsonify({'success': False, 'error': 'Server not found'}), 404
+    
+    try:
+        data = request.json
+        scheduled_at = data.get('scheduled_at')
+        grace_minutes = data.get('grace_minutes', 15)
+        reason = data.get('reason', 'Scheduled maintenance')
+        personnel_ids = data.get('personnel_ids', [])
+        
+        if not scheduled_at:
+            return jsonify({'success': False, 'error': 'scheduled_at is required'}), 400
+        
+        # Find the gate this server belongs to (Tower API uses gate token)
+        from src.core.database import Gate
+        gate = db.query(Gate).filter(Gate.is_active == True).first()
+        if not gate or not gate.api_token:
+            return jsonify({'success': False, 'error': 'No active gate with API token found'}), 500
+        
+        # Proxy to Tower API
+        response = requests.post(
+            f'http://localhost:5000/api/v1/backends/{server_id}/maintenance',
+            headers={'Authorization': f'Bearer {gate.api_token}'},
+            json={
+                'scheduled_at': scheduled_at,
+                'grace_minutes': grace_minutes,
+                'reason': reason,
+                'personnel_ids': personnel_ids
+            }
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return jsonify({
+                'success': True,
+                'message': 'Maintenance scheduled successfully',
+                'scheduled_at': result.get('scheduled_at'),
+                'grace_starts_at': result.get('grace_starts_at'),
+                'affected_sessions': result.get('affected_sessions', 0),
+                'maintenance_personnel': result.get('maintenance_personnel', [])
+            })
+        else:
+            error = response.json().get('error', 'Unknown error')
+            return jsonify({'success': False, 'error': error}), response.status_code
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@servers_bp.route('/<int:server_id>/maintenance', methods=['DELETE'])
+@login_required
+def exit_maintenance(server_id):
+    """Exit server maintenance via Tower API"""
+    db = g.db
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        return jsonify({'success': False, 'error': 'Server not found'}), 404
+    
+    try:
+        # Find the gate for API token
+        from src.core.database import Gate
+        gate = db.query(Gate).filter(Gate.is_active == True).first()
+        if not gate or not gate.api_token:
+            return jsonify({'success': False, 'error': 'No active gate with API token found'}), 500
+        
+        # Proxy to Tower API
+        response = requests.delete(
+            f'http://localhost:5000/api/v1/backends/{server_id}/maintenance',
+            headers={'Authorization': f'Bearer {gate.api_token}'}
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return jsonify({
+                'success': True,
+                'message': 'Maintenance mode ended',
+                'affected_sessions': result.get('affected_sessions', 0)
+            })
+        else:
+            error = response.json().get('error', 'Unknown error')
+            return jsonify({'success': False, 'error': error}), response.status_code
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500

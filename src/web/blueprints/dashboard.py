@@ -13,7 +13,7 @@ from sqlalchemy import func, and_
 import psutil
 import subprocess
 
-from src.core.database import SessionLocal, User, Server, AccessPolicy, AuditLog, UserSourceIP, ServerGroup, IPAllocation, Session
+from src.core.database import SessionLocal, User, Server, AccessPolicy, AuditLog, UserSourceIP, ServerGroup, IPAllocation, Session, Stay
 
 # Import helper function from sessions blueprint
 import os
@@ -57,12 +57,22 @@ def index():
             'allocation': allocation
         })
     
+    # Active Stays with timeline data (active + recently ended for timeline)
+    from datetime import timedelta
+    two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+    active_stays = db.query(Stay).filter(
+        (Stay.is_active == True) | 
+        ((Stay.is_active == False) & (Stay.ended_at >= two_hours_ago))
+    ).order_by(Stay.started_at.desc()).all()
+    
     return render_template('dashboard/index.html',
                          services=services_status,
                          stats=stats,
                          active_sessions=active_sessions,
                          recent_sessions=recent_sessions,
-                         server_allocations=server_allocations)
+                         server_allocations=server_allocations,
+                         active_stays=active_stays,
+                         now=datetime.utcnow())
 
 @dashboard_bp.route('/api/stats')
 @login_required
@@ -103,6 +113,65 @@ def api_active_sessions():
         })
     
     return jsonify({'sessions': sessions})
+
+@dashboard_bp.route('/api/stays')
+@login_required
+def api_stays():
+    """API endpoint for recent stays (active + recently ended)"""
+    db = g.db
+    from datetime import datetime, timedelta
+    
+    # Get active stays and recently ended stays (last 2 hours)
+    two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+    stays_query = db.query(Stay).filter(
+        (Stay.is_active == True) | 
+        ((Stay.is_active == False) & (Stay.ended_at >= two_hours_ago))
+    ).order_by(Stay.started_at.desc()).limit(10).all()
+    
+    stays_list = []
+    now = datetime.utcnow()
+    
+    for stay in stays_query:
+        stay_duration = (now - stay.started_at).total_seconds() if stay.is_active else stay.duration_seconds or 0
+        
+        sessions_data = []
+        for session in stay.sessions:
+            session_start_offset = (session.started_at - stay.started_at).total_seconds()
+            if session.ended_at:
+                session_duration = (session.ended_at - session.started_at).total_seconds()
+            else:
+                session_duration = (now - session.started_at).total_seconds()
+            
+            sessions_data.append({
+                'id': session.id,
+                'session_id': session.session_id,
+                'protocol': session.protocol,
+                'ssh_username': session.ssh_username,
+                'server_id': session.server.id if session.server else None,
+                'server_name': session.server.name if session.server else None,
+                'backend_ip': session.backend_ip,
+                'source_ip': session.source_ip,
+                'subsystem_name': session.subsystem_name,
+                'port_forwards_count': session.port_forwards_count if hasattr(session, 'port_forwards_count') else 0,
+                'started_at': session.started_at.isoformat(),
+                'ended_at': session.ended_at.isoformat() if session.ended_at else None,
+                'is_active': session.is_active,
+                'start_offset': session_start_offset,
+                'duration': session_duration
+            })
+        
+        stays_list.append({
+            'id': stay.id,
+            'user_id': stay.user.id if stay.user else None,
+            'user_name': stay.user.full_name or stay.user.username if stay.user else 'Unknown',
+            'started_at': stay.started_at.isoformat(),
+            'ended_at': stay.ended_at.isoformat() if stay.ended_at else None,
+            'is_active': stay.is_active,
+            'duration': stay_duration,
+            'sessions': sessions_data
+        })
+    
+    return jsonify({'stays': stays_list, 'now': now.isoformat()})
 
 def get_services_status():
     """Get status of SSH and RDP proxy services"""

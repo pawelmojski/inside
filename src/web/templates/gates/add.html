@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Add Gate - Inside{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2><i class="bi bi-plus-circle"></i> Add New Gate</h2>
+    
+    <div class="card mt-4">
+        <div class="card-body">
+            <form method="POST">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h5 class="mb-3">Basic Information</h5>
+                        
+                        <div class="mb-3">
+                            <label for="name" class="form-label">Gate Name *</label>
+                            <input type="text" class="form-control" id="name" name="name" required
+                                   placeholder="e.g., gate-dmz, gate-cloud-01">
+                            <small class="form-text text-muted">Unique identifier for this gate</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="hostname" class="form-label">Hostname / IP *</label>
+                            <input type="text" class="form-control" id="hostname" name="hostname" required
+                                   placeholder="e.g., gate-dmz.example.com or 10.0.160.10">
+                            <small class="form-text text-muted">FQDN or IP address of the gate server</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="location" class="form-label">Location</label>
+                            <input type="text" class="form-control" id="location" name="location"
+                                   placeholder="e.g., Datacenter 1, AWS us-east-1">
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="description" class="form-label">Description</label>
+                            <textarea class="form-control" id="description" name="description" rows="3"></textarea>
+                        </div>
+                        
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" class="form-check-input" id="is_active" name="is_active" checked>
+                            <label class="form-check-label" for="is_active">
+                                Active (can accept connections)
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <h5 class="mb-3">IP Pool Configuration</h5>
+                        
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle"></i>
+                            <strong>Note:</strong> IP pools can overlap between gates. The same IP range can be used on multiple gates.
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="ip_pool_network" class="form-label">Network (CIDR) *</label>
+                            <input type="text" class="form-control" id="ip_pool_network" name="ip_pool_network" 
+                                   value="{{ defaults.ip_pool_network }}" required
+                                   placeholder="e.g., 10.0.160.128/25">
+                            <small class="form-text text-muted">Network in CIDR notation</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="ip_pool_start" class="form-label">Pool Start IP *</label>
+                            <input type="text" class="form-control" id="ip_pool_start" name="ip_pool_start" 
+                                   value="{{ defaults.ip_pool_start }}" required
+                                   placeholder="e.g., 10.0.160.129">
+                            <small class="form-text text-muted">First usable IP address in the pool</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="ip_pool_end" class="form-label">Pool End IP *</label>
+                            <input type="text" class="form-control" id="ip_pool_end" name="ip_pool_end" 
+                                   value="{{ defaults.ip_pool_end }}" required
+                                   placeholder="e.g., 10.0.160.254">
+                            <small class="form-text text-muted">Last usable IP address in the pool</small>
+                        </div>
+                        
+                        <div class="alert alert-warning">
+                            <i class="bi bi-exclamation-triangle"></i>
+                            <strong>API Token:</strong> A secure token will be automatically generated. 
+                            Save it immediately - it won't be shown again!
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+                
+                <div class="d-flex justify-content-between">
+                    <a href="{{ url_for('gates.list') }}" class="btn btn-secondary">
+                        <i class="bi bi-x-circle"></i> Cancel
+                    </a>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-circle"></i> Add Gate
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

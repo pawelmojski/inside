@@ -67,6 +67,7 @@ def edit(user_id):
         try:
             user.full_name = request.form.get('full_name')
             user.email = request.form.get('email')
+            user.is_active = 'is_active' in request.form  # Checkbox
             db.commit()
             flash(f'User {user.username} updated successfully!', 'success')
             return redirect(url_for('users.view', user_id=user.id))

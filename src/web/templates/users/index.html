@@ -31,7 +31,10 @@
                     <tr>
                         <td>{{ user.id }}</td>
                         <td>
-                            <strong>{{ user.username }}</strong>
+                            <strong>{{ user.full_name or user.username }}</strong>
+                            {% if user.full_name %}
+                                <br><small class="text-muted">{{ user.username }}</small>
+                            {% endif %}
                         </td>
                         <td>{{ user.email or '-' }}</td>
                         <td>
