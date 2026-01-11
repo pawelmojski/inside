@@ -1,0 +1,37 @@
+[Unit]
+Description=Inside SSH Proxy (TPROXY Gateway)
+After=network.target
+Documentation=https://github.com/company/inside
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/opt/inside-ssh-proxy
+
+# Environment
+Environment="CONFIG_FILE=/opt/inside-ssh-proxy/config/inside.conf"
+
+# Start command
+ExecStart=/opt/inside-ssh-proxy/bin/inside-ssh-proxy
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/inside /var/lib/inside-gate
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=inside-ssh-proxy
+
+[Install]
+WantedBy=multi-user.target

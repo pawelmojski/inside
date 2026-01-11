@@ -251,3 +251,62 @@ def list_gates():
         'requesting_gate': gate.name,
         'timestamp': datetime.utcnow().isoformat()
     }), 200
+
+
+@gates_bp.route('/cleanup', methods=['POST'])
+@require_gate_auth
+def cleanup_gate_sessions():
+    """Close all active sessions and stays for calling gate (service restart).
+    
+    Called by gate on startup to cleanup stale sessions from previous run.
+    
+    Response:
+        200 OK: {
+            "closed_sessions": 3,
+            "closed_stays": 2,
+            "message": "Cleanup complete"
+        }
+    """
+    gate = get_current_gate()
+    db = get_db_session()
+    
+    from src.core.database import Session, Stay
+    
+    now = datetime.utcnow()
+    
+    # Close all active sessions for this gate
+    active_sessions = db.query(Session).filter(
+        Session.gate_id == gate.id,
+        Session.is_active == True
+    ).all()
+    
+    for session in active_sessions:
+        session.is_active = False
+        session.ended_at = now
+        session.termination_reason = 'gate_restart'
+        if session.started_at:
+            session.duration_seconds = int((now - session.started_at).total_seconds())
+    
+    # Close all active stays for this gate  
+    active_stays = db.query(Stay).filter(
+        Stay.gate_id == gate.id,
+        Stay.is_active == True
+    ).all()
+    
+    for stay in active_stays:
+        stay.is_active = False
+        stay.ended_at = now
+        stay.termination_reason = 'gate_restart'
+        if stay.started_at:
+            stay.duration_seconds = int((now - stay.started_at).total_seconds())
+    
+    db.commit()
+    
+    return jsonify({
+        'closed_sessions': len(active_sessions),
+        'closed_stays': len(active_stays),
+        'gate_name': gate.name,
+        'message': 'Cleanup complete',
+        'timestamp': now.isoformat()
+    }), 200
+

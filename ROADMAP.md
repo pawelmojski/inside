@@ -2,9 +2,45 @@
 
 # Inside - Roadmap & TODO
 
-## Current Status: v1.9 (JSONL Streaming) - January 2026 🔄 IN PROGRESS
+## Current Status: v1.10 (TPROXY + Standalone) - January 2026 ✅ COMPLETE
 
-**Recent v1.9 Completions:**
+**v1.10 Completions:**
+- ✅ **TPROXY Transparent Proxy**: Linux kernel TPROXY v4 for SSH traffic interception
+  - Dual-mode operation: NAT (port 22) + TPROXY (port 8022)
+  - Original destination extraction via `getsockname()` (SO_ORIGINAL_DST)
+  - iptables mangle PREROUTING with TPROXY target
+  - Routing table 100 with fwmark 1
+  - No iptables REDIRECT required - true transparent proxy
+- ✅ **Standalone Gate Package**: 73KB deployment package for remote gates
+  - Build system: `scripts/build_standalone_package.sh`
+  - Dynamic venv creation on target (no GLIBC conflicts)
+  - Unified configuration: `/opt/inside-ssh-proxy/config/inside.conf`
+  - Environment variables: INSIDE_SSH_PROXY_CONFIG, INSIDE_GATE_CONFIG
+  - Systemd service: `inside-ssh-proxy.service`
+  - Zero database dependencies in gate code
+- ✅ **Pure API Architecture**: Gates use ONLY Tower API
+  - Complete removal of database access from gate code
+  - All operations via TowerClient: sessions, stays, recordings, cleanup
+  - New endpoint: POST /api/v1/gates/cleanup (stale session cleanup)
+  - Clean separation: Gate = SSH proxy + API client, Tower = API + database
+  - Works for both standalone gates and all-in-one deployments
+- ✅ **Live Recording View**: Real-time session monitoring with auto-refresh
+  - Format detection: .rec files with text header + JSONL
+  - Live parsing bypasses cache (file written in real-time)
+  - Auto-reload page on session end to show complete recording
+  - ANSI-to-HTML with terminal colors and escape sequences
+  - Yellow highlight animation for new events
+  - Client/Server filtering and search
+- ✅ **Production Deployment**: Gate "tailscale-etop" (10.210.0.76)
+  - Tailscale exit gateway with TPROXY interception
+  - IP pool: 10.210.200.128/25
+  - Token: aabbccddetop
+  - Recording streaming to Tower API working
+  - Stay creation and lifecycle management validated
+
+## Previous Status: v1.9 (JSONL Streaming) - January 2026 ✅
+
+**v1.9 Completions:**
 - ✅ Tower REST API: 15 endpoints implemented and tested
 - ✅ Recording API: start/chunk/finalize endpoints
 - ✅ ssh_proxy refactored: All AccessControlV2 → TowerClient API calls
@@ -20,7 +56,7 @@
 - ✅ Web UI: Gates management CRUD with IP pool configuration
 - ✅ Stay Logic: Person-centric tracking (first session opens Stay, last closes)
 - ✅ Tower API: Automatic Stay management in /sessions/create and /sessions/<id> PATCH
-- ✅ **Dashboard Live Timeline**: Unified daily visualization 🎯 NEW v1.9
+- ✅ **Dashboard Live Timeline**: Unified daily visualization
   - Timeline from first stay today → now (no wasted space)
   - All Stays as horizontal rows with person badges
   - Sessions nested inside Stay rows (positioned on daily timeline)
@@ -32,7 +68,6 @@
   - Green dot (●) indicator for active sessions
   - Auto-refresh every 5 seconds with smooth updates
   - People Inside counter tracking active stays
-- 🔄 End-to-end testing: SSH connection with JSONL recording (next)
 
 ````
 
@@ -199,10 +234,15 @@ find_backend_by_proxy_ip(db, '10.0.160.129', gate_id=2) → Server X
 - [ ] Multi-gate deployment testing
 
 **TPROXY Support:**
-- Transparent proxy mode for Linux routers
-- SO_ORIGINAL_DST extraction (preserve dst_ip:dst_port)
-- Server lookup by IP (no hostname needed)
-- Dual mode support (NAT + TPROXY simultaneously)
+- ✅ Transparent proxy mode for Linux routers
+- ✅ SO_ORIGINAL_DST extraction (preserve dst_ip:dst_port)
+- ✅ Server lookup by IP (no hostname needed) - dual fallback in find_backend_by_proxy_ip
+- ✅ Dual mode support (NAT + TPROXY simultaneously)
+- ✅ Configuration file: /opt/jumphost/config/ssh_proxy.conf
+- ✅ NAT listener: 0.0.0.0:22 (traditional jumphost)
+- ✅ TPROXY listener: 0.0.0.0:8022 (transparent mode)
+- ⏳ iptables TPROXY rules documentation
+- ⏳ Testing with real TPROXY traffic
 - Perfect for Tailscale exit nodes & VPN concentrators
 - Zero-config for end users (ssh target-server just works)
 
@@ -240,7 +280,13 @@ Core principles:
 - ✅ **Entry points** - Multiple ways to get inside: SSH, RDP, HTTP (SSH/RDP DONE)
 - ✅ **Full audit** - Every entry, every stay, every session recorded (DONE)
 - ⏳ **Distributed** - Tower (control) + Gates (data planes) (v1.9 - IN PROGRESS)
-- ⏳ **TPROXY** - Transparent proxy mode (v1.9 - IN PROGRESS)
+- ✅ **TPROXY** - Transparent proxy mode (v1.9 - IMPLEMENTED) 🎯 NEW
+  - Dual-mode support: NAT (port 22) + TPROXY (port 8022)
+  - SO_ORIGINAL_DST extraction from socket
+  - find_backend_by_proxy_ip(): Automatic fallback NAT pool → real IP
+  - IP_TRANSPARENT socket option enabled
+  - Configuration: /opt/jumphost/config/ssh_proxy.conf
+  - Ready for iptables TPROXY rules and Tailscale integration
 - ⏳ **CLI tools** - curl-based management (v2.0 - PLANNED)
 - ⏳ **HTTP/HTTPS proxy** - Legacy devices web GUIs (v2.1 - PLANNED)
 

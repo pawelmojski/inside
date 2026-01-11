@@ -859,12 +859,26 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.error) {
                         console.error('Live view error:', data.error);
                         if (!data.is_active) {
-                            // Session closed, stop live view
+                            // Session closed, stop live view and reload full recording
                             if (isLiveActive) {
                                 toggleLiveBtn.click();
                             }
-                            alert('Session has ended');
+                            console.log('Session ended - reloading page to show full recording');
+                            // Reload page after 2 seconds to show complete recording
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 2000);
                         }
+                        return;
+                    }
+                    
+                    // Check if session became inactive during this poll
+                    if (!data.is_active && isLiveActive) {
+                        console.log('Session ended - reloading page to show full recording');
+                        toggleLiveBtn.click();
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 2000);
                         return;
                     }
                     

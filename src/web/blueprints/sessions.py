@@ -10,6 +10,9 @@ import os
 from pathlib import Path
 from functools import lru_cache
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 sessions_bp = Blueprint('sessions', __name__, url_prefix='/sessions')
 
@@ -209,13 +212,19 @@ def parse_ssh_recording_internal(file_path):
     # Detect file format
     try:
         with open(file_path, 'rb') as f:
-            header = f.read(100)
+            header = f.read(500)
             f.seek(0)
             
             # Check format: JSONL (one JSON per line), JSON (single object), or raw
+            # .rec format has 4-line text header followed by JSONL
             first_line = header.split(b'\n')[0]
             
-            if first_line.startswith(b'{"type":') or b'"timestamp"' in first_line:
+            # Check if it's JSONL format (immediate JSON or after header like .rec files)
+            is_jsonl = (first_line.startswith(b'{"type":') or 
+                       b'"timestamp"' in first_line or
+                       b'Session Recording' in header)  # .rec format detection
+            
+            if is_jsonl:
                 # JSONL format (JSON Lines - one event per line)
                 events = []
                 for line in f:
@@ -814,8 +823,9 @@ def live_events(session_id):
         if not full_path or not os.path.exists(full_path):
             return jsonify({'error': 'Recording file not found'}), 404
         
-        # Parse recording and filter events after timestamp
-        recording_data = parse_ssh_recording(full_path)
+        # For active sessions, ALWAYS parse fresh (bypass cache)
+        # File is being written in real-time, mtime doesn't change until close
+        recording_data = parse_ssh_recording_internal(full_path)
         if not recording_data or 'error' in recording_data:
             return jsonify({'error': 'Failed to parse recording'}), 500
         

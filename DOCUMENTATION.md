@@ -13,7 +13,7 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 - **Roadmap**: [ROADMAP.md](ROADMAP.md) - Development history and future plans
 - **Dependencies**: See [requirements.txt](requirements.txt) and [requirements-pyrdp-converter.txt](requirements-pyrdp-converter.txt)
 
-## Architecture (Current State - v1.9 IN PROGRESS)
+## Architecture (Current State - v1.10 TPROXY + Standalone)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -21,19 +21,22 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 │                      (10.0.160.5)                                │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Web Management Interface (5000) - Systemd Service 🎯   │   │
+│  │  Web Management Interface (5000) - Systemd Service       │   │
 │  │                                                            │   │
 │  │  Flask Web GUI (Bootstrap 5)                              │   │
-│  │  - Dashboard: Live timeline, stats, auto-refresh 🎯 v1.9│   │
+│  │  - Dashboard: Live timeline, stats, auto-refresh         │   │
 │  │    • Unified daily timeline (first stay → now)            │   │
 │  │    • All Stays as horizontal rows with sessions nested    │   │
 │  │    • Interactive popovers: clickable links to Person,     │   │
 │  │      Server, Session details with full metadata table     │   │
 │  │    • Auto-refresh every 5 seconds                         │   │
 │  │    • People Inside counter, real-time session tracking    │   │
-│  │  - Session History: List, filter, Gate/Stay columns 🎯  │   │
+│  │  - Session History: List, filter, Gate/Stay columns      │   │
 │  │  - Live Session Viewer: Real-time SSH log streaming 🎯  │   │
-│  │  - RDP Session Viewer: MP4 conversion & video player 🎯 │   │
+│  │    • ANSI colors, yellow flash for new events            │   │
+│  │    • Auto-reload on session end                           │   │
+│  │    • .rec format support (text header + JSONL)           │   │
+│  │  - RDP Session Viewer: MP4 conversion & video player     │   │
 │  │  - User Management: CRUD + multiple source IPs            │   │
 │  │  - Server Management: CRUD + IP allocation                │   │
 │  │  - Group Management: Create groups, assign servers        │   │
@@ -46,7 +49,7 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Tower REST API (15 endpoints) 🎯 NEW v1.9              │   │
+│  │  Tower REST API (16 endpoints) 🎯 v1.9-1.10             │   │
 │  │                                                            │   │
 │  │  - POST /api/v1/auth/check - AccessControlV2             │   │
 │  │  - POST /api/v1/sessions/create - Session + Stay mgmt  │   │

@@ -1,0 +1,25 @@
+#!/bin/bash
+# Inside SSH Proxy Launcher
+
+# Get script directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Add source to Python path
+export PYTHONPATH="${BASE_DIR}/src:${PYTHONPATH}"
+
+# Default config location
+CONFIG_FILE="${CONFIG_FILE:-${BASE_DIR}/config/inside.conf}"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: Configuration file not found: $CONFIG_FILE"
+    echo "Please copy config/inside.conf.example to config/inside.conf and configure it."
+    exit 1
+fi
+
+# Set config environment variables for both ssh_proxy and gate config
+export INSIDE_SSH_PROXY_CONFIG="$CONFIG_FILE"
+export INSIDE_GATE_CONFIG="$CONFIG_FILE"
+
+# Run SSH proxy with venv Python (NOT system python3!)
+exec "${BASE_DIR}/lib/venv/bin/python3" "${BASE_DIR}/src/proxy/ssh_proxy.py" "$@"
