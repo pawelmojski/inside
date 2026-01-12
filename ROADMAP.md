@@ -170,6 +170,40 @@
 
 ## 🚀 Planned Features
 
+### v1.11 - Simplify Grant Expiry Logic 🎯 ARCHITECTURE REFACTOR
+
+**Problem**: Current implementation is overly complex
+- Multiple time tracking variables: `grant_end_time`, `session_grant_endtimes`, `session_forced_endtimes`, `effective_end_time`
+- Complex state management: `grant_was_extended`, `grant_extended_during_warning` flags
+- Convoluted logic: Detect extension vs shortening, restart countdown, skip warnings
+- Hard to maintain and debug
+
+**Proposed Simplification**:
+1. **Single source of truth**: API returns one `end_time` (no effective/forced/grant distinction)
+2. **Periodic polling**: Monitor checks API every 10-30 seconds for current `end_time`
+3. **State-based warnings**: 
+   - Track which warnings were sent: `sent_5min_warning`, `sent_1min_warning`
+   - Each iteration: calculate `remaining = end_time - now()`
+   - If `remaining <= 5min` and not `sent_5min_warning` → send warning, set flag
+   - If `remaining <= 1min` and not `sent_1min_warning` → send warning, set flag
+   - If `remaining <= 0` → disconnect
+4. **No restart logic**: Just check current state and react accordingly
+5. **Automatic handling**: Works for extension, shortening, and revoke without special cases
+
+**Benefits**:
+- Much simpler code (~100 lines vs current ~400 lines)
+- Easier to understand and maintain
+- No complex state machines or countdown restarts
+- Natural handling of all time change scenarios
+- Less prone to edge case bugs
+
+**Implementation Notes**:
+- Remove: `session_grant_endtimes` dict complexity
+- Remove: Extension/shortening detection logic
+- Remove: Countdown restart mechanism with while loops
+- Keep: Basic warning flags per session
+- Simplify: Monitor thread to just periodic check + react pattern
+
 ### v1.9 - Distributed Architecture & JSONL Streaming (Q1 2026) 🔄 IN PROGRESS
 
 **Status**: 90% complete - JSONL recording format migration in progress
