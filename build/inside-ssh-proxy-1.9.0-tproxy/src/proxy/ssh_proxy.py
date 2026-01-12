@@ -1781,7 +1781,7 @@ class SSHProxyServer:
                         for _ in range(int(sleep_time)):
                             time.sleep(1)
                             
-                            # Check if grant was extended (renewed)
+                            # Check if grant was extended or shortened
                             if session_id in self.session_grant_endtimes:
                                 new_end_time = self.session_grant_endtimes[session_id]
                                 if new_end_time > grant_end_time:
@@ -1812,6 +1812,41 @@ class SSHProxyServer:
                                         logger.info(f"Session {session_id}: Sent grant extension notification")
                                     except Exception as e:
                                         logger.error(f"Session {session_id}: Failed to send extension message: {e}")
+                                    
+                                    # Update grant_end_time and recalculate remaining time
+                                    grant_end_time = new_end_time
+                                    remaining = new_remaining
+                                    grant_extended_during_warning = True
+                                    # Break inner loop to restart warning countdown from new end time
+                                    break
+                                elif new_end_time < grant_end_time:
+                                    # Grant shortened!
+                                    logger.info(f"Session {session_id}: Grant shortened from {grant_end_time} to {new_end_time}")
+                                    
+                                    # Calculate new remaining time
+                                    now = datetime.utcnow()
+                                    new_remaining = (new_end_time - now).total_seconds()
+                                    reduction_minutes = int((grant_end_time - new_end_time).total_seconds() / 60)
+                                    
+                                    # Convert to Europe/Warsaw for display
+                                    warsaw_tz = pytz.timezone('Europe/Warsaw')
+                                    new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
+                                    new_end_local = new_end_local.astimezone(warsaw_tz)
+                                    
+                                    # Send notification message
+                                    shortening_msg = (
+                                        f"\r\n\r\n"
+                                        f"{'='*70}\r\n"
+                                        f"  *** NOTICE: Your access grant has been shortened! ***\r\n"
+                                        f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
+                                        f"  Reduced by: {reduction_minutes} minute(s)\r\n"
+                                        f"{'='*70}\r\n\r\n"
+                                    )
+                                    try:
+                                        channel.send(shortening_msg.encode())
+                                        logger.info(f"Session {session_id}: Sent grant shortening notification")
+                                    except Exception as e:
+                                        logger.error(f"Session {session_id}: Failed to send shortening message: {e}")
                                     
                                     # Update grant_end_time and recalculate remaining time
                                     grant_end_time = new_end_time
@@ -1885,7 +1920,7 @@ class SSHProxyServer:
                     for _ in range(int(remaining)):
                         time.sleep(1)
                         
-                        # Check if grant was extended (renewed)
+                        # Check if grant was extended or shortened
                         if session_id in self.session_grant_endtimes:
                             new_end_time = self.session_grant_endtimes[session_id]
                             if new_end_time > grant_end_time:
@@ -1916,6 +1951,41 @@ class SSHProxyServer:
                                     logger.info(f"Session {session_id}: Sent grant extension notification during final countdown")
                                 except Exception as e:
                                     logger.error(f"Session {session_id}: Failed to send extension message: {e}")
+                                
+                                # Update grant_end_time and set flag to restart countdown
+                                grant_end_time = new_end_time
+                                remaining = new_remaining
+                                grant_was_extended = True
+                                logger.info(f"Session {session_id}: Will restart countdown with new end time")
+                                break
+                            elif new_end_time < grant_end_time:
+                                # Grant shortened during final countdown!
+                                logger.info(f"Session {session_id}: Grant shortened during final countdown from {grant_end_time} to {new_end_time}")
+                                
+                                # Calculate new remaining time
+                                now = datetime.utcnow()
+                                new_remaining = (new_end_time - now).total_seconds()
+                                reduction_minutes = int((grant_end_time - new_end_time).total_seconds() / 60)
+                                
+                                # Convert to Europe/Warsaw for display
+                                warsaw_tz = pytz.timezone('Europe/Warsaw')
+                                new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
+                                new_end_local = new_end_local.astimezone(warsaw_tz)
+                                
+                                # Send notification message
+                                shortening_msg = (
+                                    f"\r\n\r\n"
+                                    f"{'='*70}\r\n"
+                                    f"  *** NOTICE: Your access grant has been shortened! ***\r\n"
+                                    f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
+                                    f"  Reduced by: {reduction_minutes} minute(s)\r\n"
+                                    f"{'='*70}\r\n\r\n"
+                                )
+                                try:
+                                    channel.send(shortening_msg.encode())
+                                    logger.info(f"Session {session_id}: Sent grant shortening notification during final countdown")
+                                except Exception as e:
+                                    logger.error(f"Session {session_id}: Failed to send shortening message: {e}")
                                 
                                 # Update grant_end_time and set flag to restart countdown
                                 grant_end_time = new_end_time
