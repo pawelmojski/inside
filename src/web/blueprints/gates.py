@@ -236,6 +236,15 @@ def edit(gate_id):
             gate.ip_pool_start = ip_pool_start
             gate.ip_pool_end = ip_pool_end
             gate.is_active = request.form.get('is_active') == 'on'
+            
+            # Update custom messages (optional fields)
+            gate.msg_no_person = request.form.get('msg_no_person') or None
+            gate.msg_no_backend = request.form.get('msg_no_backend') or None
+            gate.msg_no_grant = request.form.get('msg_no_grant') or None
+            gate.msg_maintenance = request.form.get('msg_maintenance') or None
+            gate.msg_time_window = request.form.get('msg_time_window') or None
+            gate.msg_welcome_banner = request.form.get('msg_welcome_banner') or None
+            
             gate.updated_at = datetime.utcnow()
             
             db.commit()

@@ -76,6 +76,58 @@
                 
                 <hr>
                 
+                <div class="row">
+                    <div class="col-12">
+                        <h5 class="mb-3">Custom Denial Messages</h5>
+                        <p class="text-muted small">
+                            Customize messages shown to users when SSH access is denied. 
+                            Available placeholders: <code>{person}</code>, <code>{backend}</code>, <code>{gate_name}</code>, <code>{reason}</code>
+                        </p>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="msg_no_person" class="form-label">No Person Message</label>
+                            <small class="text-muted d-block">Shown when user's IP is not recognized</small>
+                            <textarea class="form-control font-monospace small" id="msg_no_person" name="msg_no_person" rows="4">{{ gate.msg_no_person or '' }}</textarea>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="msg_no_backend" class="form-label">No Backend Message</label>
+                            <small class="text-muted d-block">Shown when destination IP is not registered</small>
+                            <textarea class="form-control font-monospace small" id="msg_no_backend" name="msg_no_backend" rows="4">{{ gate.msg_no_backend or '' }}</textarea>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="msg_no_grant" class="form-label">No Grant Message</label>
+                            <small class="text-muted d-block">Shown when user has no access policy</small>
+                            <textarea class="form-control font-monospace small" id="msg_no_grant" name="msg_no_grant" rows="4">{{ gate.msg_no_grant or '' }}</textarea>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="msg_maintenance" class="form-label">Maintenance Message</label>
+                            <small class="text-muted d-block">Shown when gate or backend is in maintenance mode</small>
+                            <textarea class="form-control font-monospace small" id="msg_maintenance" name="msg_maintenance" rows="4">{{ gate.msg_maintenance or '' }}</textarea>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="msg_time_window" class="form-label">Time Window Message</label>
+                            <small class="text-muted d-block">Shown when access is outside allowed schedule</small>
+                            <textarea class="form-control font-monospace small" id="msg_time_window" name="msg_time_window" rows="4">{{ gate.msg_time_window or '' }}</textarea>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="msg_welcome_banner" class="form-label">Welcome Banner <span class="badge bg-secondary">Optional</span></label>
+                            <small class="text-muted d-block">Shown before authentication (if set)</small>
+                            <textarea class="form-control font-monospace small" id="msg_welcome_banner" name="msg_welcome_banner" rows="4">{{ gate.msg_welcome_banner or '' }}</textarea>
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+                
                 <div class="d-flex justify-content-between">
                     <a href="{{ url_for('gates.view', gate_id=gate.id) }}" class="btn btn-secondary">
                         <i class="bi bi-x-circle"></i> Cancel
