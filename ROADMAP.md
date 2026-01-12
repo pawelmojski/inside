@@ -1,6 +1,43 @@
 # Inside - Roadmap & TODO
 
-## Current Status: v1.10.2 (Maintenance + Port Forwarding) - January 2026 ✅ COMPLETE
+## Current Status: v1.10.8 (Real-Time Grant Time Management) - January 2026 ✅ COMPLETE
+
+**v1.10.8 Completions:**
+- ✅ **Grant Extension Detection**: Real-time monitoring of policy end_time changes
+  - Heartbeat (30s) detects grant extensions via `/api/v1/grants/check` effective_end_time
+  - `session_grant_endtimes` dict tracks current grant end_time per session
+  - Monitor thread detects extensions and restarts countdown from new end_time
+  - User notification: "GOOD NEWS: Your access grant has been extended!"
+  - No more disconnects at original time after admin renews grant
+- ✅ **Grant Shortening Detection**: Real-time monitoring of policy reductions
+  - Heartbeat detects when grant end_time is reduced (shortened)
+  - Monitor restarts countdown with proper 5min/1min warnings at new time
+  - User notification: "NOTICE: Your access grant has been shortened!"
+  - Immediate effect: ostrzeżenia pokazują się w odpowiednich momentach
+- ✅ **Smart Warning Logic**: Prevents duplicate/confusing messages
+  - Flag `grant_extended_during_warning` prevents warning after extension
+  - When grant changes during warning period: restart countdown, skip stale warning
+  - Clean user experience: only relevant messages shown
+- ✅ **Heartbeat Change Detection**: Unified extension AND shortening
+  - Changed: `if new_end_time > old_end_time` → `if new_end_time != old_end_time`
+  - Both increases and decreases update `session_grant_endtimes` dict
+  - Monitor receives notification regardless of direction of change
+- ✅ **Grant UI Improvements** (v1.10.6):
+  - Removed confusing policy popover
+  - Renamed "Policy" → "GRANT" in session details
+  - Added recipient info: "User: name" or "Group: name"
+  - Added validity period: "Valid until: time CET" or "Permanent"
+  - Unified revoke button (always calls `/policies/revoke/<policy_id>`)
+  - Timezone display: Warsaw CET/CEST using `|localtime` filter
+- ✅ **Grant Defaults** (v1.10.7):
+  - Default grant duration: 1 hour (not permanent)
+  - Duration field required with `value="1h"`
+  - Backend validation: rejects empty duration_text
+  - Permanent grants require explicit checkbox or "permanent" keyword
+  - Renew button: +1 hour (was +30 days)
+  - Permanent grant monitoring: always runs, detects revocation
+
+## Previous Status: v1.10.2 (Maintenance + Port Forwarding) - January 2026 ✅ COMPLETE
 
 **v1.10.2 Completions:**
 - ✅ **Maintenance Mode Auto-Disconnect**: Heartbeat forces active sessions to disconnect

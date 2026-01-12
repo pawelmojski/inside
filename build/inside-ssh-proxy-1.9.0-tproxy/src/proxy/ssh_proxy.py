@@ -2790,7 +2790,7 @@ class SSHProxyServer:
                             f"will disconnect at {disconnect_at} (reason: {reason})"
                         )
                     else:
-                        # Access still allowed - check if grant was extended
+                        # Access still allowed - check if grant time changed
                         effective_end_str = result.get('effective_end_time')
                         if effective_end_str:
                             from dateutil import parser as dateparser
@@ -2798,12 +2798,17 @@ class SSHProxyServer:
                             if new_end_time.tzinfo is not None:
                                 new_end_time = new_end_time.replace(tzinfo=None)
                             
-                            # Check if grant was extended
+                            # Check if grant time changed (extended or shortened)
                             old_end_time = self.session_grant_endtimes.get(session_id)
-                            if old_end_time and new_end_time > old_end_time:
-                                logger.info(
-                                    f"Session {session_id}: Grant extended from {old_end_time} to {new_end_time}"
-                                )
+                            if old_end_time and new_end_time != old_end_time:
+                                if new_end_time > old_end_time:
+                                    logger.info(
+                                        f"Session {session_id}: Grant extended from {old_end_time} to {new_end_time}"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Session {session_id}: Grant shortened from {old_end_time} to {new_end_time}"
+                                    )
                                 # Update stored end time - monitor will detect this
                                 self.session_grant_endtimes[session_id] = new_end_time
                             elif not old_end_time:
