@@ -245,6 +245,70 @@
 - Auto-grants should respect existing schedules and restrictions
 - Audit trail essential for compliance
 
+### v1.13 - Proactive Connection Validation (TCP Handshake Proxy) 🎯 ADVANCED
+
+**Concept**: Intercept SYN packets and validate backend availability BEFORE completing client handshake
+
+**Current Behavior**:
+1. Client → SYN → Jumphost
+2. Jumphost → SYN-ACK → Client (accepts connection immediately)
+3. Jumphost → SYN → Backend
+4. If backend down → client sees "connection refused" or timeout AFTER handshake
+
+**Proposed Behavior**:
+1. Client → SYN → Jumphost
+2. Jumphost → SYN → Backend (test backend first, hold client SYN)
+3. If Backend → SYN-ACK → Jumphost:
+   - Jumphost → SYN-ACK → Client (complete handshake)
+   - Connection established normally
+4. If Backend → ICMP Unreachable:
+   - Jumphost → ICMP Unreachable → Client (mimic backend response)
+   - Client immediately knows port is closed
+5. If Backend → Timeout:
+   - Jumphost → RST or timeout → Client
+   - Clean failure without hanging connection
+
+**Benefits**:
+- Monitoring tools get accurate port status without SSH authentication
+- Clients see immediate failure instead of post-handshake errors
+- Better user experience (no "connected but can't reach backend" confusion)
+- Health checks work at TCP level (no application layer needed)
+
+**Implementation Challenges**:
+- **Kernel-level TCP stack intervention required**
+- Cannot be done in pure Python (operates above TCP layer)
+- Possible approaches:
+  1. **netfilter/NFQUEUE** (C extension or nfqueue-bindings):
+     - Intercept packets at PREROUTING
+     - Hold SYN in userspace queue
+     - Test backend connection
+     - Inject SYN-ACK or ICMP based on result
+  2. **Raw sockets + iptables** (complex):
+     - Drop incoming SYN with iptables
+     - Capture with raw socket
+     - Manually craft and send response packets
+  3. **eBPF/XDP** (modern, high-performance):
+     - Kernel-level packet filtering
+     - C programs loaded into kernel
+     - Can modify/drop packets before TCP stack
+  4. **Kernel module** (most control, most complex):
+     - Custom netfilter hook
+     - Full control over TCP handshake
+     - Maintenance burden
+
+**Feasibility**:
+- ⚠️ **NOT feasible in pure Python** (requires kernel-level packet manipulation)
+- Possible with C extension + Python bindings
+- High complexity, requires deep TCP/IP and Linux networking knowledge
+- Maintenance risk (kernel API changes, security issues)
+
+**Recommendation**:
+- Consider as long-term goal (v2.0+)
+- Research eBPF/XDP as modern approach
+- Prototype with nfqueue-bindings first
+- May require dedicated networking engineer
+- Alternative: Keep current behavior, improve error messages
+
 ### v1.9 - Distributed Architecture & JSONL Streaming (Q1 2026) 🔄 IN PROGRESS
 
 **Status**: 90% complete - JSONL recording format migration in progress
