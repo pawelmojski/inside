@@ -310,3 +310,45 @@ def cleanup_gate_sessions():
         'timestamp': now.isoformat()
     }), 200
 
+
+@gates_bp.route('/messages', methods=['GET'])
+@require_gate_auth
+def get_messages():
+    """Get custom messages for SSH banners and error messages.
+    
+    Gate fetches these messages on startup and caches them.
+    Messages support placeholders: {person}, {backend}, {gate_name}, {reason}
+    
+    Response:
+        200 OK: {
+            "gate_id": 1,
+            "gate_name": "gate-localhost",
+            "messages": {
+                "welcome_banner": "...",     # Optional: Welcome after successful auth
+                "no_backend": "...",         # When backend not in registry
+                "no_person": "...",          # When person not recognized
+                "no_grant": "...",           # When no active grant
+                "maintenance": "...",        # When system in maintenance
+                "time_window": "..."         # When outside time window
+            },
+            "timestamp": "2026-01-12T10:00:00"
+        }
+    """
+    gate = get_current_gate()
+    
+    messages = {
+        'welcome_banner': gate.msg_welcome_banner,
+        'no_backend': gate.msg_no_backend or f"Hello, I'm Gate ({gate.name}), an entry point of Inside.\nThe IP address is not registered as a backend server in Inside registry.\nPlease contact your system administrator for assistance.",
+        'no_person': gate.msg_no_person or f"Hello, I'm Gate ({gate.name}), an entry point of Inside.\nI can't recognize you and I don't know who you are.\nPlease contact your system administrator for assistance.",
+        'no_grant': gate.msg_no_grant or f"Hello, I'm Gate ({gate.name}), an entry point of Inside.\nDear {{person}}, you don't have access to {{backend}}.\nPlease contact your system administrator to request access.",
+        'maintenance': gate.msg_maintenance or f"Hello, I'm Gate ({gate.name}), an entry point of Inside.\nThe system is currently in maintenance mode.\nPlease try again later or contact your system administrator.",
+        'time_window': gate.msg_time_window or f"Hello, I'm Gate ({gate.name}), an entry point of Inside.\nDear {{person}}, your access to {{backend}} is outside the allowed time window.\nPlease contact your system administrator for assistance."
+    }
+    
+    return jsonify({
+        'gate_id': gate.id,
+        'gate_name': gate.name,
+        'messages': messages,
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
+

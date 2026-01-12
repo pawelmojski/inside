@@ -359,7 +359,31 @@ class TowerClient:
         response = self._request('GET', '/api/v1/gates/status')
         return response
     
-    def create_session(self, session_id: str, stay_id: int, person_id: int,
+    def get_messages(self) -> Dict[str, str]:
+        """Fetch custom messages for SSH banners and errors from Tower.
+        
+        Messages support placeholders: {person}, {backend}, {gate_name}, {reason}
+        
+        Returns:
+            {
+                'welcome_banner': str or None,
+                'no_backend': str,
+                'no_person': str,
+                'no_grant': str,
+                'maintenance': str,
+                'time_window': str
+            }
+        
+        Raises:
+            TowerUnreachableError: Tower not reachable
+        """
+        response = self._request('GET', '/api/v1/gates/messages')
+        messages = response.get('messages', {})
+        
+        logger.debug(f"Fetched custom messages from Tower ({len(messages)} message types)")
+        return messages
+    
+    def create_session(self, session_id: str, person_id: int,
                       server_id: int, protocol: str, source_ip: str,
                       proxy_ip: str, backend_ip: str, backend_port: int,
                       grant_id: int, ssh_username: Optional[str] = None,
@@ -369,9 +393,10 @@ class TowerClient:
                       protocol_version: Optional[str] = None) -> Dict[str, Any]:
         """Report session creation to Tower.
         
+        Tower API will automatically create or reuse Stay based on user's active sessions.
+        
         Args:
             session_id: Unique session identifier
-            stay_id: Stay ID from /stays/start
             person_id: Person ID
             server_id: Server ID
             protocol: 'ssh' or 'rdp'
@@ -392,6 +417,7 @@ class TowerClient:
                 'db_session_id': int,
                 'person_username': str,
                 'server_name': str,
+                'stay_id': int,
                 'started_at': str,
                 'is_active': bool,
                 'message': str
@@ -399,7 +425,6 @@ class TowerClient:
         """
         payload = {
             'session_id': session_id,
-            'stay_id': stay_id,
             'person_id': person_id,
             'server_id': server_id,
             'protocol': protocol,
