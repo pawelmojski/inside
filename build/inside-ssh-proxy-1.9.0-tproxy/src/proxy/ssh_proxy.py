@@ -2199,8 +2199,16 @@ class SSHProxyServer:
             logger.info(f"Session {session_id} registered in utmp as {tty_name}")
             
             # Register connection in active connections registry for heartbeat monitoring
-            self.active_connections[session_id] = (transport, backend_transport)
-            logger.debug(f"Session {session_id} registered in active connections")
+            self.active_connections[session_id] = {
+                'transport': transport,
+                'backend_transport': backend_transport,
+                'source_ip': source_ip,
+                'proxy_ip': dest_ip,
+                'protocol': 'ssh',
+                'ssh_username': user.username,
+                'started_at': datetime.utcnow()
+            }
+            logger.info(f"Session {session_id} registered in active connections")
             
             # Check grant expiry for interactive shell sessions
             grant_end_time = None
@@ -2369,8 +2377,6 @@ class SSHProxyServer:
         finally:
             if backend_transport:
                 backend_transport.close()
-            if db:
-                db.close()
             client_socket.close()
     
     def send_heartbeat_loop(self):
@@ -2379,41 +2385,20 @@ class SSHProxyServer:
         
         while self.running:
             try:
-                # Check if database is available
-                if not DB_AVAILABLE or SessionLocal is None:
-                    # API-only mode: send simple heartbeat without database stats
-                    self.tower_client.heartbeat(active_stays=0, active_sessions=0)
-                    logger.debug("Heartbeat sent (API-only mode)")
-                else:
-                    # Full mode: count active sessions and stays via database
-                    db = SessionLocal()
-                    try:
-                        active_sessions = db.query(DBSession).filter(DBSession.is_active == True).count()
-                        
-                        # Import Stay here to avoid circular import
-                        from src.core.database import Stay
-                        active_stays = db.query(Stay).filter(Stay.is_active == True).count()
-                        
-                        # Send heartbeat to Tower
-                        self.tower_client.heartbeat(
-                            active_stays=active_stays,
-                            active_sessions=active_sessions
-                        )
-                        logger.info(f"Heartbeat sent: {active_stays} stays, {active_sessions} sessions")
-                        
-                        # Check for sessions that should be terminated
-                        # 1. Grant expired/cancelled
-                        # 2. User deactivated
-                        # 3. Policy changed
-                        self.check_and_terminate_sessions(db)
-                        
-                    except Exception as e:
-                        logger.error(f"Error sending heartbeat: {e}")
-                    finally:
-                        db.close()
+                # Gate always uses Tower API (no direct database access)
+                # Tower will track session counts from API calls
+                self.tower_client.heartbeat(active_stays=0, active_sessions=0)
+                logger.info(f"Heartbeat sent, checking {len(self.active_connections)} active sessions")
+                
+                # Check for sessions that should be terminated
+                # 1. Grant expired/cancelled
+                # 2. User deactivated
+                # 3. Policy changed
+                # 4. Maintenance mode
+                self.check_and_terminate_sessions()
                 
             except Exception as e:
-                logger.error(f"Heartbeat thread error: {e}")
+                logger.error(f"Heartbeat thread error: {e}", exc_info=True)
             
             # Sleep in small increments to allow quick shutdown
             for _ in range(self.heartbeat_interval):
@@ -2423,109 +2408,70 @@ class SSHProxyServer:
         
         logger.info("Heartbeat thread stopped")
     
-    def check_and_terminate_sessions(self, db):
+    def check_and_terminate_sessions(self):
         """Check active sessions and terminate those that should be killed
+        
+        Uses local active_connections registry to find sessions, then checks
+        via Tower API if each session should still be allowed.
         
         Reasons for termination:
         - Grant expired or cancelled (checked via Tower API)
-        - User deactivated (checked via Tower API)
+        - User deactivated (checked via Tower API)  
         - Policy changed (checked via Tower API)
-        - Maintenance mode (termination_reason already set by API)
+        - Maintenance mode (checked via Tower API)
         """
         try:
-            # Get all active sessions
-            active_sessions = db.query(DBSession).filter(DBSession.is_active == True).all()
-            
-            for session in active_sessions:
-                should_terminate = False
-                reason = None
-                disconnect_at = None
+            # Get all active sessions from local registry
+            # active_connections: {session_id: {transport, source_ip, proxy_ip, ...}}
+            for session_id, session_info in list(self.active_connections.items()):
+                source_ip = session_info.get('source_ip')
+                proxy_ip = session_info.get('proxy_ip')
+                protocol = session_info.get('protocol', 'ssh')
+                ssh_username = session_info.get('ssh_username')
                 
-                # FIRST: Check if session already marked for termination (maintenance mode)
-                if session.termination_reason:
-                    should_terminate = True
+                if not source_ip or not proxy_ip:
+                    logger.debug(f"Session {session_id}: Missing connection info, skipping check")
+                    continue
+                
+                try:
+                    # Check via Tower API if grant still valid
+                    result = self.tower_client.check_grant(
+                        source_ip=source_ip,
+                        destination_ip=proxy_ip,
+                        protocol=protocol,
+                        ssh_login=ssh_username
+                    )
                     
-                    # Try to parse denial_details as JSON (maintenance mode)
-                    try:
-                        import json
-                        details = json.loads(session.denial_details) if session.denial_details else {}
-                        reason = details.get('reason', session.termination_reason)
+                    if not result.get('allowed'):
+                        # Access denied - terminate session
+                        reason = result.get('reason', 'Access revoked')
+                        denial_reason = result.get('denial_reason', 'access_denied')
                         
-                        # Get disconnect_at from details if available
-                        disconnect_at_str = details.get('disconnect_at')
+                        # Get disconnect_at from API response or default to 5 seconds
+                        disconnect_at_str = result.get('disconnect_at')
                         if disconnect_at_str:
                             from dateutil import parser as dateparser
                             disconnect_at = dateparser.isoparse(disconnect_at_str)
                             if disconnect_at.tzinfo is not None:
                                 disconnect_at = disconnect_at.replace(tzinfo=None)
                         else:
-                            # Fallback: disconnect in 5 seconds
-                            disconnect_at = datetime.utcnow() + timedelta(seconds=5)
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        # Old format: denial_details is plain text or None
-                        reason = session.denial_details or session.termination_reason
-                        disconnect_at = datetime.utcnow() + timedelta(seconds=5)
-                    
-                    logger.warning(
-                        f"Session {session.session_id} marked for termination: {reason}"
-                    )
-                else:
-                    # SECOND: Check via Tower API if grant still valid
-                    try:
-                        result = self.tower_client.check_grant(
-                            source_ip=session.source_ip,
-                            destination_ip=session.proxy_ip,
-                            protocol=session.protocol,
-                            ssh_login=session.ssh_username
-                        )
-                        
-                        if not result.get('allowed'):
-                            should_terminate = True
-                            reason = result.get('reason', 'Access revoked')
-                            # Get disconnect_at from API response
-                            disconnect_at_str = result.get('disconnect_at')
-                            if disconnect_at_str:
-                                from dateutil import parser as dateparser
-                                disconnect_at = dateparser.isoparse(disconnect_at_str)
-                                if disconnect_at.tzinfo is not None:
-                                    disconnect_at = disconnect_at.replace(tzinfo=None)
-                            logger.warning(
-                                f"Session {session.session_id} should be terminated: {reason}"
-                            )
-                    
-                    except Exception as e:
-                        logger.error(f"Error checking session {session.session_id}: {e}")
-                        continue
-                
-                # Terminate session if needed
-                if should_terminate:
-                    try:
-                        # Default disconnect time if not set
-                        if not disconnect_at:
                             disconnect_at = datetime.utcnow() + timedelta(seconds=5)
                         
-                        logger.info(
-                            f"Session {session.session_id}: Injecting forced disconnect at {disconnect_at} "
-                            f"(reason: {reason})"
+                        logger.warning(
+                            f"Session {session_id} ({ssh_username}@{proxy_ip}) should be terminated: {reason} ({denial_reason})"
                         )
                         
                         # Inject forced disconnect time - monitor_grant_expiry thread will handle it
-                        self.session_forced_endtimes[session.session_id] = disconnect_at
-                        
-                        # Mark session for termination in DB (will be finalized when actually disconnected)
-                        if not session.termination_reason:
-                            session.termination_reason = 'access_revoked'
-                            session.denial_details = reason
-                            db.commit()
+                        self.session_forced_endtimes[session_id] = disconnect_at
                         
                         logger.info(
-                            f"Session {session.session_id}: Forced disconnect injected, "
-                            f"will disconnect at {disconnect_at}"
+                            f"Session {session_id}: Forced disconnect injected, "
+                            f"will disconnect at {disconnect_at} (reason: {reason})"
                         )
-                        
-                    except Exception as e:
-                        logger.error(f"Error terminating session {session.session_id}: {e}")
-                        db.rollback()
+                
+                except Exception as e:
+                    logger.error(f"Error checking session {session_id}: {e}")
+                    continue
         
         except Exception as e:
             logger.error(f"Error in check_and_terminate_sessions: {e}")
