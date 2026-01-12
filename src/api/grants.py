@@ -174,6 +174,20 @@ def check_grant():
             'gate_name': gate.name
         }
         
+        # Include person info if user was found (for custom denial messages)
+        user = result.get('user')
+        if user:
+            denial_response['person_id'] = user.id
+            denial_response['person_username'] = user.username
+            denial_response['person_fullname'] = user.fullname
+        
+        # Include server info if server was found
+        server = result.get('server')
+        if server:
+            denial_response['server_id'] = server.id
+            denial_response['server_name'] = server.name
+            denial_response['server_ip'] = server.ip_address
+        
         # Check if there's an active session that should be force-disconnected
         # (used by heartbeat to terminate sessions when grant revoked/user deactivated)
         from src.core.database import Session as DBSession

@@ -78,7 +78,9 @@ def format_denial_message(result: dict, username: str, dest_ip: str, tower_clien
         Formatted message with replaced placeholders
     """
     denial_reason = result.get('denial_reason', 'access_denied')
-    person = result.get('person_username', username)
+    
+    # Use person_fullname if available, fallback to person_username, then username parameter
+    person = result.get('person_fullname') or result.get('person_username') or username
     backend = result.get('server_name') or result.get('server_ip') or dest_ip
     
     # Select appropriate message based on denial reason
@@ -421,18 +423,19 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """Check 'none' authentication - called AFTER get_banner
         
         NOTE: Paramiko calls get_banner() FIRST, then check_auth_none()!
-        We save username here, and get_banner will be called again later
-        (paramiko may call it multiple times during handshake).
+        If no_grant_reason was set by early check (without username), 
+        we re-check here with username to get proper person info.
         
         Return AUTH_FAILED to proceed with other auth methods.
         """
         logger.info(f"check_auth_none called for {username} from {self.source_ip}")
         
-        # Save username - get_banner may be called again and can use this
+        # Save username
         self.attempted_username = username
         
-        # Check grant now so it's cached for auth methods
-        if not self.no_grant_reason and not self.grant_checked:
+        # If no_grant_reason already set from early check, or if not yet checked,
+        # do grant check now with username for proper person info
+        if not self.grant_checked:
             try:
                 result = self.tower_client.check_grant(
                     source_ip=self.source_ip,
@@ -442,13 +445,14 @@ class SSHProxyHandler(paramiko.ServerInterface):
                 )
                 
                 if not result.get('allowed'):
-                    # NO GRANT - format denial message
+                    # NO GRANT - format denial message with username
                     logger.warning(f"Access denied in check_auth_none: {result.get('reason')}")
                     self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
                 else:
-                    # Grant OK - cache result
+                    # Grant OK - cache result and clear any early denial
                     self.grant_checked = True
                     self.grant_result = result
+                    self.no_grant_reason = None  # Clear early denial if now granted
             except Exception as e:
                 logger.error(f"Failed to check grant in check_auth_none: {e}")
                 self.no_grant_reason = f"Hello, I'm Gate, an entry point of Inside.\nInternal error occurred. Please contact your system administrator."
