@@ -312,33 +312,14 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.no_grant_reason = None  # Reason for no grant (for banner message)
         self.is_tproxy = False  # Will be set to True by handle_client if TPROXY connection
         
-        # EARLY grant check - BEFORE get_banner() is called
-        # We check if source IP has ANY policy for this dest (any username)
-        # This allows us to show banner early if IP has no access at all
-        logger.info(f"SSHProxyHandler init: early check for {source_ip} -> {dest_ip}")
-        try:
-            # Call Tower API for access check (without ssh_login for early check)
-            result = self.tower_client.check_grant(
-                source_ip=self.source_ip,
-                destination_ip=self.dest_ip,
-                protocol='ssh',
-                ssh_login=None  # Early check without specific username
-            )
-            
-            if not result.get('allowed'):
-                logger.warning(f"No grant for IP {self.source_ip} to {self.dest_ip}: {result.get('reason')}")
-                self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
-            else:
-                logger.info(f"Grant found for {self.source_ip}, proceeding with auth")
-                
-        except Exception as e:
-            logger.error(f"Error in early grant check: {e}", exc_info=True)
-        
         # PTY parameters from client
         self.pty_term = None
         self.pty_width = None
         self.pty_height = None
         self.pty_modes = None
+        # Grant check cache - check only once per connection
+        self.grant_checked = False
+        self.grant_result = None
         # Channel type and exec command
         self.channel_type = None  # 'shell', 'exec', or 'subsystem'
         self.exec_command = None
@@ -350,49 +331,31 @@ class SSHProxyHandler(paramiko.ServerInterface):
     def check_auth_none(self, username: str):
         """Check 'none' authentication - called first before any real auth
         
-        This is the perfect place to reject users without grants EARLY,
-        before they are prompted for password.
-        
         Return AUTH_FAILED to proceed with other auth methods.
         Return AUTH_SUCCESSFUL only if auth should succeed without password.
         """
         logger.info(f"check_auth_none called for {username} from {self.source_ip}")
         
-        # Pre-check: does this user have ANY active policy?
-        try:
-            logger.info(f"check_auth_none: checking access via Tower API...")
-            # Call Tower API for access check
+        # Always return AUTH_FAILED to proceed with real auth methods
+        # Grant will be checked in check_auth_password/publickey/interactive
+        return paramiko.AUTH_FAILED
+        
+    def check_auth_password(self, username: str, password: str):
+        """Check password authentication"""
+        logger.info(f"Auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
+        
+        # Check access permissions using Tower API (cache result)
+        if not self.grant_checked:
             result = self.tower_client.check_grant(
                 source_ip=self.source_ip,
                 destination_ip=self.dest_ip,
                 protocol='ssh',
                 ssh_login=username
             )
-            
-            logger.info(f"check_auth_none: access check result: allowed={result.get('allowed')}, reason={result.get('reason')}")
-            
-            if not result.get('allowed'):
-                logger.warning(f"No grant for {username} from {self.source_ip}: {result.get('reason')}")
-                # Denied sessions are logged via Tower API audit trail
-                
-        except Exception as e:
-            logger.error(f"Error checking grants in check_auth_none: {e}", exc_info=True)
-        
-        # Grant exists - proceed with normal auth flow
-        return paramiko.AUTH_FAILED  # Still need password/key
-        
-    def check_auth_password(self, username: str, password: str):
-        """Check password authentication"""
-        logger.info(f"Auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
-        
-        # Check access permissions using Tower API
-        # Tower will find backend server by destination_ip and return it
-        result = self.tower_client.check_grant(
-            source_ip=self.source_ip,
-            destination_ip=self.dest_ip,
-            protocol='ssh',
-            ssh_login=username
-        )
+            self.grant_checked = True
+            self.grant_result = result
+        else:
+            result = self.grant_result
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
@@ -432,13 +395,18 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.info(f"Pubkey auth attempt: {username} from {self.source_ip} to {self.dest_ip}, key type: {key.get_name()}")
         
-        # Check access permissions using Tower API
-        result = self.tower_client.check_grant(
-            source_ip=self.source_ip,
-            destination_ip=self.dest_ip,
-            protocol='ssh',
-            ssh_login=username
-        )
+        # Check access permissions using Tower API (cache result)
+        if not self.grant_checked:
+            result = self.tower_client.check_grant(
+                source_ip=self.source_ip,
+                destination_ip=self.dest_ip,
+                protocol='ssh',
+                ssh_login=username
+            )
+            self.grant_checked = True
+            self.grant_result = result
+        else:
+            result = self.grant_result
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
@@ -483,13 +451,18 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.info(f"Interactive auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
         
-        # Check access permissions using Tower API
-        result = self.tower_client.check_grant(
-            source_ip=self.source_ip,
-            destination_ip=self.dest_ip,
-            protocol='ssh',
-            ssh_login=username
-        )
+        # Check access permissions using Tower API (cache result)
+        if not self.grant_checked:
+            result = self.tower_client.check_grant(
+                source_ip=self.source_ip,
+                destination_ip=self.dest_ip,
+                protocol='ssh',
+                ssh_login=username
+            )
+            self.grant_checked = True
+            self.grant_result = result
+        else:
+            result = self.grant_result
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
@@ -1236,13 +1209,12 @@ class SSHProxyServer:
         """Handle cascaded -R forward: backend -> jump -> client
         
         When backend opens a forwarded channel to us (because someone connected
-        to backend:port), we need to forward it to pool IP listener which will
-        then open forwarded-tcpip channel to client.
+        to backend:port), we forward it directly to client via forwarded-tcpip.
+        
+        Works in both TPROXY and NAT modes.
         """
         try:
             logger.info("Cascaded reverse forward handler started")
-            
-            pool_ip = server_handler.dest_ip  # Get pool IP for this session
             
             while backend_transport.is_active() and client_transport.is_active():
                 try:
@@ -1255,39 +1227,42 @@ class SSHProxyServer:
                     logger.info(f"Got cascaded -R channel from backend")
                     
                     # Get port info
-                    if hasattr(server_handler, 'remote_forward_requests') and len(server_handler.remote_forward_requests) > 0:
-                        dest_addr, dest_port = server_handler.remote_forward_requests[0]
+                    if hasattr(server_handler, 'remote_forward_listeners') and len(server_handler.remote_forward_listeners) > 0:
+                        # Get port from first listener entry
+                        _, backend_port, _ = server_handler.remote_forward_listeners[0]
                         
-                        # Connect to pool IP listener (which will forward to client)
+                        # Forward directly to client via SSH channel
                         try:
-                            import socket
-                            jump_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            jump_sock.connect((pool_ip, dest_port))
+                            client_channel = client_transport.open_channel(
+                                'forwarded-tcpip',
+                                ('localhost', backend_port),  # Destination on client side
+                                ('127.0.0.1', 0)  # Originator (unknown in cascade)
+                            )
                             
-                            logger.info(f"Connected to pool IP {pool_ip}:{dest_port}, forwarding data")
+                            logger.info(f"Opened forwarded-tcpip to client for port {backend_port}")
                             
-                            # Forward data between backend channel and pool IP socket
-                            def forward_cascade(backend_chan, local_sock):
+                            # Forward data bidirectionally between backend and client channels
+                            def forward_channels(backend_chan, client_chan):
                                 try:
                                     while True:
-                                        r, _, _ = select.select([backend_chan, local_sock], [], [], 1.0)
+                                        r, _, _ = select.select([backend_chan, client_chan], [], [], 1.0)
                                         
                                         if backend_chan in r:
                                             data = backend_chan.recv(4096)
                                             if len(data) == 0:
                                                 break
-                                            local_sock.send(data)
+                                            client_chan.send(data)
                                         
-                                        if local_sock in r:
-                                            data = local_sock.recv(4096)
+                                        if client_chan in r:
+                                            data = client_chan.recv(4096)
                                             if len(data) == 0:
                                                 break
                                             backend_chan.send(data)
                                 except Exception as e:
-                                    logger.debug(f"Cascade forward ended: {e}")
+                                    logger.debug(f"Channel forward ended: {e}")
                                 finally:
                                     try:
-                                        local_sock.close()
+                                        client_chan.close()
                                     except:
                                         pass
                                     try:
@@ -1296,17 +1271,17 @@ class SSHProxyServer:
                                         pass
                             
                             forward_thread = threading.Thread(
-                                target=forward_cascade,
-                                args=(backend_channel, jump_sock),
+                                target=forward_channels,
+                                args=(backend_channel, client_channel),
                                 daemon=True
                             )
                             forward_thread.start()
                             
                         except Exception as e:
-                            logger.error(f"Failed to connect to pool IP {pool_ip}:{dest_port}: {e}")
+                            logger.error(f"Failed to open channel to client: {e}")
                             backend_channel.close()
                     else:
-                        logger.error("No remote forward requests stored")
+                        logger.error("No remote forward listeners stored")
                         backend_channel.close()
                     
                 except Exception as e:
@@ -1987,30 +1962,21 @@ class SSHProxyServer:
                 channel.close()
                 return
             
-            # For -R (remote forward): Open listener on pool IP and forward to client
+            # For -R (remote forward): Backend channels forwarded directly to client
             # 
-            # Flow: Backend localhost:9090 -> Jump(pool-ip):9090 -> Client localhost:8080
-            # 
-            # 1. Backend has -R 9090:localhost:9090 which forwards to jump pool IP
-            # 2. Jump listens on pool IP (e.g. 10.0.160.129:9090)
-            # 3. Jump opens forwarded-tcpip channel to client
-            # 4. Client forwards to their localhost:8080 (as specified in -R 9090:localhost:8080)
+            # Flow: Backend:port -> SSH channel to gate -> SSH channel to client
+            # Works in both TPROXY and NAT modes
             if hasattr(server_handler, 'remote_forward_requests'):
-                pool_ip = server_handler.dest_ip  # IP from pool
+                server_handler.remote_forward_listeners = []  # Track ports for cascade handler
+                
                 for address, port in server_handler.remote_forward_requests:
-                    # Start listener on pool IP
-                    listener_thread = threading.Thread(
-                        target=self.handle_pool_ip_to_localhost_forward,
-                        args=(pool_ip, port, transport),
-                        daemon=True
-                    )
-                    listener_thread.start()
-                    logger.info(f"Started -R listener on pool IP {pool_ip}:{port} -> client")
+                    # Track port for cascade handler (always use direct mode)
+                    server_handler.remote_forward_listeners.append(('direct', port, port))
                     
-                    # Also ask backend to forward to jump host
+                    # Ask backend to create listener - backend will open channels to us
                     try:
-                        bound_port = backend_transport.request_port_forward(address, port)
-                        logger.info(f"Cascaded -R: backend:{bound_port} -> jump:{port}")
+                        bound_port = backend_transport.request_port_forward('', port)
+                        logger.info(f"Cascaded -R: backend:{port} -> gate SSH channel -> client")
                     except Exception as e:
                         logger.error(f"Failed to setup cascaded -R for port {port}: {e}")
             
@@ -2029,6 +1995,10 @@ class SSHProxyServer:
             
             # For cascaded -R, accept channels from backend and forward to client
             if hasattr(server_handler, 'remote_forward_requests'):
+                # Store listener addresses for cascade handler
+                if not hasattr(server_handler, 'remote_forward_listeners'):
+                    server_handler.remote_forward_listeners = []
+                    
                 cascade_thread = threading.Thread(
                     target=self.handle_cascaded_reverse_forward,
                     args=(transport, backend_transport, server_handler),

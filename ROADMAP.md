@@ -1,8 +1,32 @@
 # Inside - Roadmap & TODO
 
-# Inside - Roadmap & TODO
+## Current Status: v1.10.2 (Maintenance + Port Forwarding) - January 2026 ✅ COMPLETE
 
-## Current Status: v1.10 (TPROXY + Standalone) - January 2026 ✅ COMPLETE
+**v1.10.2 Completions:**
+- ✅ **Maintenance Mode Auto-Disconnect**: Heartbeat forces active sessions to disconnect
+  - Fixed `check_and_terminate_sessions()` to work without database access
+  - Changed `active_connections` from tuple to dict with full session metadata
+  - Heartbeat checks each session via Tower API `/api/v1/auth/check`
+  - Denied sessions get 5-second grace period via `session_forced_endtimes`
+  - `monitor_grant_expiry` thread handles forced disconnects
+  - User confirmed: maintenance mode now disconnects active sessions
+- ✅ **Stay API Fixed**: Server model attribute correction
+  - Fixed `Server.hostname` → `Server.name` in Stay creation endpoint
+  - Fixed `start_stay()` return type: returns full dict instead of just stay_id
+  - Stay creation working correctly in both TPROXY and NAT modes
+- ✅ **Remote Port Forwarding (-R) Fixed**: Direct SSH channels for cascade
+  - Simplified architecture: Backend SSH → Gate SSH → Client SSH (no intermediate listeners)
+  - Works in both TPROXY and NAT modes using direct forwarded-tcpip channels
+  - Removed complex pool IP listener logic - cleaner and more reliable
+  - Tested: `ssh -R 2225:host:25` works correctly in TPROXY mode
+- ✅ **Grant Check Optimization**: Reduced API calls from 4 to 1 per connection
+  - Removed early grant check before authentication
+  - Removed check_auth_none grant verification
+  - Implemented grant result caching per connection
+  - Grant checked only once during first auth method, cached for subsequent attempts
+  - Heartbeat continues to check grants for active sessions every 30s
+
+## Previous Status: v1.10 (TPROXY + Standalone) - January 2026 ✅
 
 **v1.10 Completions:**
 - ✅ **TPROXY Transparent Proxy**: Linux kernel TPROXY v4 for SSH traffic interception

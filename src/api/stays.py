@@ -73,7 +73,7 @@ def start_stay():
     
     # Find server
     server = db.query(Server).filter(
-        (Server.hostname == server_identifier) | (Server.ip_address == server_identifier)
+        (Server.name == server_identifier) | (Server.ip_address == server_identifier)
     ).first()
     if not server:
         return jsonify({

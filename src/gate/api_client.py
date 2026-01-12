@@ -216,7 +216,7 @@ class TowerClient:
             source_ip: Optional client source IP
         
         Returns:
-            stay_id: ID of created Stay record
+            dict: Stay details including stay_id
         
         Raises:
             TowerUnreachableError: Tower not reachable
@@ -230,10 +230,10 @@ class TowerClient:
             data['source_ip'] = source_ip
         
         response = self._request('POST', '/api/v1/stays/start', data=data)
-        stay_id = response['stay_id']
+        stay_id = response.get('stay_id')
         
         logger.info(f"Stay started: #{stay_id} - {username} entered {server}")
-        return stay_id
+        return response
     
     def end_stay(self, stay_id: int, termination_reason: str = 'normal_disconnect') -> Dict[str, Any]:
         """Report person left server (end Stay).
