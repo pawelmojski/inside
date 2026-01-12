@@ -150,17 +150,19 @@ def add():
                 # Parse human-readable duration
                 duration_text = request.form.get('duration_text', '').strip()
                 
-                if duration_text:
-                    total_minutes = parse_duration(duration_text)
-                    
-                    if total_minutes is None:
-                        flash(f'Invalid duration format: "{duration_text}". Examples: 30m, 2h, 1d, 1.5h, 2d12h', 'danger')
-                        return redirect(url_for('policies.add'))
-                    
-                    if total_minutes > 0:
-                        end_time = start_time + timedelta(minutes=total_minutes)
-                    # else: permanent (end_time = None)
-                # else: permanent (no duration specified)
+                if not duration_text:
+                    flash('Duration is required. Use "1h" for 1 hour, or "permanent" for no expiration.', 'danger')
+                    return redirect(url_for('policies.add'))
+                
+                total_minutes = parse_duration(duration_text)
+                
+                if total_minutes is None:
+                    flash(f'Invalid duration format: "{duration_text}". Examples: 30m, 2h, 1d, 1.5h, 2d12h, permanent', 'danger')
+                    return redirect(url_for('policies.add'))
+                
+                if total_minutes > 0:
+                    end_time = start_time + timedelta(minutes=total_minutes)
+                # else: total_minutes == 0 means permanent (end_time = None)
                 
             elif duration_type == 'absolute':
                 # Specific start and end date/time
@@ -486,30 +488,30 @@ def revoke(policy_id):
 @policies_bp.route('/renew/<int:policy_id>', methods=['POST'])
 @login_required
 def renew(policy_id):
-    """Renew policy - extend end_time by specified days"""
+    """Renew policy - extend end_time by 1 hour"""
     db = g.db
     policy = db.query(AccessPolicy).filter(AccessPolicy.id == policy_id).first()
     if not policy:
         abort(404)
     
     try:
-        days = int(request.form.get('days', 30))
+        hours = int(request.form.get('hours', 1))
         now = datetime.utcnow()
         
         # Extend end_time
         if policy.end_time:
             # If policy already expired, extend from now
             if policy.end_time < now:
-                policy.end_time = now + timedelta(days=days)
-                flash(f'Policy reactivated and extended for {days} days from now!', 'success')
+                policy.end_time = now + timedelta(hours=hours)
+                flash(f'Policy reactivated and extended for {hours} hour(s) from now!', 'success')
             else:
                 # If still active, extend from current end_time
-                policy.end_time = policy.end_time + timedelta(days=days)
-                flash(f'Policy extended for {days} days!', 'success')
+                policy.end_time = policy.end_time + timedelta(hours=hours)
+                flash(f'Policy extended for {hours} hour(s)!', 'success')
         else:
             # If NULL (permanent), set end_time from now
-            policy.end_time = now + timedelta(days=days)
-            flash(f'Permanent policy converted to {days}-day grant!', 'success')
+            policy.end_time = now + timedelta(hours=hours)
+            flash(f'Permanent policy converted to {hours}-hour grant!', 'success')
         
         db.commit()
     except ValueError:
