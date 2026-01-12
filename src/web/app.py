@@ -204,6 +204,9 @@ app.register_blueprint(api_sessions_bp)
 from src.api.recordings import recordings_bp
 app.register_blueprint(recordings_bp)
 
+from src.api.policies import policies_api_bp
+app.register_blueprint(policies_api_bp)
+
 # Favicon route (prevent 404 errors)
 @app.route('/favicon.ico')
 def favicon():

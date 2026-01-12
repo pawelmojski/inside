@@ -178,7 +178,17 @@
                         {% if session.policy %}
                         <tr>
                             <th>Policy:</th>
-                            <td><code>{{ session.policy.id }}</code></td>
+                            <td>
+                                <span class="policy-wrapper" 
+                                      data-policy-id="{{ session.policy.id }}"
+                                      style="cursor: pointer;">
+                                    <a href="{{ url_for('policies.edit', policy_id=session.policy.id) }}" 
+                                       class="policy-link">
+                                        <code>#{{ session.policy.id }}</code>
+                                    </a>
+                                </span>
+                                <span class="text-muted">{{ session.policy.description or 'No description' }}</span>
+                            </td>
                         </tr>
                         {% endif %}
                     </table>
@@ -1243,6 +1253,87 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Poll every 2 seconds
         conversionPollInterval = setInterval(checkConversionStatus, 2000);
+    }
+    {% endif %}
+    
+    // Policy popover with summary and revoke button
+    {% if session.policy %}
+    document.addEventListener('DOMContentLoaded', function() {
+        const policyWrapper = document.querySelector('.policy-wrapper');
+        if (policyWrapper) {
+            const policyId = policyWrapper.dataset.policyId;
+            
+            // Fetch policy details for popover
+            fetch(`/api/v1/policies/${policyId}`)
+                .then(response => response.json())
+                .then(policy => {
+                    const content = `
+                        <div class="policy-popover">
+                            <div class="mb-2">
+                                <strong>${policy.description || 'No description'}</strong>
+                            </div>
+                            <div class="mb-1">
+                                <small class="text-muted">Person:</small>
+                                <strong>${policy.user_display || 'Any'}</strong>
+                            </div>
+                            <div class="mb-1">
+                                <small class="text-muted">Backend:</small>
+                                <strong>${policy.server_display || 'Any'}</strong>
+                            </div>
+                            <div class="mb-1">
+                                <small class="text-muted">SSH Login:</small>
+                                <strong>${policy.ssh_username || 'Any'}</strong>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">Protocol:</small>
+                                <span class="badge bg-${policy.protocol === 'ssh' ? 'primary' : 'success'}">${policy.protocol.toUpperCase()}</span>
+                            </div>
+                            {% if session.is_active %}
+                            <div class="d-grid">
+                                <button class="btn btn-danger btn-sm" onclick="revokeSession('{{ session.session_id }}'); this.closest('.popover').remove();">
+                                    <i class="bi bi-x-circle"></i> Revoke Session
+                                </button>
+                            </div>
+                            {% endif %}
+                        </div>
+                    `;
+                    
+                    new bootstrap.Popover(policyWrapper, {
+                        content: content,
+                        html: true,
+                        placement: 'right',
+                        trigger: 'hover focus',
+                        title: `Policy #${policy.id}`
+                    });
+                })
+                .catch(error => console.error('Failed to load policy:', error));
+        }
+    });
+    
+    // Revoke session function
+    function revokeSession(sessionId) {
+        if (!confirm('Are you sure you want to immediately terminate this session?')) {
+            return;
+        }
+        
+        fetch(`/sessions/${sessionId}/revoke`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Session terminated successfully');
+                location.reload();
+            } else {
+                alert('Failed to terminate session: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+        });
     }
     {% endif %}
 });

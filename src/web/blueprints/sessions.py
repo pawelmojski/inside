@@ -796,6 +796,41 @@ def view(session_id):
         db.close()
 
 
+@sessions_bp.route('/<session_id>/revoke', methods=['POST'])
+def revoke_session(session_id):
+    """Immediately terminate an active session by marking it for termination.
+    
+    The gate will detect this on next heartbeat and force-close the connection.
+    """
+    db = SessionLocal()
+    try:
+        session = db.query(Session).filter(Session.session_id == session_id).first()
+        
+        if not session:
+            return jsonify({'success': False, 'error': 'Session not found'}), 404
+        
+        if not session.is_active:
+            return jsonify({'success': False, 'error': 'Session is not active'}), 400
+        
+        # Mark session for termination
+        session.termination_reason = 'revoked_by_admin'
+        db.commit()
+        
+        logger.info(f"Session {session_id} marked for termination by admin")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Session marked for termination. Will be closed on next heartbeat.'
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to revoke session {session_id}: {e}")
+        db.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        db.close()
+
+
 @sessions_bp.route('/<session_id>/live')
 def live_events(session_id):
     """
