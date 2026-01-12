@@ -1765,27 +1765,121 @@ class SSHProxyServer:
                 logger.debug(f"Session {session_id}: Grant expires in {remaining/60:.1f} minutes ({grant_end_time})")
                 
                 # Warning times (in seconds before expiry)
-            warnings = [
-                (300, "5 minutes"),  # 5 minutes
-                (60, "1 minute"),    # 1 minute
-            ]
-            
-            for warning_seconds, warning_text in warnings:
-                if remaining > warning_seconds:
-                    # Sleep until warning time (in small increments to check for forced disconnect)
-                    sleep_time = remaining - warning_seconds
-                    logger.debug(f"Session {session_id}: Sleeping {sleep_time:.0f}s until {warning_text} warning")
-                    
-                    # Sleep in 1-second increments to check for forced disconnect and grant extensions
-                    for _ in range(int(sleep_time)):
+                warnings = [
+                    (300, "5 minutes"),  # 5 minutes
+                    (60, "1 minute"),    # 1 minute
+                ]
+                
+                for warning_seconds, warning_text in warnings:
+                    if remaining > warning_seconds:
+                        # Sleep until warning time (in small increments to check for forced disconnect)
+                        sleep_time = remaining - warning_seconds
+                        logger.debug(f"Session {session_id}: Sleeping {sleep_time:.0f}s until {warning_text} warning")
+                        
+                        # Sleep in 1-second increments to check for forced disconnect and grant extensions
+                        for _ in range(int(sleep_time)):
+                            time.sleep(1)
+                            
+                            # Check if grant was extended (renewed)
+                            if session_id in self.session_grant_endtimes:
+                                new_end_time = self.session_grant_endtimes[session_id]
+                                if new_end_time > grant_end_time:
+                                    # Grant extended!
+                                    logger.info(f"Session {session_id}: Grant extended from {grant_end_time} to {new_end_time}")
+                                    
+                                    # Calculate new remaining time
+                                    now = datetime.utcnow()
+                                    new_remaining = (new_end_time - now).total_seconds()
+                                    extension_minutes = int((new_end_time - grant_end_time).total_seconds() / 60)
+                                    
+                                    # Convert to Europe/Warsaw for display
+                                    warsaw_tz = pytz.timezone('Europe/Warsaw')
+                                    new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
+                                    new_end_local = new_end_local.astimezone(warsaw_tz)
+                                    
+                                    # Send notification message
+                                    extension_msg = (
+                                        f"\r\n\r\n"
+                                        f"{'='*70}\r\n"
+                                        f"  *** GOOD NEWS: Your access grant has been extended! ***\r\n"
+                                        f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
+                                        f"  Extended by: {extension_minutes} minute(s)\r\n"
+                                        f"{'='*70}\r\n\r\n"
+                                    )
+                                    try:
+                                        channel.send(extension_msg.encode())
+                                        logger.info(f"Session {session_id}: Sent grant extension notification")
+                                    except Exception as e:
+                                        logger.error(f"Session {session_id}: Failed to send extension message: {e}")
+                                    
+                                    # Update grant_end_time and recalculate remaining time
+                                    grant_end_time = new_end_time
+                                    remaining = new_remaining
+                                    # Break inner loop to restart warning countdown from new end time
+                                    break
+                            
+                            # Check if forced disconnect was injected
+                            if session_id in self.session_forced_endtimes:
+                                forced_end = self.session_forced_endtimes[session_id]
+                                now = datetime.utcnow()
+                                if forced_end <= now:
+                                    logger.info(f"Session {session_id}: Forced disconnect detected, terminating immediately")
+                                    # Jump to immediate disconnect
+                                    remaining = 0
+                                    break
+                                else:
+                                    # Update grant_end_time to forced time
+                                    grant_end_time = forced_end
+                                    remaining = (grant_end_time - now).total_seconds()
+                                    logger.info(f"Session {session_id}: Updated end_time to forced disconnect at {forced_end}")
+                                    break
+                            # Check if session is still active
+                            if not transport.is_active() or not backend_transport.is_active():
+                                logger.info(f"Session {session_id}: Already disconnected during sleep")
+                                return
+                        
+                        # If forced disconnect caused break, skip to final disconnect
+                        if remaining <= 0:
+                            break
+                        
+                        # Check if session is still active
+                        if not transport.is_active() or not backend_transport.is_active():
+                            logger.info(f"Session {session_id}: Already disconnected before {warning_text} warning")
+                            return
+                        
+                        # Send wall-style warning
+                        now = datetime.utcnow()
+                        remaining = (grant_end_time - now).total_seconds()
+                        if remaining > 0:
+                            message = (
+                                f"\r\n\r\n"
+                                f"{'='*70}\r\n"
+                                f"  *** WARNING: Your access grant expires in {warning_text} ***\r\n"
+                                f"  Your session will be automatically disconnected at {grant_end_time} UTC\r\n"
+                                f"{'='*70}\r\n\r\n"
+                            )
+                            try:
+                                channel.send(message.encode())
+                                logger.info(f"Session {session_id}: Sent {warning_text} warning")
+                            except Exception as e:
+                                logger.error(f"Session {session_id}: Failed to send warning: {e}")
+                                return
+                        
+                        remaining = (grant_end_time - now).total_seconds()
+                
+                # Sleep until expiry (in small increments to check for forced disconnect and extensions)
+                grant_was_extended = False
+                if remaining > 0:
+                    logger.debug(f"Session {session_id}: Sleeping {remaining:.0f}s until grant expiry")
+                    for _ in range(int(remaining)):
                         time.sleep(1)
                         
                         # Check if grant was extended (renewed)
                         if session_id in self.session_grant_endtimes:
                             new_end_time = self.session_grant_endtimes[session_id]
                             if new_end_time > grant_end_time:
-                                # Grant extended!
-                                logger.info(f"Session {session_id}: Grant extended from {grant_end_time} to {new_end_time}")
+                                # Grant extended during final countdown!
+                                logger.info(f"Session {session_id}: Grant extended during final countdown from {grant_end_time} to {new_end_time}")
                                 
                                 # Calculate new remaining time
                                 now = datetime.utcnow()
@@ -1808,14 +1902,15 @@ class SSHProxyServer:
                                 )
                                 try:
                                     channel.send(extension_msg.encode())
-                                    logger.info(f"Session {session_id}: Sent grant extension notification")
+                                    logger.info(f"Session {session_id}: Sent grant extension notification during final countdown")
                                 except Exception as e:
                                     logger.error(f"Session {session_id}: Failed to send extension message: {e}")
                                 
-                                # Update grant_end_time and recalculate remaining time
+                                # Update grant_end_time and set flag to restart countdown
                                 grant_end_time = new_end_time
                                 remaining = new_remaining
-                                # Break inner loop to restart warning countdown from new end time
+                                grant_was_extended = True
+                                logger.info(f"Session {session_id}: Will restart countdown with new end time")
                                 break
                         
                         # Check if forced disconnect was injected
@@ -1823,114 +1918,19 @@ class SSHProxyServer:
                             forced_end = self.session_forced_endtimes[session_id]
                             now = datetime.utcnow()
                             if forced_end <= now:
-                                logger.info(f"Session {session_id}: Forced disconnect detected, terminating immediately")
-                                # Jump to immediate disconnect
-                                remaining = 0
-                                break
-                            else:
-                                # Update grant_end_time to forced time
-                                grant_end_time = forced_end
-                                remaining = (grant_end_time - now).total_seconds()
-                                logger.info(f"Session {session_id}: Updated end_time to forced disconnect at {forced_end}")
+                                logger.info(f"Session {session_id}: Forced disconnect detected during final countdown")
                                 break
                         # Check if session is still active
                         if not transport.is_active() or not backend_transport.is_active():
-                            logger.info(f"Session {session_id}: Already disconnected during sleep")
+                            logger.info(f"Session {session_id}: Already disconnected during final countdown")
                             return
-                    
-                    # If forced disconnect caused break, skip to final disconnect
-                    if remaining <= 0:
-                        break
-                    
-                    # Check if session is still active
-                    if not transport.is_active() or not backend_transport.is_active():
-                        logger.info(f"Session {session_id}: Already disconnected before {warning_text} warning")
-                        return
-                    
-                    # Send wall-style warning
-                    now = datetime.utcnow()
-                    remaining = (grant_end_time - now).total_seconds()
-                    if remaining > 0:
-                        message = (
-                            f"\r\n\r\n"
-                            f"{'='*70}\r\n"
-                            f"  *** WARNING: Your access grant expires in {warning_text} ***\r\n"
-                            f"  Your session will be automatically disconnected at {grant_end_time} UTC\r\n"
-                            f"{'='*70}\r\n\r\n"
-                        )
-                        try:
-                            channel.send(message.encode())
-                            logger.info(f"Session {session_id}: Sent {warning_text} warning")
-                        except Exception as e:
-                            logger.error(f"Session {session_id}: Failed to send warning: {e}")
-                            return
-                    
-                    remaining = (grant_end_time - now).total_seconds()
-            
-            # Sleep until expiry (in small increments to check for forced disconnect and extensions)
-            grant_was_extended = False
-            if remaining > 0:
-                logger.debug(f"Session {session_id}: Sleeping {remaining:.0f}s until grant expiry")
-                for _ in range(int(remaining)):
-                    time.sleep(1)
-                    
-                    # Check if grant was extended (renewed)
-                    if session_id in self.session_grant_endtimes:
-                        new_end_time = self.session_grant_endtimes[session_id]
-                        if new_end_time > grant_end_time:
-                            # Grant extended during final countdown!
-                            logger.info(f"Session {session_id}: Grant extended during final countdown from {grant_end_time} to {new_end_time}")
-                            
-                            # Calculate new remaining time
-                            now = datetime.utcnow()
-                            new_remaining = (new_end_time - now).total_seconds()
-                            extension_minutes = int((new_end_time - grant_end_time).total_seconds() / 60)
-                            
-                            # Convert to Europe/Warsaw for display
-                            warsaw_tz = pytz.timezone('Europe/Warsaw')
-                            new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
-                            new_end_local = new_end_local.astimezone(warsaw_tz)
-                            
-                            # Send notification message
-                            extension_msg = (
-                                f"\r\n\r\n"
-                                f"{'='*70}\r\n"
-                                f"  *** GOOD NEWS: Your access grant has been extended! ***\r\n"
-                                f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
-                                f"  Extended by: {extension_minutes} minute(s)\r\n"
-                                f"{'='*70}\r\n\r\n"
-                            )
-                            try:
-                                channel.send(extension_msg.encode())
-                                logger.info(f"Session {session_id}: Sent grant extension notification during final countdown")
-                            except Exception as e:
-                                logger.error(f"Session {session_id}: Failed to send extension message: {e}")
-                            
-                            # Update grant_end_time and set flag to restart countdown
-                            grant_end_time = new_end_time
-                            remaining = new_remaining
-                            grant_was_extended = True
-                            logger.info(f"Session {session_id}: Will restart countdown with new end time")
-                            break
-                    
-                    # Check if forced disconnect was injected
-                    if session_id in self.session_forced_endtimes:
-                        forced_end = self.session_forced_endtimes[session_id]
-                        now = datetime.utcnow()
-                        if forced_end <= now:
-                            logger.info(f"Session {session_id}: Forced disconnect detected during final countdown")
-                            break
-                    # Check if session is still active
-                    if not transport.is_active() or not backend_transport.is_active():
-                        logger.info(f"Session {session_id}: Already disconnected during final countdown")
-                        return
-            
-            # If grant was extended, restart the warning loop
-            if grant_was_extended:
-                continue
                 
-            # Break out of while loop - time to disconnect
-            break
+                # If grant was extended, restart the warning loop
+                if grant_was_extended:
+                    continue
+                    
+                # Break out of while loop - time to disconnect
+                break
             
             # Check if session is still active
             if not transport.is_active() or not backend_transport.is_active():

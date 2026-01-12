@@ -1770,6 +1770,7 @@ class SSHProxyServer:
                     (60, "1 minute"),    # 1 minute
                 ]
                 
+                grant_extended_during_warning = False
                 for warning_seconds, warning_text in warnings:
                     if remaining > warning_seconds:
                         # Sleep until warning time (in small increments to check for forced disconnect)
@@ -1815,6 +1816,7 @@ class SSHProxyServer:
                                     # Update grant_end_time and recalculate remaining time
                                     grant_end_time = new_end_time
                                     remaining = new_remaining
+                                    grant_extended_during_warning = True
                                     # Break inner loop to restart warning countdown from new end time
                                     break
                             
@@ -1842,6 +1844,11 @@ class SSHProxyServer:
                         if remaining <= 0:
                             break
                         
+                        # If grant was extended, restart from beginning of while loop
+                        if grant_extended_during_warning:
+                            logger.info(f"Session {session_id}: Restarting countdown due to grant extension")
+                            break
+                        
                         # Check if session is still active
                         if not transport.is_active() or not backend_transport.is_active():
                             logger.info(f"Session {session_id}: Already disconnected before {warning_text} warning")
@@ -1866,6 +1873,10 @@ class SSHProxyServer:
                                 return
                         
                         remaining = (grant_end_time - now).total_seconds()
+                
+                # If grant was extended during warnings, restart the while loop
+                if grant_extended_during_warning:
+                    continue
                 
                 # Sleep until expiry (in small increments to check for forced disconnect and extensions)
                 grant_was_extended = False
