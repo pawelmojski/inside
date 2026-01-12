@@ -2209,20 +2209,25 @@ class SSHProxyServer:
                     remaining = grant_end_time - now
                     remaining_seconds = remaining.total_seconds()
                     
-                    # Format time remaining in hours and minutes
-                    hours = int(remaining_seconds // 3600)
+                    # Format time remaining in days, hours and minutes
+                    days = int(remaining_seconds // 86400)
+                    hours = int((remaining_seconds % 86400) // 3600)
                     minutes = int((remaining_seconds % 3600) // 60)
                     
-                    if hours > 0 and minutes > 0:
-                        time_str = f"{hours} hours and {minutes} minutes"
-                    elif hours > 0:
-                        time_str = f"{hours} hours"
-                    else:
-                        time_str = f"{minutes} minutes"
+                    # Build human-readable time string
+                    time_parts = []
+                    if days > 0:
+                        time_parts.append(f"{days} day{'s' if days != 1 else ''}")
+                    if hours > 0:
+                        time_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+                    if minutes > 0 or len(time_parts) == 0:
+                        time_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+                    time_str = " ".join(time_parts)
                     
                     # Convert UTC to Europe/Warsaw for display
                     warsaw_tz = pytz.timezone('Europe/Warsaw')
-                    grant_end_time_local = pytz.utc.localize(grant_end_time).astimezone(warsaw_tz)
+                    grant_end_time_local = grant_end_time if grant_end_time.tzinfo else pytz.utc.localize(grant_end_time)
+                    grant_end_time_local = grant_end_time_local.astimezone(warsaw_tz)
                     
                     welcome_msg = (
                         f"\r\n"
