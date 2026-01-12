@@ -179,14 +179,17 @@
                         <tr>
                             <th>Policy:</th>
                             <td>
-                                <span class="policy-wrapper" 
-                                      data-policy-id="{{ session.policy.id }}"
-                                      style="cursor: pointer;">
-                                    <a href="{{ url_for('policies.edit', policy_id=session.policy.id) }}" 
-                                       class="policy-link">
-                                        <code>#{{ session.policy.id }}</code>
-                                    </a>
-                                </span>
+                                <a href="{{ url_for('policies.edit', policy_id=session.policy.id) }}" 
+                                   class="policy-link text-decoration-none"
+                                   data-bs-toggle="popover" 
+                                   data-bs-trigger="hover focus"
+                                   data-bs-placement="right"
+                                   data-bs-html="true"
+                                   data-bs-policy-id="{{ session.policy.id }}"
+                                   data-bs-title="Policy #{{ session.policy.id }}"
+                                   data-bs-content="<div class='text-center'><div class='spinner-border spinner-border-sm'></div> Loading...</div>">
+                                    <code>#{{ session.policy.id }}</code>
+                                </a>
                                 <span class="text-muted">{{ session.policy.description or 'No description' }}</span>
                             </td>
                         </tr>
@@ -1257,31 +1260,38 @@ document.addEventListener('DOMContentLoaded', function() {
     {% endif %}
     
     // Policy popover with summary and revoke button
+    // Policy popover with summary and revoke button
     {% if session.policy %}
     document.addEventListener('DOMContentLoaded', function() {
-        const policyWrapper = document.querySelector('.policy-wrapper');
-        if (policyWrapper) {
-            const policyId = policyWrapper.dataset.policyId;
+        const policyLink = document.querySelector('.policy-link');
+        if (policyLink) {
+            const policyId = policyLink.dataset.bsPolicyId;
+            let policyDataLoaded = false;
+            let policyData = null;
             
-            // Fetch policy details for popover
+            // Pre-fetch policy data
             fetch(`/api/v1/policies/${policyId}`)
                 .then(response => response.json())
                 .then(policy => {
+                    policyData = policy;
+                    policyDataLoaded = true;
+                    
+                    // Update popover content
                     const content = `
-                        <div class="policy-popover">
+                        <div class="policy-popover" style="min-width: 250px;">
                             <div class="mb-2">
                                 <strong>${policy.description || 'No description'}</strong>
                             </div>
                             <div class="mb-1">
-                                <small class="text-muted">Person:</small>
+                                <small class="text-muted">Person:</small><br>
                                 <strong>${policy.user_display || 'Any'}</strong>
                             </div>
                             <div class="mb-1">
-                                <small class="text-muted">Backend:</small>
+                                <small class="text-muted">Backend:</small><br>
                                 <strong>${policy.server_display || 'Any'}</strong>
                             </div>
                             <div class="mb-1">
-                                <small class="text-muted">SSH Login:</small>
+                                <small class="text-muted">SSH Login:</small><br>
                                 <strong>${policy.ssh_username || 'Any'}</strong>
                             </div>
                             <div class="mb-2">
@@ -1290,7 +1300,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             </div>
                             {% if session.is_active %}
                             <div class="d-grid">
-                                <button class="btn btn-danger btn-sm" onclick="revokeSession('{{ session.session_id }}'); this.closest('.popover').remove();">
+                                <button class="btn btn-danger btn-sm" onclick="revokeSession('{{ session.session_id }}')">
                                     <i class="bi bi-x-circle"></i> Revoke Session
                                 </button>
                             </div>
@@ -1298,15 +1308,40 @@ document.addEventListener('DOMContentLoaded', function() {
                         </div>
                     `;
                     
-                    new bootstrap.Popover(policyWrapper, {
-                        content: content,
-                        html: true,
-                        placement: 'right',
+                    // Set the content attribute
+                    policyLink.setAttribute('data-bs-content', content);
+                    
+                    // Re-initialize popover with new content
+                    const existingPopover = bootstrap.Popover.getInstance(policyLink);
+                    if (existingPopover) {
+                        existingPopover.dispose();
+                    }
+                    new bootstrap.Popover(policyLink, {
+                        sanitize: false,
                         trigger: 'hover focus',
-                        title: `Policy #${policy.id}`
+                        html: true
                     });
                 })
-                .catch(error => console.error('Failed to load policy:', error));
+                .catch(error => {
+                    console.error('Failed to load policy:', error);
+                    policyLink.setAttribute('data-bs-content', '<div class="text-danger">Failed to load</div>');
+                    const existingPopover = bootstrap.Popover.getInstance(policyLink);
+                    if (existingPopover) {
+                        existingPopover.dispose();
+                    }
+                    new bootstrap.Popover(policyLink, {
+                        sanitize: false,
+                        trigger: 'hover focus',
+                        html: true
+                    });
+                });
+            
+            // Initialize popover with loading message initially
+            new bootstrap.Popover(policyLink, {
+                sanitize: false,
+                trigger: 'hover focus',
+                html: true
+            });
         }
     });
     
@@ -1314,6 +1349,15 @@ document.addEventListener('DOMContentLoaded', function() {
     function revokeSession(sessionId) {
         if (!confirm('Are you sure you want to immediately terminate this session?')) {
             return;
+        }
+        
+        // Hide popover
+        const policyLink = document.querySelector('.policy-link');
+        if (policyLink) {
+            const popover = bootstrap.Popover.getInstance(policyLink);
+            if (popover) {
+                popover.hide();
+            }
         }
         
         fetch(`/sessions/${sessionId}/revoke`, {

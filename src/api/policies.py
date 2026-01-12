@@ -33,20 +33,20 @@ def get_policy(policy_id):
             user_display = f'Group: {policy.user_group.name}' if policy.user_group else f'Group #{policy.user_group_id}'
         
         server_display = 'Any'
-        if policy.server_id:
-            server_display = policy.server.name if policy.server else f'Server #{policy.server_id}'
-        elif policy.server_group_id:
-            server_display = f'Group: {policy.server_group.name}' if policy.server_group else f'Group #{policy.server_group_id}'
+        if policy.target_server_id:
+            server_display = policy.target_server.name if policy.target_server else f'Server #{policy.target_server_id}'
+        elif policy.target_group_id:
+            server_display = f'Group: {policy.target_group.name}' if policy.target_group else f'Group #{policy.target_group_id}'
         
         return jsonify({
             'id': policy.id,
-            'description': policy.description,
+            'description': policy.reason or 'No description',
             'user_display': user_display,
             'server_display': server_display,
-            'ssh_username': policy.ssh_username,
-            'protocol': policy.protocol,
-            'priority': policy.priority,
-            'enabled': policy.enabled
+            'ssh_username': policy.ssh_logins[0].allowed_login if policy.ssh_logins else 'Any',
+            'protocol': policy.protocol or 'any',
+            'priority': policy.id,
+            'enabled': policy.is_active
         })
         
     finally:
