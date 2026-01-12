@@ -444,14 +444,16 @@ class SSHProxyHandler(paramiko.ServerInterface):
                     ssh_login=username
                 )
                 
+                # Cache result regardless of outcome to avoid redundant API calls
+                self.grant_checked = True
+                self.grant_result = result
+                
                 if not result.get('allowed'):
                     # NO GRANT - format denial message with username
                     logger.warning(f"Access denied in check_auth_none: {result.get('reason')}")
                     self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
                 else:
-                    # Grant OK - cache result and clear any early denial
-                    self.grant_checked = True
-                    self.grant_result = result
+                    # Grant OK - clear any early denial
                     self.no_grant_reason = None  # Clear early denial if now granted
             except Exception as e:
                 logger.error(f"Failed to check grant in check_auth_none: {e}")
@@ -696,11 +698,20 @@ class SSHProxyHandler(paramiko.ServerInterface):
         If user has no grant, return a polite rejection message.
         Uses custom messages from Tower API (already prepared in check_auth).
         Must return tuple (banner, language) - default is (None, None).
+        
+        Note: Paramiko expects str (Python 3 unicode string) and will encode it as UTF-8.
         """
         logger.info(f"get_banner called, no_grant_reason={self.no_grant_reason}")
         if self.no_grant_reason:
             # no_grant_reason already contains formatted message with replaced placeholders
+            # Ensure it's a proper unicode string (Python 3 str)
             banner = f"\r\n{self.no_grant_reason}\r\n\r\n"
+            
+            # Ensure the string is properly encoded/decoded as UTF-8
+            # In case there are any encoding issues from the API
+            if isinstance(banner, bytes):
+                banner = banner.decode('utf-8')
+            
             logger.info(f"get_banner returning banner message ({len(banner)} chars)")
             return (banner, "en-US")
         

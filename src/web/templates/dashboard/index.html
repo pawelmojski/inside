@@ -291,8 +291,8 @@
                                     {% else %}
                                         <tr><td><strong>Status:</strong></td><td><span class="badge bg-success">ACTIVE</span></td></tr>
                                     {% endif %}
-                                    <tr><td colspan="2" class="pt-2"><a href="{{ url_for('sessions.view', session_id=session.session_id) }}" class="btn btn-sm btn-light w-100">View Details</a></td></tr>
                                 </table>
+                                <div class="text-center mt-2" style="font-size: 0.7rem; color: #999;">Click session bar to view details</div>
                                 {% endset %}
                                 
                                 <div class="session-bar position-absolute d-flex align-items-center justify-content-between" 
@@ -529,7 +529,9 @@ function refreshStaysTimeline(data) {
     const container = document.getElementById('staysTimeline');
     if (!container) return;
     
-    const now = new Date(data.now);
+    // Parse 'now' as UTC (backend sends UTC without 'Z' suffix)
+    const nowStr = data.now.endsWith('Z') ? data.now : data.now + 'Z';
+    const now = new Date(nowStr);
     
     let html = '';
     
@@ -542,8 +544,10 @@ function refreshStaysTimeline(data) {
         html += '<div class="stays-rows position-relative">';
         
         data.stays.forEach(stay => {
-            const stayStarted = new Date(stay.started_at);
-            const stayEnded = stay.ended_at ? new Date(stay.ended_at) : null;
+            // Parse dates as UTC (add 'Z' if missing)
+            const stayStartedStr = stay.started_at.endsWith('Z') ? stay.started_at : stay.started_at + 'Z';
+            const stayStarted = new Date(stayStartedStr);
+            const stayEnded = stay.ended_at ? new Date(stay.ended_at.endsWith('Z') ? stay.ended_at : stay.ended_at + 'Z') : null;
             // For ended stays, use stay end time; for active, use now
             const stayEndTime = stayEnded || now;
             const stayDuration = (stayEndTime - stayStarted) / 1000; // in seconds
@@ -565,9 +569,11 @@ function refreshStaysTimeline(data) {
             const backendTracks = {};
             for (const [backendName, sessions] of Object.entries(sessionsByBackend)) {
                 // Sort by start time
-                const sortedSessions = sessions.sort((a, b) => 
-                    new Date(a.started_at) - new Date(b.started_at)
-                );
+                const sortedSessions = sessions.sort((a, b) => {
+                    const aStarted = new Date(a.started_at.endsWith('Z') ? a.started_at : a.started_at + 'Z');
+                    const bStarted = new Date(b.started_at.endsWith('Z') ? b.started_at : b.started_at + 'Z');
+                    return aStarted - bStarted;
+                });
                 
                 // Pack into non-overlapping tracks
                 const tracks = [];
@@ -575,8 +581,10 @@ function refreshStaysTimeline(data) {
                     let placed = false;
                     for (const track of tracks) {
                         const lastSession = track[track.length - 1];
-                        const lastEnded = lastSession.ended_at ? new Date(lastSession.ended_at) : null;
-                        const sessionStarted = new Date(session.started_at);
+                        const lastEndedStr = lastSession.ended_at ? (lastSession.ended_at.endsWith('Z') ? lastSession.ended_at : lastSession.ended_at + 'Z') : null;
+                        const lastEnded = lastEndedStr ? new Date(lastEndedStr) : null;
+                        const sessionStartedStr = session.started_at.endsWith('Z') ? session.started_at : session.started_at + 'Z';
+                        const sessionStarted = new Date(sessionStartedStr);
                         
                         if (lastEnded && sessionStarted >= lastEnded) {
                             track.push(session);
@@ -639,8 +647,10 @@ function refreshStaysTimeline(data) {
                     html += `<div class="backend-row position-relative" style="height: 35px; margin-bottom: 5px;">`;
                     
                     track.forEach((session) => {
-                        const sessionStarted = new Date(session.started_at);
-                        const sessionEnded = session.ended_at ? new Date(session.ended_at) : null;
+                        // Parse session dates as UTC (add 'Z' if missing)
+                        const sessionStartedStr = session.started_at.endsWith('Z') ? session.started_at : session.started_at + 'Z';
+                        const sessionStarted = new Date(sessionStartedStr);
+                        const sessionEnded = session.ended_at ? new Date(session.ended_at.endsWith('Z') ? session.ended_at : session.ended_at + 'Z') : null;
                         
                         // Calculate session position relative to THIS stay's timeline
                         const sessionStartOffset = (sessionStarted - stayStarted) / 1000;
@@ -670,8 +680,8 @@ function refreshStaysTimeline(data) {
                                <tr><td><strong>Duration:</strong></td><td>${durationMinutes}m ${durationSeconds}s</td></tr>`
                             : `<tr><td><strong>Status:</strong></td><td><span class="badge bg-success">ACTIVE</span></td></tr>`
                         }
-                        <tr><td colspan="2" class="pt-2"><a href="/sessions/${session.session_id}" class="btn btn-sm btn-primary w-100">View Details</a></td></tr>
                     </table>
+                    <div class="text-center mt-2" style="font-size: 0.7rem; color: #999;">Click session bar to view details</div>
                 `;
                 
                 html += `
@@ -712,6 +722,15 @@ function refreshStaysTimeline(data) {
     
     html += '</div>'; // close unified-timeline-container
     
+    // CRITICAL: Destroy all existing popovers before replacing HTML to prevent memory leaks and conflicts
+    var oldPopovers = document.querySelectorAll('[data-bs-toggle="popover"]');
+    oldPopovers.forEach(function(el) {
+        var popover = bootstrap.Popover.getInstance(el);
+        if (popover) {
+            popover.dispose();
+        }
+    });
+    
     container.innerHTML = html;
     
     // Initialize Bootstrap popovers (not tooltips)
@@ -732,15 +751,34 @@ function refreshStaysTimeline(data) {
                 }
             });
         });
+        
+        // Add click handler to redirect to session details
+        popoverTriggerEl.addEventListener('click', function(e) {
+            var sessionId = popoverTriggerEl.getAttribute('data-session-id');
+            if (sessionId) {
+                window.location.href = '/sessions/' + sessionId;
+            }
+        });
     });
 }
 
 function formatTime(date) {
-    return date.toTimeString().substring(0, 5);
+    // Convert UTC date to Europe/Warsaw timezone and format as HH:MM
+    return new Intl.DateTimeFormat('pl-PL', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Europe/Warsaw'
+    }).format(date);
 }
 
 function formatTimeWithSeconds(date) {
-    return date.toTimeString().substring(0, 8);
+    // Convert UTC date to Europe/Warsaw timezone and format as HH:MM:SS
+    return new Intl.DateTimeFormat('pl-PL', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: 'Europe/Warsaw'
+    }).format(date);
 }
 
 // Initialize Bootstrap tooltips and popovers, and auto-refresh on page load
@@ -776,8 +814,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Start auto-refresh every 5 seconds
     setInterval(refreshDashboard, 5000);
     
-    // Initial refresh after 2 seconds
-    setTimeout(refreshDashboard, 2000);
+    // Initial refresh immediately to populate timeline
+    refreshDashboard();
     
     console.log('Dashboard auto-refresh initialized (every 5 seconds)');
 });

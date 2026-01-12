@@ -161,6 +161,14 @@ class Gate(Base):
     maintenance_reason = Column(Text)
     maintenance_grace_minutes = Column(Integer, default=15)
     
+    # Custom messages for SSH banners and error messages
+    msg_welcome_banner = Column(Text)  # Welcome message shown after successful auth
+    msg_no_backend = Column(Text)  # When backend server not found in registry
+    msg_no_person = Column(Text)  # When person/user not recognized
+    msg_no_grant = Column(Text)  # When no active grant/policy for access
+    msg_maintenance = Column(Text)  # When system is in maintenance mode
+    msg_time_window = Column(Text)  # When outside allowed time window
+    
     # Relationships
     session_recordings = relationship("SessionRecording", back_populates="gate")
     sessions = relationship("Session", back_populates="gate", foreign_keys="[Session.gate_id]")

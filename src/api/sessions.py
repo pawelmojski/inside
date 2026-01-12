@@ -24,7 +24,6 @@ def create_session():
     Request JSON:
         {
             "session_id": "uuid-string",
-            "stay_id": 123,                    # From /stays/start response
             "person_id": 6,
             "server_id": 1,
             "protocol": "ssh",
@@ -253,36 +252,34 @@ def update_session(session_id):
     
     # STAY LOGIC: If session ended, check if we should close Stay
     if data.get('is_active') == False or 'ended_at' in data:
-        # Session is ending - check if this is last active session for this person
+        # Session is ending - check if user has any other active sessions
         person_id = db_session.user_id
         
-        # Count remaining active sessions for this person (excluding current one)
+        # Count remaining active sessions for THIS USER (excluding current one)
         remaining_sessions = db.query(Session).filter(
             Session.user_id == person_id,
             Session.is_active == True,
             Session.id != db_session.id
         ).count()
         
-        logger.info(f"Session {session_id} ending for person ID {person_id} - {remaining_sessions} other active sessions remain")
+        logger.info(f"Session {session_id} ending for user {person_id} - {remaining_sessions} other sessions remain")
         
         if remaining_sessions == 0:
-            # This is the last session - close Stay
-            active_stay = db.query(Stay).filter(
-                Stay.user_id == person_id,
-                Stay.is_active == True
-            ).first()
-            
-            if active_stay:
-                active_stay.is_active = False
-                active_stay.ended_at = db_session.ended_at or datetime.utcnow()
-                if active_stay.started_at:
-                    active_stay.duration_seconds = int((active_stay.ended_at - active_stay.started_at).total_seconds())
-                active_stay.termination_reason = data.get('termination_reason', 'last_session_ended')
+            # This is the last session for this user - close their Stay
+            if db_session.stay_id:
+                stay = db.query(Stay).get(db_session.stay_id)
                 
-                logger.info(f"Closed Stay #{active_stay.id} for person ID {person_id} (last session ended, duration: {active_stay.duration_seconds}s)")
-                updated_fields.append('stay_closed')
+                if stay and stay.is_active:
+                    stay.is_active = False
+                    stay.ended_at = db_session.ended_at or datetime.utcnow()
+                    if stay.started_at:
+                        stay.duration_seconds = int((stay.ended_at - stay.started_at).total_seconds())
+                    stay.termination_reason = data.get('termination_reason', 'last_session_ended')
+                    
+                    logger.info(f"Closed Stay #{stay.id} (user's last session ended, duration: {stay.duration_seconds}s)")
+                    updated_fields.append('stay_closed')
             else:
-                logger.warning(f"Person ID {person_id} has no active Stay despite session ending")
+                logger.warning(f"Session {session_id} ending but has no stay_id (user {person_id} has no other sessions)")
     
     db.commit()
     db.refresh(db_session)

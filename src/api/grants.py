@@ -7,11 +7,32 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 from sqlalchemy import and_, or_
 import pytz
+import logging
 from src.api.auth import require_gate_auth, get_current_gate, get_db_session
 from src.core.database import (
     AccessPolicy, User, Server, ServerGroup, UserSourceIP,
     PolicySchedule, UserGroup, UserGroupMember, ServerGroupMember
 )
+
+logger = logging.getLogger(__name__)
+
+# Polish characters transliteration map for ASCII-only terminals
+POLISH_TRANSLITERATION = {
+    'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n', 'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+    'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N', 'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z'
+}
+
+def transliterate_polish(text: str) -> str:
+    """Convert Polish diacritical characters to ASCII equivalents.
+    
+    For terminals that don't support UTF-8, converts characters like:
+    Paweł Mojski -> Pawel Mojski
+    """
+    if not text:
+        return text
+    for pl_char, ascii_char in POLISH_TRANSLITERATION.items():
+        text = text.replace(pl_char, ascii_char)
+    return text
 
 grants_bp = Blueprint('grants', __name__, url_prefix='/api/v1')
 
@@ -179,7 +200,8 @@ def check_grant():
         if user:
             denial_response['person_id'] = user.id
             denial_response['person_username'] = user.username
-            denial_response['person_fullname'] = user.fullname
+            # Transliterate Polish characters for ASCII-only terminals
+            denial_response['person_fullname'] = transliterate_polish(user.full_name)
         
         # Include server info if server was found
         server = result.get('server')

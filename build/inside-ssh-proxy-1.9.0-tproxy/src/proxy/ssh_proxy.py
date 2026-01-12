@@ -40,6 +40,73 @@ logging.basicConfig(
 )
 logger = logging.getLogger('ssh_proxy')
 
+# Global variable for custom messages from Tower API
+GATE_MESSAGES = {
+    'welcome_banner': None,
+    'no_backend': None,
+    'no_person': None,
+    'no_grant': None,
+    'maintenance': None,
+    'time_window': None
+}
+
+
+def load_messages():
+    """Load custom messages from Tower API on startup"""
+    global GATE_MESSAGES
+    logger.info("Loading custom messages from Tower API")
+    try:
+        tower_client = TowerClient(GateConfig())
+        messages = tower_client.get_messages()
+        GATE_MESSAGES.update(messages)
+        logger.info(f"Custom messages loaded successfully ({len([m for m in messages.values() if m])} configured)")
+    except Exception as e:
+        logger.error(f"Failed to load custom messages from Tower: {e}")
+        # Use defaults - will be set when needed
+
+
+def format_denial_message(result: dict, username: str, dest_ip: str, tower_client) -> str:
+    """Format denial message based on denial_reason and custom messages from Tower.
+    
+    Args:
+        result: Result dict from Tower API check_grant
+        username: SSH username attempted
+        dest_ip: Destination IP
+        tower_client: Tower API client (for gate_name)
+    
+    Returns:
+        Formatted message with replaced placeholders
+    """
+    denial_reason = result.get('denial_reason', 'access_denied')
+    
+    # Use person_fullname if available, fallback to person_username, then username parameter
+    person = result.get('person_fullname') or result.get('person_username') or username
+    backend = result.get('server_name') or result.get('server_ip') or dest_ip
+    
+    # Select appropriate message based on denial reason
+    if denial_reason in ['gate_maintenance', 'backend_maintenance', 'maintenance_grace_period']:
+        msg_template = GATE_MESSAGES.get('maintenance')
+    elif denial_reason in ['unknown_source_ip', 'user_inactive']:
+        msg_template = GATE_MESSAGES.get('no_person')
+    elif denial_reason == 'server_not_found':
+        msg_template = GATE_MESSAGES.get('no_backend')
+    elif denial_reason == 'outside_schedule':
+        msg_template = GATE_MESSAGES.get('time_window')
+    else:  # no_matching_policy, ssh_login_not_allowed, etc.
+        msg_template = GATE_MESSAGES.get('no_grant')
+    
+    # Fallback if message not configured
+    if not msg_template:
+        msg_template = f"Access denied: {{reason}}"
+    
+    # Replace placeholders
+    msg = msg_template.replace('{person}', person)
+    msg = msg.replace('{backend}', backend)
+    msg = msg.replace('{gate_name}', getattr(tower_client.config, 'gate_name', 'Gate'))
+    msg = msg.replace('{reason}', result.get('reason', 'Access denied'))
+    
+    return msg
+
 
 class SSHSessionRecorder:
     """Records SSH session I/O and streams to Tower API in JSONL format.
@@ -310,7 +377,31 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.client_key = None
         self.agent_channel = None  # For agent forwarding
         self.no_grant_reason = None  # Reason for no grant (for banner message)
+        self.attempted_username = None  # Username from first auth attempt (for banner)
         self.is_tproxy = False  # Will be set to True by handle_client if TPROXY connection
+        
+        # EARLY grant check - BEFORE get_banner() is called
+        # Check if source IP has ANY access to this destination
+        # This allows us to show banner early if IP has no access at all
+        logger.info(f"SSHProxyHandler init: early check for {source_ip} -> {dest_ip}")
+        try:
+            # Call Tower API for access check (without ssh_login for early check)
+            result = self.tower_client.check_grant(
+                source_ip=self.source_ip,
+                destination_ip=self.dest_ip,
+                protocol='ssh',
+                ssh_login=None  # Early check without specific username
+            )
+            
+            if not result.get('allowed'):
+                logger.warning(f"No grant for IP {self.source_ip} to {self.dest_ip}: {result.get('reason')}")
+                # Format denial message for banner
+                self.no_grant_reason = format_denial_message(result, "user", self.dest_ip, self.tower_client)
+            else:
+                logger.info(f"Grant found for {self.source_ip}, proceeding with auth")
+                
+        except Exception as e:
+            logger.error(f"Error in early grant check: {e}", exc_info=True)
         
         # PTY parameters from client
         self.pty_term = None
@@ -329,15 +420,45 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.forward_destinations = {}  # chanid -> (host, port)
         
     def check_auth_none(self, username: str):
-        """Check 'none' authentication - called first before any real auth
+        """Check 'none' authentication - called AFTER get_banner
+        
+        NOTE: Paramiko calls get_banner() FIRST, then check_auth_none()!
+        If no_grant_reason was set by early check (without username), 
+        we re-check here with username to get proper person info.
         
         Return AUTH_FAILED to proceed with other auth methods.
-        Return AUTH_SUCCESSFUL only if auth should succeed without password.
         """
         logger.info(f"check_auth_none called for {username} from {self.source_ip}")
         
-        # Always return AUTH_FAILED to proceed with real auth methods
-        # Grant will be checked in check_auth_password/publickey/interactive
+        # Save username
+        self.attempted_username = username
+        
+        # If no_grant_reason already set from early check, or if not yet checked,
+        # do grant check now with username for proper person info
+        if not self.grant_checked:
+            try:
+                result = self.tower_client.check_grant(
+                    source_ip=self.source_ip,
+                    destination_ip=self.dest_ip,
+                    protocol='ssh',
+                    ssh_login=username
+                )
+                
+                # Cache result regardless of outcome to avoid redundant API calls
+                self.grant_checked = True
+                self.grant_result = result
+                
+                if not result.get('allowed'):
+                    # NO GRANT - format denial message with username
+                    logger.warning(f"Access denied in check_auth_none: {result.get('reason')}")
+                    self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
+                else:
+                    # Grant OK - clear any early denial
+                    self.no_grant_reason = None  # Clear early denial if now granted
+            except Exception as e:
+                logger.error(f"Failed to check grant in check_auth_none: {e}")
+                self.no_grant_reason = f"Hello, I'm Gate, an entry point of Inside.\nInternal error occurred. Please contact your system administrator."
+        
         return paramiko.AUTH_FAILED
         
     def check_auth_password(self, username: str, password: str):
@@ -361,8 +482,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
             # Denied sessions are logged via Tower API audit trail (check_grant call)
             
-            # Store reason for banner
-            self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
+            # Format denial message using custom messages from Tower
+            self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
             return paramiko.AUTH_FAILED
         
         # All checks passed - store result data
@@ -410,8 +531,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
-            # Store reason for banner
-            self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
+            # Format denial message using custom messages from Tower
+            self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
             return paramiko.AUTH_FAILED
         
         # Accept pubkey - backend will verify agent forwarding works
@@ -466,7 +587,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
-            self.no_grant_reason = result.get('reason', 'No active grant found for your IP address')
+            # Format denial message using custom messages from Tower
+            self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
             return paramiko.AUTH_FAILED
         
         # Quick test: Try to detect if backend is a switch (accepts auth_none)
@@ -550,48 +672,46 @@ class SSHProxyHandler(paramiko.ServerInterface):
     def get_allowed_auths(self, username):
         """Return allowed authentication methods
         
-        This is called AFTER check_auth_none. If check_auth_none already
-        determined there's no grant, we return ONLY "publickey" (which will fail)
-        to prevent password prompt from appearing.
+        Called after check_auth_none() and before get_banner().
+        Grant check is already done in check_auth_none().
         
         We support:
         - publickey: Standard SSH key authentication
         - password: Standard password authentication
         - keyboard-interactive: For switches and devices with custom prompts
         """
+        logger.info(f"get_allowed_auths called for {username} from {self.source_ip} to {self.dest_ip}")
+        
+        # If denied (check_auth_none already set no_grant_reason), return only publickey
+        # Client will see banner and stop without password prompt
         if self.no_grant_reason:
-            logger.info(f"get_allowed_auths: no grant detected, returning 'publickey' only (will fail)")
+            logger.info(f"get_allowed_auths: no grant detected, returning only publickey")
             return "publickey"
         
-        logger.info(f"get_allowed_auths: grant OK, allowing publickey,password,keyboard-interactive")
+        # Grant OK - return all methods
+        logger.info(f"get_allowed_auths: grant OK, returning publickey,password,keyboard-interactive")
         return "publickey,password,keyboard-interactive"
     
     def get_banner(self):
         """Return SSH banner message
         
         If user has no grant, return a polite rejection message.
+        Uses custom messages from Tower API (already prepared in check_auth).
         Must return tuple (banner, language) - default is (None, None).
+        
+        Note: Paramiko expects str (Python 3 unicode string) and will encode it as UTF-8.
         """
         logger.info(f"get_banner called, no_grant_reason={self.no_grant_reason}")
         if self.no_grant_reason:
-            banner = (
-                f"\r\n"
-                f"+====================================================================+\r\n"
-                f"|                          ACCESS DENIED                             |\r\n"
-                f"+====================================================================+\r\n"
-                f"\r\n"
-                f"  Dear user,\r\n"
-                f"\r\n"
-                f"  There is no active access grant for your IP address:\r\n"
-                f"    {self.source_ip}\r\n"
-                f"\r\n"
-                f"  Reason: {self.no_grant_reason}\r\n"
-                f"\r\n"
-                f"  Please contact your administrator to request access.\r\n"
-                f"\r\n"
-                f"  Have a nice day!\r\n"
-                f"\r\n"
-            )
+            # no_grant_reason already contains formatted message with replaced placeholders
+            # Ensure it's a proper unicode string (Python 3 str)
+            banner = f"\r\n{self.no_grant_reason}\r\n\r\n"
+            
+            # Ensure the string is properly encoded/decoded as UTF-8
+            # In case there are any encoding issues from the API
+            if isinstance(banner, bytes):
+                banner = banner.decode('utf-8')
+            
             logger.info(f"get_banner returning banner message ({len(banner)} chars)")
             return (banner, "en-US")
         
@@ -1844,9 +1964,17 @@ class SSHProxyServer:
             channel = transport.accept(20)
             if channel is None:
                 logger.warning(f"No channel opened from {source_ip}")
-                # If no_grant_reason is set, banner was already shown
+                # If no_grant_reason is set, send disconnect message with reason
                 if server_handler.no_grant_reason:
                     logger.info(f"Connection rejected due to no grant: {server_handler.no_grant_reason}")
+                    # Send disconnect message to client (will be visible in SSH output)
+                    try:
+                        transport.send_disconnect(
+                            code=paramiko.AUTH_FAILED,
+                            message=server_handler.no_grant_reason
+                        )
+                    except:
+                        pass  # Transport might already be closed
                 return
             
             # Get authenticated user and target server
@@ -1874,8 +2002,19 @@ class SSHProxyServer:
                 
                 # If client used pubkey, REQUIRE agent forwarding
                 if server_handler.client_key:
+                    # Wait up to 1 second for agent channel (race condition: sometimes client sends
+                    # session request before agent forwarding request)
                     if not server_handler.agent_channel:
-                        # No agent forwarding - show hint
+                        logger.debug("Waiting for agent channel (race condition mitigation)...")
+                        import time
+                        for i in range(10):  # 10 x 100ms = 1 second max
+                            time.sleep(0.1)
+                            if server_handler.agent_channel:
+                                logger.debug(f"Agent channel arrived after {(i+1)*100}ms")
+                                break
+                    
+                    if not server_handler.agent_channel:
+                        # No agent forwarding after timeout - show hint
                         logger.info("Pubkey but no agent forwarding")
                         channel.send(f"ERROR: Public key authentication requires agent forwarding.\r\n".encode())
                         channel.send(f"Try: ssh -A {server_handler.ssh_login}@{server_handler.dest_ip}\r\n".encode())
@@ -2071,21 +2210,8 @@ class SSHProxyServer:
             client_version = transport.remote_version if hasattr(transport, 'remote_version') else None
             protocol_version = client_version.decode('utf-8') if isinstance(client_version, bytes) else str(client_version) if client_version else None
             
-            # Start stay via Tower API
-            try:
-                stay_response = server_handler.tower_client.start_stay(
-                    username=user.username,
-                    server=target_server.ip_address,
-                    grant_id=grant_id,
-                    source_ip=source_ip
-                )
-                stay_id = stay_response.get('stay_id')
-                logger.info(f"Stay {stay_id} started via Tower API")
-            except Exception as e:
-                logger.error(f"Failed to start stay via Tower API: {e}")
-                stay_id = None
-            
             # Create session record via Tower API
+            # Tower API will automatically create or reuse Stay based on user's active sessions
             try:
                 subsystem = server_handler.subsystem_name
                 if subsystem and isinstance(subsystem, bytes):
@@ -2093,7 +2219,6 @@ class SSHProxyServer:
                 
                 session_response = server_handler.tower_client.create_session(
                     session_id=session_id,
-                    stay_id=stay_id,
                     person_id=user.id,
                     server_id=target_server.id,
                     protocol='ssh',
@@ -2594,6 +2719,9 @@ def main():
     
     # Clean up stale sessions from previous runs
     cleanup_stale_sessions()
+    
+    # Load custom messages from Tower
+    load_messages()
     
     # Start proxy server
     proxy = SSHProxyServer(nat_config=nat_config, tproxy_config=tproxy_config, host_key_path=host_key_path)

@@ -89,6 +89,31 @@ def start_stay():
             'message': f'Grant #{grant_id} not found'
         }), 404
     
+    # Check if there's already an active Stay for this user+server+gate
+    existing_stay = db.query(Stay).filter(
+        Stay.user_id == person.id,
+        Stay.server_id == server.id,
+        Stay.gate_id == gate.id,
+        Stay.is_active == True,
+        Stay.ended_at == None
+    ).first()
+    
+    if existing_stay:
+        # Return existing active Stay
+        return jsonify({
+            'stay_id': existing_stay.id,
+            'person_id': person.id,
+            'person_username': person.username,
+            'server_id': server.id,
+            'server_name': server.name,
+            'grant_id': grant_id,
+            'gate_id': gate.id,
+            'gate_name': gate.name,
+            'started_at': existing_stay.started_at.isoformat(),
+            'is_active': True,
+            'source_ip': source_ip
+        }), 200  # 200 OK for existing
+    
     # Create Stay
     now = datetime.utcnow()
     stay = Stay(
