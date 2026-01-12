@@ -480,7 +480,8 @@ def revoke(policy_id):
         db.rollback()
         flash(f'Error revoking policy: {str(e)}', 'danger')
     
-    return redirect(url_for('policies.index'))
+    # Redirect back to referer if available, otherwise to policies list
+    return redirect(request.referrer or url_for('policies.index'))
 
 @policies_bp.route('/renew/<int:policy_id>', methods=['POST'])
 @login_required

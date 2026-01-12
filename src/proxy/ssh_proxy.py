@@ -1720,15 +1720,39 @@ class SSHProxyServer:
         """Monitor grant expiry and send warnings, then disconnect when grant expires.
         
         Also checks for forced disconnection times injected by heartbeat.
+        For permanent grants (grant_end_time=None), only monitors for forced disconnection.
         """
         try:
             # Check if there's a forced disconnection time (from heartbeat)
             if session_id in self.session_forced_endtimes:
                 forced_end = self.session_forced_endtimes[session_id]
                 # Use the earlier time between grant expiry and forced disconnect
-                if forced_end < grant_end_time:
-                    logger.info(f"Session {session_id}: Using forced disconnect time {forced_end} instead of grant expiry {grant_end_time}")
+                if grant_end_time is None or forced_end < grant_end_time:
+                    logger.info(f"Session {session_id}: Using forced disconnect time {forced_end}")
                     grant_end_time = forced_end
+            
+            # Permanent grant - only check for forced disconnection every 30 seconds
+            if grant_end_time is None:
+                logger.debug(f"Session {session_id}: Permanent grant, monitoring for revocation only")
+                while True:
+                    time.sleep(30)
+                    # Check if session is still active
+                    if not transport.is_active() or not backend_transport.is_active():
+                        logger.info(f"Session {session_id}: Disconnected normally")
+                        return
+                    
+                    # Check if forced disconnect was injected (grant revoked)
+                    if session_id in self.session_forced_endtimes:
+                        forced_end = self.session_forced_endtimes[session_id]
+                        now = datetime.utcnow()
+                        if forced_end <= now:
+                            logger.info(f"Session {session_id}: Grant revoked, terminating immediately")
+                            grant_end_time = forced_end
+                            break
+                        else:
+                            grant_end_time = forced_end
+                            logger.info(f"Session {session_id}: Grant revoked, will disconnect at {forced_end}")
+                            break
             
             now = datetime.utcnow()
             remaining = (grant_end_time - now).total_seconds()
@@ -2326,10 +2350,11 @@ class SSHProxyServer:
                     if end_times:
                         grant_end_time = min(end_times)
                 
+                # Send welcome message - even for permanent grants (grant_end_time=None)
                 if grant_end_time:
                     logger.info(f"Session {session_id}: Grant expires at {grant_end_time}")
                     
-                    # Send welcome message
+                    # Send welcome message with expiry time
                     now = datetime.utcnow()
                     remaining = grant_end_time - now
                     remaining_seconds = remaining.total_seconds()
@@ -2371,16 +2396,33 @@ class SSHProxyServer:
                         logger.info(f"Session {session_id}: Sent grant expiry welcome message")
                     except Exception as e:
                         logger.error(f"Session {session_id}: Failed to send welcome message: {e}")
-                    
-                    # Start grant expiry monitor thread
-                    monitor_thread = threading.Thread(
-                        target=self.monitor_grant_expiry,
-                        args=(channel, backend_channel, transport, backend_transport, 
-                              grant_end_time, db_session.id, session_id),
-                        daemon=True
+                else:
+                    # Permanent grant (no end_time)
+                    logger.info(f"Session {session_id}: Permanent grant (no expiration)")
+                    welcome_msg = (
+                        f"\r\n"
+                        f"{'='*70}\r\n"
+                        f"  Access Grant Information\r\n"
+                        f"  Your access has no expiration time (permanent grant)\r\n"
+                        f"  \r\n"
+                        f"  Note: The administrator can revoke access at any time.\r\n"
+                        f"{'='*70}\r\n\r\n"
                     )
-                    monitor_thread.start()
-                    logger.debug(f"Session {session_id}: Started grant expiry monitor thread")
+                    try:
+                        channel.send(welcome_msg.encode())
+                        logger.info(f"Session {session_id}: Sent permanent grant welcome message")
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send welcome message: {e}")
+                
+                # Always start grant monitor (to detect revocation for permanent grants)
+                monitor_thread = threading.Thread(
+                    target=self.monitor_grant_expiry,
+                    args=(channel, backend_channel, transport, backend_transport, 
+                          grant_end_time, db_session.id, session_id),
+                    daemon=True
+                )
+                monitor_thread.start()
+                logger.debug(f"Session {session_id}: Started grant monitor thread")
             
             # Forward traffic (with SFTP tracking if applicable)
             is_sftp = (server_handler.channel_type == 'subsystem' and 

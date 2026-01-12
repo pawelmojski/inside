@@ -177,20 +177,31 @@
                         </tr>
                         {% if session.policy %}
                         <tr>
-                            <th>Policy:</th>
+                            <th>GRANT:</th>
                             <td>
-                                <a href="{{ url_for('policies.edit', policy_id=session.policy.id) }}" 
-                                   class="policy-link text-decoration-none"
-                                   data-bs-toggle="popover" 
-                                   data-bs-trigger="hover focus"
-                                   data-bs-placement="right"
-                                   data-bs-html="true"
-                                   data-bs-policy-id="{{ session.policy.id }}"
-                                   data-bs-title="Policy #{{ session.policy.id }}"
-                                   data-bs-content="<div class='text-center'><div class='spinner-border spinner-border-sm'></div> Loading...</div>">
+                                <a href="{{ url_for('policies.edit', policy_id=session.policy.id) }}" class="text-decoration-none">
                                     <code>#{{ session.policy.id }}</code>
                                 </a>
-                                <span class="text-muted">{{ session.policy.description or 'No description' }}</span>
+                                <br>
+                                <small class="text-muted">
+                                    {% if session.policy.user %}
+                                        <strong>User:</strong> {{ session.policy.user.full_name or session.policy.user.username }}
+                                    {% elif session.policy.user_group %}
+                                        <strong>Group:</strong> {{ session.policy.user_group.name }}
+                                    {% endif %}
+                                    
+                                    {% if session.policy.end_time %}
+                                        | <strong>Valid until:</strong> {{ session.policy.end_time|localtime }}
+                                    {% else %}
+                                        | <strong>Valid:</strong> Permanent
+                                    {% endif %}
+                                </small>
+                                {% if session.is_active %}
+                                <button class="btn btn-danger btn-sm ms-2" onclick="revokeGrant({{ session.policy.id }})"
+                                        title="Revoke grant and terminate session">
+                                    <i class="bi bi-x-circle"></i> Revoke Grant
+                                </button>
+                                {% endif %}
                             </td>
                         </tr>
                         {% endif %}
@@ -1258,129 +1269,21 @@ document.addEventListener('DOMContentLoaded', function() {
         conversionPollInterval = setInterval(checkConversionStatus, 2000);
     }
     {% endif %}
-    
-    // Policy popover with summary and revoke button
-    // Policy popover with summary and revoke button
-    {% if session.policy %}
-    document.addEventListener('DOMContentLoaded', function() {
-        const policyLink = document.querySelector('.policy-link');
-        if (policyLink) {
-            const policyId = policyLink.dataset.bsPolicyId;
-            let policyDataLoaded = false;
-            let policyData = null;
-            
-            // Pre-fetch policy data
-            fetch(`/api/v1/policies/${policyId}`)
-                .then(response => response.json())
-                .then(policy => {
-                    policyData = policy;
-                    policyDataLoaded = true;
-                    
-                    // Update popover content
-                    const content = `
-                        <div class="policy-popover" style="min-width: 250px;">
-                            <div class="mb-2">
-                                <strong>${policy.description || 'No description'}</strong>
-                            </div>
-                            <div class="mb-1">
-                                <small class="text-muted">Person:</small><br>
-                                <strong>${policy.user_display || 'Any'}</strong>
-                            </div>
-                            <div class="mb-1">
-                                <small class="text-muted">Backend:</small><br>
-                                <strong>${policy.server_display || 'Any'}</strong>
-                            </div>
-                            <div class="mb-1">
-                                <small class="text-muted">SSH Login:</small><br>
-                                <strong>${policy.ssh_username || 'Any'}</strong>
-                            </div>
-                            <div class="mb-2">
-                                <small class="text-muted">Protocol:</small>
-                                <span class="badge bg-${policy.protocol === 'ssh' ? 'primary' : 'success'}">${policy.protocol.toUpperCase()}</span>
-                            </div>
-                            {% if session.is_active %}
-                            <div class="d-grid">
-                                <button class="btn btn-danger btn-sm" onclick="revokeSession('{{ session.session_id }}')">
-                                    <i class="bi bi-x-circle"></i> Revoke Session
-                                </button>
-                            </div>
-                            {% endif %}
-                        </div>
-                    `;
-                    
-                    // Set the content attribute
-                    policyLink.setAttribute('data-bs-content', content);
-                    
-                    // Re-initialize popover with new content
-                    const existingPopover = bootstrap.Popover.getInstance(policyLink);
-                    if (existingPopover) {
-                        existingPopover.dispose();
-                    }
-                    new bootstrap.Popover(policyLink, {
-                        sanitize: false,
-                        trigger: 'hover focus',
-                        html: true
-                    });
-                })
-                .catch(error => {
-                    console.error('Failed to load policy:', error);
-                    policyLink.setAttribute('data-bs-content', '<div class="text-danger">Failed to load</div>');
-                    const existingPopover = bootstrap.Popover.getInstance(policyLink);
-                    if (existingPopover) {
-                        existingPopover.dispose();
-                    }
-                    new bootstrap.Popover(policyLink, {
-                        sanitize: false,
-                        trigger: 'hover focus',
-                        html: true
-                    });
-                });
-            
-            // Initialize popover with loading message initially
-            new bootstrap.Popover(policyLink, {
-                sanitize: false,
-                trigger: 'hover focus',
-                html: true
-            });
-        }
-    });
-    
-    // Revoke session function
-    function revokeSession(sessionId) {
-        if (!confirm('Are you sure you want to immediately terminate this session?')) {
-            return;
-        }
-        
-        // Hide popover
-        const policyLink = document.querySelector('.policy-link');
-        if (policyLink) {
-            const popover = bootstrap.Popover.getInstance(policyLink);
-            if (popover) {
-                popover.hide();
-            }
-        }
-        
-        fetch(`/sessions/${sessionId}/revoke`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert('Session terminated successfully');
-                location.reload();
-            } else {
-                alert('Failed to terminate session: ' + (data.error || 'Unknown error'));
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error);
-        });
-    }
-    {% endif %}
 });
+
+// Revoke grant function (global scope for onclick)
+function revokeGrant(policyId) {
+    if (!confirm('Are you sure you want to revoke the grant? This will immediately terminate all active sessions using this grant.')) {
+        return;
+    }
+    
+    // Create a form and submit it (the endpoint expects form POST, not JSON)
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = `/policies/revoke/${policyId}`;
+    document.body.appendChild(form);
+    form.submit();
+}
 </script>
 
 <style>
