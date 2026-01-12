@@ -309,6 +309,26 @@
 - May require dedicated networking engineer
 - Alternative: Keep current behavior, improve error messages
 
+**Related Issue - Backend Validation During Authentication**:
+- ⚠️ **Current problem**: User authenticates with SSH key/password, jumphost accepts it, THEN tries to connect to backend
+- If backend is down/unreachable → user sees "Authentication succeeded" but connection hangs/fails
+- Bad UX: User authenticated but gets stuck at "Opening channel" or similar
+- **Proposed solution** (easier than TCP proxy):
+  1. Add backend connectivity check DURING authentication (between auth_publickey and channel_open)
+  2. Quick TCP connect test to backend:port with short timeout (2-5 seconds)
+  3. If backend unreachable → fail authentication with clear message: "Backend server unreachable"
+  4. If backend responds → proceed with normal authentication flow
+- **Benefits**:
+  - User gets immediate feedback if backend is down
+  - No "authenticated but hanging" state
+  - Can be implemented in pure Python (SSH server auth hook)
+  - Much simpler than TCP handshake proxy
+- **Implementation**: 
+  - Hook in `check_auth_publickey()` / `check_auth_password()` after policy check
+  - Use `socket.connect_ex()` with timeout to backend IP:port
+  - Return `paramiko.AUTH_FAILED` with custom banner if unreachable
+- **Priority**: Medium (improves UX significantly with low complexity)
+
 ### v1.9 - Distributed Architecture & JSONL Streaming (Q1 2026) 🔄 IN PROGRESS
 
 **Status**: 90% complete - JSONL recording format migration in progress
