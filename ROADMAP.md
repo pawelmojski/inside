@@ -204,6 +204,47 @@
 - Keep: Basic warning flags per session
 - Simplify: Monitor thread to just periodic check + react pattern
 
+### v1.12 - Auto-Registration & Auto-Grant Groups 🎯 FUTURE
+
+**Concept**: Special user groups for automatic backend management
+
+**Feature 1: Auto Register Backend Group**
+- Users in "Auto Register Backend" group can automatically register new servers
+- When user connects to unknown backend (IP/hostname):
+  - System automatically creates Server entry in database
+  - No manual admin intervention required
+  - Server details extracted from connection (IP, protocol, port)
+  - Optional: Prompt user for server name/description
+- Use cases:
+  - Dev environments with dynamic servers
+  - Cloud environments with auto-scaling
+  - Trusted power users who manage their own infrastructure
+
+**Feature 2: Auto Grant Backend Group**
+- Users in "Auto Grant Backend" group automatically receive grants to new backends
+- When new Server is registered in system:
+  - Automatically create AccessPolicy for users in this group
+  - Grant with configurable defaults (duration, schedules, permissions)
+  - Optional: Per-group grant templates (dev group → 8h grants, ops group → permanent)
+- Use cases:
+  - Ops team needs access to all infrastructure
+  - Dev team needs access to all dev servers
+  - Reduce admin workload for grant creation
+
+**Implementation Notes**:
+- Group model: Add `auto_register_backends` and `auto_grant_backends` boolean flags
+- Registration hook: In `check_access()` before denial, check group membership
+- Grant hook: In Server creation, query groups with auto_grant flag
+- Audit: Log auto-registrations and auto-grants for security tracking
+- Limits: Optional max backends per user, rate limiting
+- UI: Checkboxes in group edit form for these special permissions
+
+**Security Considerations**:
+- Auto-registration could be abused (DOS with fake servers)
+- Consider approval workflow or notification to admins
+- Auto-grants should respect existing schedules and restrictions
+- Audit trail essential for compliance
+
 ### v1.9 - Distributed Architecture & JSONL Streaming (Q1 2026) 🔄 IN PROGRESS
 
 **Status**: 90% complete - JSONL recording format migration in progress
