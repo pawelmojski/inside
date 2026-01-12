@@ -163,7 +163,7 @@ class SSHSessionRecorder:
             )
             self.recording_path = response.get('recording_path')
             self.recording_file = self.recording_path  # For compatibility
-            logger.info(f"Recording streaming to Tower: {self.recording_path}")
+            logger.debug(f"Recording streaming to Tower: {self.recording_path}")
             
         except Exception as e:
             logger.warning(f"Tower unavailable for recording start: {e}. Using offline mode.")
@@ -398,7 +398,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
                 # Format denial message for banner
                 self.no_grant_reason = format_denial_message(result, "user", self.dest_ip, self.tower_client)
             else:
-                logger.info(f"Grant found for {self.source_ip}, proceeding with auth")
+                logger.debug(f"Grant found for {self.source_ip}, proceeding with auth")
                 
         except Exception as e:
             logger.error(f"Error in early grant check: {e}", exc_info=True)
@@ -428,7 +428,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         Return AUTH_FAILED to proceed with other auth methods.
         """
-        logger.info(f"check_auth_none called for {username} from {self.source_ip}")
+        logger.debug(f"check_auth_none called for {username} from {self.source_ip}")
         
         # Save username
         self.attempted_username = username
@@ -514,7 +514,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         3. If backend accepts key → AUTH_SUCCESSFUL
         4. If backend rejects key → AUTH_FAILED (client will try password)
         """
-        logger.info(f"Pubkey auth attempt: {username} from {self.source_ip} to {self.dest_ip}, key type: {key.get_name()}")
+        logger.debug(f"Pubkey auth attempt: {username} from {self.source_ip} to {self.dest_ip}, key type: {key.get_name()}")
         
         # Check access permissions using Tower API (cache result)
         if not self.grant_checked:
@@ -537,7 +537,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         # Accept pubkey - backend will verify agent forwarding works
         # If agent fails, we'll disconnect properly for password retry
-        logger.info(f"Pubkey accepted - will verify agent forwarding in backend")
+        logger.debug(f"Pubkey accepted - will verify agent forwarding in backend")
         
         # Store authentication info from API response
         self.target_server = type('Server', (), {
@@ -701,7 +701,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         Note: Paramiko expects str (Python 3 unicode string) and will encode it as UTF-8.
         """
-        logger.info(f"get_banner called, no_grant_reason={self.no_grant_reason}")
+        logger.debug(f"get_banner called, no_grant_reason={'set' if self.no_grant_reason else 'None'}")
         if self.no_grant_reason:
             # no_grant_reason already contains formatted message with replaced placeholders
             # Ensure it's a proper unicode string (Python 3 str)
@@ -712,7 +712,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
             if isinstance(banner, bytes):
                 banner = banner.decode('utf-8')
             
-            logger.info(f"get_banner returning banner message ({len(banner)} chars)")
+            logger.debug(f"get_banner returning banner message ({len(banner)} chars)")
             return (banner, "en-US")
         
         # No banner - return default as per paramiko docs
@@ -720,7 +720,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
     
     def check_channel_request(self, kind: str, chanid: int):
         """Allow session, direct-tcpip (port forwarding -L) and dynamic-tcpip (SOCKS -D) channel requests"""
-        logger.info(f"Channel request: kind={kind}, chanid={chanid}")
+        logger.debug(f"Channel request: kind={kind}, chanid={chanid}")
         if kind == 'session':
             return paramiko.OPEN_SUCCEEDED
         elif kind == 'direct-tcpip':
@@ -733,7 +733,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
     
     def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
         """Allow PTY requests and save parameters"""
-        logger.info(f"PTY request: term={term}, width={width}, height={height}")
+        logger.debug(f"PTY request: term={term}, width={width}, height={height}")
         # Save PTY parameters to use for backend connection
         self.pty_term = term
         self.pty_width = width
@@ -743,7 +743,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
     
     def check_channel_shell_request(self, channel):
         """Allow shell requests"""
-        logger.info("Shell request received")
+        logger.debug("Shell request received")
         self.channel_type = 'shell'
         return True
     
@@ -765,7 +765,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
     
     def check_channel_forward_agent_request(self, channel):
         """Allow agent forwarding and setup handler"""
-        logger.info("Client requested agent forwarding")
+        logger.debug("Client requested agent forwarding")
         # Store the channel for later use
         self.agent_channel = channel
         return True
@@ -975,7 +975,7 @@ class SSHProxyServer:
         This runs in a background thread while the main session is active.
         """
         try:
-            logger.info(f"Port forwarding handler started for {user.username}")
+            logger.debug(f"Port forwarding handler started for {user.username}")
             
             # Wait for transport to become fully active
             while not client_transport.is_active():
@@ -1733,7 +1733,7 @@ class SSHProxyServer:
             now = datetime.utcnow()
             remaining = (grant_end_time - now).total_seconds()
             
-            logger.info(f"Session {session_id}: Grant expires in {remaining/60:.1f} minutes ({grant_end_time})")
+            logger.debug(f"Session {session_id}: Grant expires in {remaining/60:.1f} minutes ({grant_end_time})")
             
             # Warning times (in seconds before expiry)
             warnings = [
@@ -1987,7 +1987,7 @@ class SSHProxyServer:
             target_server = server_handler.target_server
             
             # Connect to backend server via SSH
-            logger.info(f"Connecting to backend: {target_server.ip_address}:22")
+            logger.debug(f"Connecting to backend: {target_server.ip_address}:22")
             backend_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             backend_socket.connect((target_server.ip_address, 22))
             
@@ -2023,18 +2023,18 @@ class SSHProxyServer:
                         return
                     
                     # Try agent forwarding
-                    logger.info("Using forwarded agent for backend")
+                    logger.debug("Using forwarded agent for backend")
                     try:
                         from paramiko.agent import AgentServerProxy
                         agent = AgentServerProxy(transport)
                         agent.connect()
                         agent_keys = agent.get_keys()
-                        logger.info(f"Got {len(agent_keys)} keys from agent")
+                        logger.debug(f"Got {len(agent_keys)} keys from agent")
                         
                         for key in agent_keys:
                             try:
                                 backend_transport.auth_publickey(server_handler.ssh_login, key)
-                                logger.info(f"Backend auth with agent succeeded")
+                                logger.debug(f"Backend auth with agent succeeded")
                                 authenticated = True
                                 break
                             except Exception as e:
@@ -2130,7 +2130,7 @@ class SSHProxyServer:
                 daemon=True
             )
             forward_thread.start()
-            logger.info("Port forwarding handler started")
+            logger.debug("Port forwarding handler started")
             
             # For cascaded -R, accept channels from backend and forward to client
             if hasattr(server_handler, 'remote_forward_requests'):
@@ -2148,7 +2148,7 @@ class SSHProxyServer:
             
             # Setup PTY if client requested it (for interactive sessions)
             if server_handler.pty_term:
-                logger.info(f"Setting backend PTY: {server_handler.pty_term} {server_handler.pty_width}x{server_handler.pty_height}")
+                logger.debug(f"Setting backend PTY: {server_handler.pty_term} {server_handler.pty_width}x{server_handler.pty_height}")
                 # Decode term if it's bytes
                 term = server_handler.pty_term.decode('utf-8') if isinstance(server_handler.pty_term, bytes) else server_handler.pty_term
                 backend_channel.get_pty(
@@ -2291,7 +2291,7 @@ class SSHProxyServer:
                 subsys = server_handler.subsystem_name.decode('utf-8') if isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name
                 backend_display += f":{subsys}"
             write_utmp_login(session_id, user.username, tty_name, source_ip, backend_display)
-            logger.info(f"Session {session_id} registered in utmp as {tty_name}")
+            logger.debug(f"Session {session_id} registered in utmp as {tty_name}")
             
             # Register connection in active connections registry for heartbeat monitoring
             self.active_connections[session_id] = {
@@ -2303,7 +2303,7 @@ class SSHProxyServer:
                 'ssh_username': user.username,
                 'started_at': datetime.utcnow()
             }
-            logger.info(f"Session {session_id} registered in active connections")
+            logger.debug(f"Session {session_id} registered in active connections")
             
             # Check grant expiry for interactive shell sessions
             grant_end_time = None
@@ -2380,7 +2380,7 @@ class SSHProxyServer:
                         daemon=True
                     )
                     monitor_thread.start()
-                    logger.info(f"Session {session_id}: Started grant expiry monitor thread")
+                    logger.debug(f"Session {session_id}: Started grant expiry monitor thread")
             
             # Forward traffic (with SFTP tracking if applicable)
             is_sftp = (server_handler.channel_type == 'subsystem' and 
@@ -2488,7 +2488,10 @@ class SSHProxyServer:
                 # Gate always uses Tower API (no direct database access)
                 # Tower will track session counts from API calls
                 self.tower_client.heartbeat(active_stays=0, active_sessions=0)
-                logger.info(f"Heartbeat sent, checking {len(self.active_connections)} active sessions")
+                if len(self.active_connections) > 0:
+                    logger.info(f"Heartbeat sent, checking {len(self.active_connections)} active sessions")
+                else:
+                    logger.debug(f"Heartbeat sent, no active sessions")
                 
                 # Check for sessions that should be terminated
                 # 1. Grant expired/cancelled
@@ -2680,6 +2683,14 @@ def main():
     if config_file.exists():
         config.read(config_file)
         logger.info(f"Loaded configuration from {config_file}")
+        
+        # Configure logging level from config
+        if config.has_option('logging', 'level'):
+            log_level_str = config.get('logging', 'level').upper()
+            log_level = getattr(logging, log_level_str, logging.INFO)
+            logging.getLogger().setLevel(log_level)
+            logger.setLevel(log_level)
+            logger.info(f"Log level set to {log_level_str}")
         
         # Configure file logging if specified in config
         if config.has_option('logging', 'file'):
