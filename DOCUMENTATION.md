@@ -1315,6 +1315,81 @@ When modifying the codebase:
 - Frontend: sessions/view.html (video player, progress bar)
 - Systemd: jumphost-mp4-converter@.service (template unit)
 
+### v1.10.9 - Session Inactivity Timeout (January 22, 2026) 🎯
+**Focus**: Automatic disconnection of abandoned SSH sessions
+
+**Problem Solved**:
+- Idle SSH sessions kept Stay objects open indefinitely
+- Wasted resources (connections, memory, tracking)
+- Security risk (forgotten sessions)
+- Blocked Stay closure (last session should trigger Stay close)
+- Prevented MFA integration (Stay lifecycle tied to MFA)
+
+**Implementation**:
+- ✅ **Database**: `access_policies.inactivity_timeout_minutes` (INTEGER, default 60)
+- ✅ **Activity Tracking**: `SSHProxyServer.session_last_activity = {session_id: datetime}` dict
+- ✅ **Activity Detection**: `SSHSessionRecorder._write_event()` updates timestamp on EVERY event:
+  - Keystrokes (user typing commands)
+  - Command output (server responses)
+  - SFTP file transfers (upload/download)
+- ✅ **Monitor Thread**: `monitor_inactivity_timeout()` - separate daemon thread per session
+  - Check interval: 10 seconds (performance-friendly)
+  - Idle calculation: `(now - last_activity).total_seconds()`
+  - Parallel to `monitor_grant_expiry()` thread
+- ✅ **Warnings**: Wall-style messages at 5 minutes and 1 minute remaining
+  - Only for interactive shell sessions (not SFTP - no terminal)
+  - Yellow banner format: "WARNING: Inactivity detected - disconnect in X minutes"
+- ✅ **Disconnect Logic**:
+  - Close SSH channels (client ↔ backend)
+  - Update session: `is_active=False`, `termination_reason='inactivity_timeout'`
+  - Tower logic handles Stay closure if last session
+- ✅ **Welcome Banner**: Shows timeout setting at session start
+  - Time-limited grants: "Inactivity timeout: 60 minutes"
+  - Permanent grants: Same info (timeout still applies)
+- ✅ **Configuration**: Per-grant setting in Web GUI
+  - Default: 60 minutes
+  - Range: 0-1440 minutes (0 = disabled, max 24 hours)
+  - Form validation with helpful text
+
+**Technical Architecture**:
+```python
+# Flow:
+1. User connects → Welcome banner shows: "Inactivity timeout: 60 minutes"
+2. User types command → recorder._write_event() → session_last_activity[sid] = now()
+3. Server responds → recorder._write_event() → session_last_activity[sid] = now()
+4. Monitor thread (every 10s):
+   idle_time = now - session_last_activity[sid]
+   if idle_time >= 55min → Send 5-minute warning
+   if idle_time >= 59min → Send 1-minute warning
+   if idle_time >= 60min → Close session + update DB
+5. Tower API receives session close → checks if last session in Stay → closes Stay if yes
+```
+
+**API Changes**:
+- `/api/v1/grants/check` response now includes `inactivity_timeout_minutes` field
+
+**Files Modified**:
+- Database: `migrations/manual_add_inactivity_timeout.sql` (ALTER TABLE)
+- Model: `src/core/database.py` (AccessPolicy.inactivity_timeout_minutes)
+- API: `src/api/grants.py` (check_grant response field)
+- GUI: `src/web/templates/policies/add.html` (Session Settings section)
+- GUI: `src/web/templates/policies/edit.html` (Session Settings section)
+- Backend: `src/web/blueprints/policies.py` (create/edit validation)
+- Proxy: `src/proxy/ssh_proxy.py` (tracking dict, monitor thread, recorder integration, welcome banner)
+
+**Benefits**:
+- ✅ Closes abandoned sessions automatically (no more "wiszące sesje")
+- ✅ Frees Stay resources for proper lifecycle management
+- ✅ Better security (no forgotten sessions running for days)
+- ✅ Prepares for MFA integration (Stay close triggers MFA cleanup)
+- ✅ Configurable per-grant (flexible timeout policies)
+- ✅ Works for both shell and SFTP (both reset timer)
+
+**Deployment**:
+- Tower: Flask service restarted (API changes)
+- Gate: Standalone package rebuilt and deployed (tailscale-etop 10.210.0.76)
+- Testing: Default 60-minute timeout, 5min/1min warnings working
+
 ### v1.2-dev - RDP Session Viewer (January 2026)
 **Focus**: RDP session metadata and JSON event extraction
 
