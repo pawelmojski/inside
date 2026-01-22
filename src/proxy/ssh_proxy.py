@@ -911,8 +911,13 @@ class SSHProxyServer:
             logger.error(traceback.format_exc())
             return None
     
-    def forward_channel(self, client_channel, backend_channel, recorder: SSHSessionRecorder = None, db_session_id=None, is_sftp=False):
-        """Forward data between client and backend server via SSH channels"""
+    def forward_channel(self, client_channel, backend_channel, recorder: SSHSessionRecorder = None, db_session_id=None, is_sftp=False, session_id=None, server_name=None):
+        """Forward data between client and backend server via SSH channels
+        
+        Args:
+            session_id: Session identifier for terminal title clearing
+            server_name: Server name for terminal title
+        """
         bytes_sent = 0
         bytes_received = 0
         sftp_transfer_id = None
@@ -956,6 +961,14 @@ class SSHProxyServer:
             logger.debug(f"Channel forwarding ended: {e}")
         
         finally:
+            # Clear terminal title BEFORE closing channels (still writable)
+            if session_id and server_name:
+                try:
+                    self.clear_terminal_title(client_channel, server_name)
+                    logger.debug(f"Session {session_id}: Cleared terminal title on disconnect")
+                except:
+                    pass
+            
             # Update SFTP transfer stats
             if is_sftp and sftp_transfer_id:
                 try:
@@ -2903,17 +2916,14 @@ class SSHProxyServer:
             is_sftp = (server_handler.channel_type == 'subsystem' and 
                       server_handler.subsystem_name and 
                       (server_handler.subsystem_name.decode('utf-8') if isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name) == 'sftp')
-            self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp)
+            self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp, 
+                               session_id=session_id, server_name=target_server.name)
             
             # Calculate session duration
             started_at = datetime.utcnow() - timedelta(seconds=0)  # Will be calculated by Tower API
             ended_at = datetime.utcnow()
             
-            # Clear terminal title on normal disconnect (exit/logout)
-            try:
-                self.clear_terminal_title(channel, target_server.name)
-            except:
-                pass  # Channel might already be closed
+            # Note: Terminal title already cleared in forward_channel finally block
             
             # Update session via Tower API
             try:

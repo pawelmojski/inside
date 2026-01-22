@@ -1776,6 +1776,20 @@ class SSHProxyServer:
             # Silently ignore errors (channel might be closed, terminal might not support)
             pass
     
+    def clear_terminal_title(self, channel, server_name):
+        """Clear terminal title and show 'disconnected' status.
+        
+        Called when session ends (grant expiry, idle timeout, user logout, etc.)
+        """
+        try:
+            if len(server_name) > 20:
+                server_name = server_name[:17] + "..."
+            
+            title = f"Inside: {server_name} | disconnected"
+            channel.send(f"\033]2;{title}\007".encode())
+        except:
+            pass
+    
     def monitor_inactivity_timeout(self, channel, backend_channel, transport, backend_transport,
                                     inactivity_timeout_minutes, db_session_id, session_id, server_name="unknown"):
         """Monitor session inactivity and disconnect after configured timeout.
@@ -1865,6 +1879,9 @@ class SSHProxyServer:
                 # Check if timeout reached
                 if remaining_seconds <= 0:
                     logger.info(f"Session {session_id}: Inactivity timeout reached ({inactivity_timeout_minutes} min)")
+                    
+                    # Clear terminal title
+                    self.clear_terminal_title(channel, server_name)
                     
                     # Send disconnect message
                     try:
@@ -2265,6 +2282,9 @@ class SSHProxyServer:
                 
                 # Clean up forced endtime
                 del self.session_forced_endtimes[session_id]
+            
+            # Clear terminal title before disconnect
+            self.clear_terminal_title(channel, server_name)
             
             # Send final disconnection message
             final_message = (
@@ -2888,6 +2908,12 @@ class SSHProxyServer:
             # Calculate session duration
             started_at = datetime.utcnow() - timedelta(seconds=0)  # Will be calculated by Tower API
             ended_at = datetime.utcnow()
+            
+            # Clear terminal title on normal disconnect (exit/logout)
+            try:
+                self.clear_terminal_title(channel, target_server.name)
+            except:
+                pass  # Channel might already be closed
             
             # Update session via Tower API
             try:
