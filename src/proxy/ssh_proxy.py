@@ -869,6 +869,8 @@ class SSHProxyServer:
         self.session_grant_endtimes = {}
         # Last activity tracking for inactivity timeout: session_id -> datetime (UTC)
         self.session_last_activity = {}
+        # Session metadata for terminal title: session_id -> {grant_end_time, inactivity_timeout, server_name}
+        self.session_metadata = {}
         
     def _load_or_generate_host_key(self):
         """Load or generate SSH host key"""
@@ -1827,19 +1829,33 @@ class SSHProxyServer:
                 idle_seconds = (now - last_activity).total_seconds()
                 remaining_seconds = timeout_seconds - idle_seconds
                 
-                # Update terminal title periodically
-                # Frequency: 60s normally, 10s when idle >50 min (close to timeout)
+                # Update terminal title periodically (this monitor runs every 10s, so it's the main title updater)
+                # Frequency: 60s normally, 10s when idle >50 min OR grant <10 min
                 current_time = time.time()
                 idle_minutes = int(idle_seconds / 60)
-                update_interval = 10 if idle_minutes >= (inactivity_timeout_minutes - 10) else 60
+                
+                # Get grant info from metadata
+                grant_remaining_minutes = None
+                is_warning = False
+                metadata = self.session_metadata.get(session_id, {})
+                grant_end_time = metadata.get('grant_end_time')
+                if grant_end_time:
+                    grant_remaining = (grant_end_time - now).total_seconds()
+                    grant_remaining_minutes = int(grant_remaining / 60)
+                    if grant_remaining < 300:  # <5 min
+                        is_warning = True
+                
+                # Check if we should update title (faster when warning)
+                if remaining_seconds < 300:  # Idle timeout warning
+                    is_warning = True
+                
+                update_interval = 10 if (is_warning or idle_minutes >= (inactivity_timeout_minutes - 10)) else 60
                 
                 if current_time - last_title_update >= update_interval:
-                    is_warning = remaining_seconds < 300  # Warning if <5 min remaining
-                    
                     self.update_terminal_title(
                         channel=channel,
                         server_name=server_name,
-                        grant_remaining_minutes=None,  # Grant monitor handles grant countdown
+                        grant_remaining_minutes=grant_remaining_minutes,
                         idle_current_minutes=idle_minutes,
                         idle_max_minutes=inactivity_timeout_minutes,
                         is_warning=is_warning
@@ -1886,6 +1902,8 @@ class SSHProxyServer:
                     # Remove from tracking
                     if session_id in self.session_last_activity:
                         del self.session_last_activity[session_id]
+                    if session_id in self.session_metadata:
+                        del self.session_metadata[session_id]
                     
                     return
                 
@@ -1970,41 +1988,15 @@ class SSHProxyServer:
                             break
             
             # Main monitoring loop - restarts if grant is extended
-            last_title_update = 0  # Track last title update time
             while True:
                 now = datetime.utcnow()
                 remaining = (grant_end_time - now).total_seconds()
                 
                 logger.debug(f"Session {session_id}: Grant expires in {remaining/60:.1f} minutes ({grant_end_time})")
                 
-                # Update terminal title periodically
-                # Frequency: 60s normally, 10s when <10 min remaining
-                current_time = time.time()
-                update_interval = 10 if remaining < 600 else 60  # 10s if <10min, else 60s
-                
-                if current_time - last_title_update >= update_interval:
-                    grant_mins = int(remaining / 60)
-                    is_warning = remaining < 300  # Warning if <5 min
-                    
-                    # Get idle timeout info if available
-                    idle_current = None
-                    idle_max = None
-                    if session_id in self.session_last_activity:
-                        last_activity = self.session_last_activity[session_id]
-                        idle_seconds = (datetime.utcnow() - last_activity).total_seconds()
-                        idle_current = int(idle_seconds / 60)
-                        # Try to get idle_max from session metadata (we'll pass it later)
-                        # For now just skip idle info in grant monitor
-                    
-                    self.update_terminal_title(
-                        channel=channel,
-                        server_name=server_name,
-                        grant_remaining_minutes=grant_mins,
-                        idle_current_minutes=idle_current,
-                        idle_max_minutes=idle_max,
-                        is_warning=is_warning
-                    )
-                    last_title_update = current_time
+                # Store grant end time in metadata for inactivity monitor to use in title
+                if session_id in self.session_metadata:
+                    self.session_metadata[session_id]['grant_end_time'] = grant_end_time
                 
                 # Warning times (in seconds before expiry)
                 warnings = [
@@ -2858,6 +2850,13 @@ class SSHProxyServer:
                         logger.error(f"Session {session_id}: Failed to send welcome message: {e}")
                 
                 # Always start grant monitor (to detect revocation for permanent grants)
+                # Initialize session metadata for terminal title updates
+                self.session_metadata[session_id] = {
+                    'grant_end_time': grant_end_time,
+                    'inactivity_timeout': inactivity_timeout_minutes,
+                    'server_name': target_server.name
+                }
+                
                 monitor_thread = threading.Thread(
                     target=self.monitor_grant_expiry,
                     args=(channel, backend_channel, transport, backend_transport, 
