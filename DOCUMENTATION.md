@@ -726,15 +726,15 @@ policy.port_forwarding_allowed = True
   - [x] Welcome message showing grant validity
   - [x] Only for interactive shell sessions (not SCP/SFTP)
   - [x] Enhanced grant form (minutes, datetime pickers, UTC)
-- [ ] **Session Inactivity Timeout** 🎯 PLANNED (v1.10.9)
-  - [ ] Automatic disconnect after period of no data transmission
-  - [ ] Configurable per-grant (default 60 minutes, 0 = disabled)
-  - [ ] Reset on ANY activity: keystrokes, output, SFTP transfers
-  - [ ] Wall-style warnings (5 min, 1 min before timeout)
-  - [ ] Welcome message: "Inactivity timeout: X minutes"
-  - [ ] Termination reason: `inactivity_timeout`
-  - [ ] Database field: `access_policies.inactivity_timeout_minutes`
-  - [ ] Benefits: Closes abandoned sessions, frees Stay resources
+- [x] **Session Inactivity Timeout** 🎯 NEW (v1.10.9)
+  - [x] Automatic disconnect after period of no data transmission
+  - [x] Configurable per-grant (default 60 minutes, 0 = disabled)
+  - [x] Reset on ANY activity: keystrokes, output, SFTP transfers
+  - [x] Wall-style warnings (5 min, 1 min before timeout)
+  - [x] Welcome message: "Inactivity timeout: X minutes"
+  - [x] Termination reason: `inactivity_timeout`
+  - [x] Database field: `access_policies.inactivity_timeout_minutes`
+  - [x] Benefits: Closes abandoned sessions, frees Stay resources
 - [x] **Immediate Rejection for No Grant** 🎯 NEW (v1.5)
   - [x] Pre-auth grant checking in `check_auth_none()`
   - [x] Friendly ASCII banner showing denial reason

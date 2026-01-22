@@ -357,6 +357,9 @@ class AccessPolicy(Base):
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     end_time = Column(DateTime, nullable=True, index=True)  # NULL = permanent access
     
+    # Inactivity timeout (minutes) - NULL or 0 = disabled, default 60 minutes
+    inactivity_timeout_minutes = Column(Integer, nullable=True, default=60)
+    
     # Schedule-based access (recurring time windows)
     use_schedules = Column(Boolean, default=False, nullable=False)  # If True, check policy_schedules
     

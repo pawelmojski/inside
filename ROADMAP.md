@@ -1,23 +1,21 @@
 # Inside - Roadmap & TODO
 
-## Current Status: v1.10.9 (Session Inactivity Timeout) - January 2026 🔄 PLANNED
+## Current Status: v1.10.9 (Session Inactivity Timeout) - January 2026 ✅ COMPLETE
 
-**v1.10.9 Goals:**
-- 🎯 **Inactivity Timeout**: Automatic disconnect after period of no activity
-  - Problem: Idle sessions keep Stay open, waste resources, security risk
-  - Solution: Configurable per-grant timeout (default 60 minutes)
-  - Tracking: Reset counter on ANY data transmission (SSH commands, SFTP transfers, output)
+**v1.10.9 Completions:**
+- ✅ **Inactivity Timeout**: Automatic disconnect after period of no activity
+  - Database: Added `access_policies.inactivity_timeout_minutes` (default 60, NULL/0 = disabled)
+  - GUI: Field in grant creation/edit forms with validation
+  - API: Returns `inactivity_timeout_minutes` in `/api/v1/grants/check` response
+  - Tracking: `session_last_activity` dict updated on every data transmission
+  - Activity detection: Keystrokes, output, SFTP transfers all reset timer
+  - Monitor thread: Separate `monitor_inactivity_timeout()` per session
   - Warnings: 5 minutes and 1 minute before disconnect (shell only, not SFTP)
-  - Welcome banner: "Inactivity timeout: 60 minutes"
-  - Disconnect message: "Disconnected due to inactivity (60 minutes idle)"
-  - GUI: Field in grant creation form, 0 = disabled
-  - Implementation: 
-    * Database: `access_policies.inactivity_timeout_minutes` (default 60)
-    * Tracking: `session_last_activity` dict updated in `recorder.record_event()`
-    * Monitor: Separate thread `monitor_inactivity_timeout()` parallel to grant expiry
-    * Reset: Every keystroke, output, SFTP event resets timer
-    * Termination reason: `inactivity_timeout`
-  - Benefits: Closes abandoned sessions, frees Stay, better resource management
+  - Welcome banner: "Inactivity timeout: X minutes"
+  - Disconnect message: "Disconnected due to inactivity (X minutes idle)"
+  - Termination reason: `inactivity_timeout` for proper session tracking
+  - Benefits: Closes abandoned sessions, frees Stay resources, better security
+  - Deployment: Tower (Flask) and Gate (tailscale-etop) both updated
 
 ## Previous Status: v1.10.8 (Real-Time Grant Time Management) - January 2026 ✅ COMPLETE
 
