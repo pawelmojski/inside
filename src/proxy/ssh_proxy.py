@@ -2536,7 +2536,7 @@ class SSHProxyServer:
                     server_ip=target_server.ip_address,
                     server_name=target_server.name,
                     tower_client=server_handler.tower_client,
-                    server_instance=server_handler.transport.server
+                    server_instance=transport.server
                 )
                 recorder.record_event('session_start', f"User {user.username} connecting to {target_server.ip_address}")
             
