@@ -185,7 +185,21 @@
                     
                     <hr class="my-4">
                     
-                    <h5 class="mb-3">6. Recurring Schedule (Optional)</h5>
+                    <h5 class="mb-3">6. Session Settings</h5>
+                    
+                    <div class="mb-3">
+                        <label for="inactivity_timeout_minutes" class="form-label">Inactivity Timeout (minutes)</label>
+                        <input type="number" class="form-control" id="inactivity_timeout_minutes" 
+                               name="inactivity_timeout_minutes" value="60" min="0" max="1440">
+                        <small class="form-text text-muted">
+                            Sessions will disconnect after this many minutes of no activity (keystrokes, output, or file transfers).
+                            Set to <code>0</code> to disable timeout. <strong>Default: 60 minutes</strong>
+                        </small>
+                    </div>
+                    
+                    <hr class="my-4">
+                    
+                    <h5 class="mb-3">7. Recurring Schedule (Optional)</h5>
                     
                     <div class="mb-3">
                         <div class="form-check">

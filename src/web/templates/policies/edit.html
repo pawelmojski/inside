@@ -116,7 +116,23 @@
                     
                     <hr class="my-4">
                     
-                    <h5 class="mb-3">5. Recurring Schedule (Optional)</h5>
+                    <h5 class="mb-3">5. Session Settings</h5>
+                    
+                    <div class="mb-3">
+                        <label for="inactivity_timeout_minutes" class="form-label">Inactivity Timeout (minutes)</label>
+                        <input type="number" class="form-control" id="inactivity_timeout_minutes" 
+                               name="inactivity_timeout_minutes" 
+                               value="{{ policy.inactivity_timeout_minutes if policy.inactivity_timeout_minutes is not none else 60 }}" 
+                               min="0" max="1440">
+                        <small class="form-text text-muted">
+                            Current: {{ policy.inactivity_timeout_minutes if policy.inactivity_timeout_minutes else 'Disabled' }} minutes
+                            <br>Sessions disconnect after this many minutes of no activity. Set to <code>0</code> to disable.
+                        </small>
+                    </div>
+                    
+                    <hr class="my-4">
+                    
+                    <h5 class="mb-3">6. Recurring Schedule (Optional)</h5>
                     
                     <div class="mb-3">
                         <div class="form-check">

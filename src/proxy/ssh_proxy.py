@@ -123,12 +123,13 @@ class SSHSessionRecorder:
     - Auto-uploads buffered recordings when Tower back online
     """
     
-    def __init__(self, session_id: str, username: str, server_ip: str, server_name: str, tower_client):
+    def __init__(self, session_id: str, username: str, server_ip: str, server_name: str, tower_client, server_instance=None):
         self.session_id = session_id
         self.username = username
         self.server_ip = server_ip
         self.server_name = server_name
         self.tower_client = tower_client
+        self.server_instance = server_instance  # Reference to SSHProxyServer for activity tracking
         self.start_time = datetime.now(pytz.UTC)
         
         # JSONL event buffer (list of event dicts)
@@ -205,6 +206,10 @@ class SSHSessionRecorder:
     
     def _write_event(self, event: dict):
         """Write single event to buffer"""
+        # Update last activity timestamp for inactivity timeout tracking
+        if self.server_instance and self.session_id:
+            self.server_instance.session_last_activity[self.session_id] = datetime.utcnow()
+        
         if self.tower_online:
             # Add to buffer
             self.events_buffer.append(event)
@@ -862,6 +867,8 @@ class SSHProxyServer:
         # Current grant end times: session_id -> datetime (UTC)
         # Used to detect grant extensions (renew)
         self.session_grant_endtimes = {}
+        # Last activity tracking for inactivity timeout: session_id -> datetime (UTC)
+        self.session_last_activity = {}
         
     def _load_or_generate_host_key(self):
         """Load or generate SSH host key"""
@@ -1718,6 +1725,138 @@ class SSHProxyServer:
         except Exception as e:
             logger.error(f"Reverse forward listener error: {e}", exc_info=True)
     
+    def monitor_inactivity_timeout(self, channel, backend_channel, transport, backend_transport,
+                                    inactivity_timeout_minutes, db_session_id, session_id):
+        """Monitor session inactivity and disconnect after configured timeout.
+        
+        Args:
+            channel: Client channel
+            backend_channel: Backend channel
+            transport: Client transport
+            backend_transport: Backend transport
+            inactivity_timeout_minutes: Timeout in minutes (0 or None = disabled)
+            db_session_id: Database session ID for termination reason
+            session_id: Session ID for tracking
+        """
+        try:
+            # Disabled or invalid timeout
+            if not inactivity_timeout_minutes or inactivity_timeout_minutes <= 0:
+                logger.debug(f"Session {session_id}: Inactivity timeout disabled")
+                return
+            
+            logger.info(f"Session {session_id}: Monitoring inactivity timeout ({inactivity_timeout_minutes} minutes)")
+            
+            # Initialize last activity timestamp
+            if session_id not in self.session_last_activity:
+                self.session_last_activity[session_id] = datetime.utcnow()
+            
+            # Convert timeout to seconds
+            timeout_seconds = inactivity_timeout_minutes * 60
+            warning_5min = 300  # 5 minutes in seconds
+            warning_1min = 60   # 1 minute in seconds
+            
+            sent_5min_warning = False
+            sent_1min_warning = False
+            
+            while True:
+                time.sleep(10)  # Check every 10 seconds
+                
+                # Check if session is still active
+                if not transport.is_active() or not backend_transport.is_active():
+                    logger.debug(f"Session {session_id}: Session disconnected, stopping inactivity monitor")
+                    return
+                
+                # Get last activity time
+                last_activity = self.session_last_activity.get(session_id)
+                if not last_activity:
+                    logger.warning(f"Session {session_id}: No last activity timestamp found")
+                    return
+                
+                # Calculate idle time
+                now = datetime.utcnow()
+                idle_seconds = (now - last_activity).total_seconds()
+                remaining_seconds = timeout_seconds - idle_seconds
+                
+                # Check if timeout reached
+                if remaining_seconds <= 0:
+                    logger.info(f"Session {session_id}: Inactivity timeout reached ({inactivity_timeout_minutes} min)")
+                    
+                    # Send disconnect message
+                    try:
+                        message = (
+                            f"\r\n\r\n"
+                            f"{'='*70}\r\n"
+                            f"  Session disconnected due to inactivity\r\n"
+                            f"  No activity detected for {inactivity_timeout_minutes} minutes\r\n"
+                            f"{'='*70}\r\n\r\n"
+                        )
+                        channel.send(message.encode())
+                        time.sleep(0.5)  # Give time for message to be delivered
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send disconnect message: {e}")
+                    
+                    # Close connection
+                    try:
+                        channel.close()
+                        backend_channel.close()
+                    except:
+                        pass
+                    
+                    # Mark termination in database
+                    if db_session_id:
+                        try:
+                            self.tower_client.update_session(
+                                session_id=db_session_id,
+                                is_active=False,
+                                ended_at=datetime.utcnow().isoformat(),
+                                termination_reason='inactivity_timeout'
+                            )
+                        except Exception as e:
+                            logger.error(f"Session {session_id}: Failed to update termination reason: {e}")
+                    
+                    # Remove from tracking
+                    if session_id in self.session_last_activity:
+                        del self.session_last_activity[session_id]
+                    
+                    return
+                
+                # Send warnings (only for shell sessions with channel)
+                if remaining_seconds <= warning_5min and not sent_5min_warning:
+                    try:
+                        mins_remaining = int(remaining_seconds / 60)
+                        message = (
+                            f"\r\n\r\n"
+                            f"{'='*70}\r\n"
+                            f"  *** WARNING: Inactivity detected ***\r\n"
+                            f"  No activity for {int(idle_seconds / 60)} minutes\r\n"
+                            f"  Session will disconnect in {mins_remaining} minute(s)\r\n"
+                            f"  Press any key to continue working\r\n"
+                            f"{'='*70}\r\n\r\n"
+                        )
+                        channel.send(message.encode())
+                        sent_5min_warning = True
+                        logger.info(f"Session {session_id}: Sent 5-minute inactivity warning")
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send 5-minute warning: {e}")
+                
+                if remaining_seconds <= warning_1min and not sent_1min_warning:
+                    try:
+                        message = (
+                            f"\r\n\r\n"
+                            f"{'='*70}\r\n"
+                            f"  *** WARNING: Session disconnecting in 1 minute ***\r\n"
+                            f"  No activity detected - press any key to continue\r\n"
+                            f"{'='*70}\r\n\r\n"
+                        )
+                        channel.send(message.encode())
+                        sent_1min_warning = True
+                        logger.info(f"Session {session_id}: Sent 1-minute inactivity warning")
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send 1-minute warning: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Session {session_id}: Error in inactivity monitor: {e}")
+    
     def monitor_grant_expiry(self, channel, backend_channel, transport, backend_transport, 
                              grant_end_time, db_session_id, session_id):
         """Monitor grant expiry and send warnings, then disconnect when grant expires.
@@ -2396,7 +2535,8 @@ class SSHProxyServer:
                     username=user.username,
                     server_ip=target_server.ip_address,
                     server_name=target_server.name,
-                    tower_client=server_handler.tower_client
+                    tower_client=server_handler.tower_client,
+                    server_instance=server_handler.transport.server
                 )
                 recorder.record_event('session_start', f"User {user.username} connecting to {target_server.ip_address}")
             
@@ -2517,6 +2657,13 @@ class SSHProxyServer:
                         if grant_end_time.tzinfo is not None:
                             grant_end_time = grant_end_time.replace(tzinfo=None)
                 
+                # Extract inactivity timeout from API response (default 60 minutes)
+                inactivity_timeout_minutes = 60
+                if hasattr(server_handler, 'access_result') and server_handler.access_result:
+                    inactivity_timeout_minutes = server_handler.access_result.get('inactivity_timeout_minutes', 60)
+                    if inactivity_timeout_minutes is None:
+                        inactivity_timeout_minutes = 60
+                
                 # Fallback to old behavior (earliest policy end_time) - for legacy code paths
                 if grant_end_time is None and hasattr(server_handler, 'matching_policies') and server_handler.matching_policies:
                     end_times = [p.end_time for p in server_handler.matching_policies if p.end_time]
@@ -2561,9 +2708,11 @@ class SSHProxyServer:
                         f"  Access Grant Information\r\n"
                         f"  Your access expires at: {grant_end_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
                         f"  Time remaining: {time_str}\r\n"
+                        f"  Inactivity timeout: {inactivity_timeout_minutes} minute{'s' if inactivity_timeout_minutes != 1 else ''}\r\n"
                         f"  \r\n"
                         f"  You will receive warnings before your access expires.\r\n"
                         f"  Your session will be automatically disconnected at expiry time.\r\n"
+                        f"  Session disconnects after {inactivity_timeout_minutes} minutes of no activity.\r\n"
                         f"{'='*70}\r\n\r\n"
                     )
                     
@@ -2575,15 +2724,30 @@ class SSHProxyServer:
                 else:
                     # Permanent grant (no end_time)
                     logger.info(f"Session {session_id}: Permanent grant (no expiration)")
-                    welcome_msg = (
-                        f"\r\n"
-                        f"{'='*70}\r\n"
-                        f"  Access Grant Information\r\n"
-                        f"  Your access has no expiration time (permanent grant)\r\n"
-                        f"  \r\n"
-                        f"  Note: The administrator can revoke access at any time.\r\n"
-                        f"{'='*70}\r\n\r\n"
-                    )
+                    
+                    # Build welcome message based on inactivity timeout status
+                    if inactivity_timeout_minutes and inactivity_timeout_minutes > 0:
+                        welcome_msg = (
+                            f"\r\n"
+                            f"{'='*70}\r\n"
+                            f"  Access Grant Information\r\n"
+                            f"  Your access has no expiration time (permanent grant)\r\n"
+                            f"  Inactivity timeout: {inactivity_timeout_minutes} minute{'s' if inactivity_timeout_minutes != 1 else ''}\r\n"
+                            f"  \r\n"
+                            f"  Note: The administrator can revoke access at any time.\r\n"
+                            f"  Session disconnects after {inactivity_timeout_minutes} minutes of no activity.\r\n"
+                            f"{'='*70}\r\n\r\n"
+                        )
+                    else:
+                        welcome_msg = (
+                            f"\r\n"
+                            f"{'='*70}\r\n"
+                            f"  Access Grant Information\r\n"
+                            f"  Your access has no expiration time (permanent grant)\r\n"
+                            f"  \r\n"
+                            f"  Note: The administrator can revoke access at any time.\r\n"
+                            f"{'='*70}\r\n\r\n"
+                        )
                     try:
                         channel.send(welcome_msg.encode())
                         logger.info(f"Session {session_id}: Sent permanent grant welcome message")
@@ -2599,6 +2763,19 @@ class SSHProxyServer:
                 )
                 monitor_thread.start()
                 logger.debug(f"Session {session_id}: Started grant monitor thread")
+                
+                # Start inactivity timeout monitor (if enabled)
+                if inactivity_timeout_minutes and inactivity_timeout_minutes > 0:
+                    inactivity_monitor = threading.Thread(
+                        target=self.monitor_inactivity_timeout,
+                        args=(channel, backend_channel, transport, backend_transport,
+                              inactivity_timeout_minutes, db_session.id, session_id),
+                        daemon=True
+                    )
+                    inactivity_monitor.start()
+                    logger.debug(f"Session {session_id}: Started inactivity timeout monitor ({inactivity_timeout_minutes} min)")
+                else:
+                    logger.debug(f"Session {session_id}: Inactivity timeout disabled")
             
             # Forward traffic (with SFTP tracking if applicable)
             is_sftp = (server_handler.channel_type == 'subsystem' and 

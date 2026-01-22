@@ -249,6 +249,7 @@ def check_grant():
         'grant_scope': selected_policy.scope_type if selected_policy else None,
         'effective_end_time': result['effective_end_time'].isoformat() if result.get('effective_end_time') else None,
         'port_forwarding_allowed': selected_policy.port_forwarding_allowed if selected_policy else False,
+        'inactivity_timeout_minutes': selected_policy.inactivity_timeout_minutes if selected_policy else 60,
         'reason': result.get('reason', 'Access granted'),
         'gate_id': gate.id,
         'gate_name': gate.name

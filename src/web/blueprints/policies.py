@@ -180,6 +180,16 @@ def add():
             
             # duration_type == 'permanent': end_time remains None
             
+            # Get inactivity timeout (default 60 minutes)
+            inactivity_timeout = request.form.get('inactivity_timeout_minutes', '60').strip()
+            try:
+                inactivity_timeout_minutes = int(inactivity_timeout) if inactivity_timeout else 60
+                if inactivity_timeout_minutes < 0:
+                    inactivity_timeout_minutes = 0  # Treat negative as disabled
+            except ValueError:
+                flash('Invalid inactivity timeout. Using default: 60 minutes', 'warning')
+                inactivity_timeout_minutes = 60
+            
             # Create policy
             policy = AccessPolicy(
                 user_id=int(user_id) if user_id else None,
@@ -190,7 +200,8 @@ def add():
                 port_forwarding_allowed=port_forwarding_allowed,
                 is_active=True,
                 start_time=start_time,
-                end_time=end_time
+                end_time=end_time,
+                inactivity_timeout_minutes=inactivity_timeout_minutes
             )
             
             # Set target based on scope
@@ -320,12 +331,23 @@ def edit(policy_id):
             else:
                 end_time = policy.end_time
             
+            # Parse inactivity timeout
+            inactivity_timeout = request.form.get('inactivity_timeout_minutes', '60').strip()
+            try:
+                inactivity_timeout_minutes = int(inactivity_timeout) if inactivity_timeout else 60
+                if inactivity_timeout_minutes < 0:
+                    inactivity_timeout_minutes = 0
+            except ValueError:
+                flash('Invalid inactivity timeout. Keeping current value', 'warning')
+                inactivity_timeout_minutes = policy.inactivity_timeout_minutes or 60
+            
             # Update policy
             policy.protocol = protocol
             policy.source_ip_id = int(source_ip_id) if source_ip_id else None
             policy.port_forwarding_allowed = port_forwarding_allowed
             policy.start_time = start_time
             policy.end_time = end_time
+            policy.inactivity_timeout_minutes = inactivity_timeout_minutes
             
             # Update SSH logins
             db.query(PolicySSHLogin).filter(PolicySSHLogin.policy_id == policy.id).delete()
