@@ -88,13 +88,19 @@ WHERE gate_id = ?
 - Shared keys = shared session (user responsibility)
 
 **Implementation Phases:**
-1. **Database:** Add `session_identifier` to Stay model
-2. **Gate:** Implement hybrid identifier extraction (key → env → fallback)
-3. **Gate:** AcceptEnv for INSIDE_SESSION_ID
-4. **Tower:** Azure AD OAuth2 integration
-5. **Tower:** MFA challenge/verify endpoints
-6. **Gate:** MFA banner + polling logic
-7. **Documentation:** User guide for custom session IDs
+1. **Phase 1 - Basic MFA (PRIORITY):**
+   - Tower: Azure AD OAuth2 integration
+   - Tower: MFA challenge/verify endpoints + auto-registry from AAD group
+   - Gate: MFA banner + polling logic
+   - Database: `mfa_challenges` table
+   - **NO session persistence yet** - every connection = MFA
+
+2. **Phase 2 - Session Persistence (AFTER Phase 1 works):**
+   - Database: Add `session_identifier` to Stay model
+   - Gate: Implement hybrid identifier extraction (key FP → env → fallback)
+   - Gate: AcceptEnv for INSIDE_SESSION_ID
+   - Stay matching: Skip MFA if session_identifier + person match
+   - Documentation: User guide for custom session IDs
 
 **Benefits:**
 - ✅ Solves shared source IP problem
@@ -105,6 +111,304 @@ WHERE gate_id = ?
 - ✅ Audit trail via session_identifier in Stay
 
 **Status:** Blocked on Azure AD admin access. Design finalized, ready for implementation.
+
+---
+
+## Architecture Challenges & Design Decisions 🤔 TO DISCUSS
+
+**IMPORTANT:** These are unresolved architectural questions. Document here for future discussion when implementing MFA/session features.
+
+### 1. MFA Enforcement Granularity
+
+**Question:** When should MFA be required?
+
+**Options:**
+- **A) Per-Stay (default):** MFA once when Stay opens, all connections within Stay skip MFA
+- **B) Per-Connection (high security):** MFA for EVERY connection, even within same Stay
+- **C) Per-Target (hybrid):** MFA per-Stay for normal servers, per-Connection for critical servers
+
+**Proposal (C - Hybrid):**
+```python
+# Grant model:
+class Grant:
+    mfa_policy = Enum('per-stay', 'per-connection')  # default: per-stay
+    
+# Example use cases:
+- Normal servers (dev, test): mfa_policy = 'per-stay'
+- Critical servers (prod DB, routers, switches): mfa_policy = 'per-connection'
+```
+
+**Consequences:**
+- Per-connection = annoying but secure (for critical infra)
+- Per-stay = usable but shared session risk
+- Need UI in Tower to configure per-grant
+
+---
+
+### 2. Source IP Management Types
+
+**Question:** How to handle different source IP scenarios?
+
+**Current model:** Source IP = user identity (breaks on shared IPs)
+
+**Types:**
+- **User-Owned IP:** Desktop, laptop (static DHCP reservation) → one person always
+- **Shared IP:** Windows jump host, VDI pool, NAT gateway → multiple persons
+- **No Source IP Restriction:** User can connect from anywhere → MFA-only access
+
+**Proposal:**
+```python
+# SourceIP model:
+class SourceIP:
+    address = VARCHAR(45)
+    type = Enum('user-owned', 'shared', 'any')
+    
+# Logic:
+if source_ip.type == 'user-owned':
+    # Old behavior: source IP = person identity
+    person = get_person_by_ip(source_ip)
+    
+elif source_ip.type == 'shared':
+    # NEW: require session_identifier + MFA
+    person = get_person_by_mfa(session_identifier)
+    
+elif source_ip.type == 'any':
+    # No IP restriction, pure MFA
+    person = get_person_by_mfa(session_identifier)
+```
+
+**Migration path:**
+- Existing IPs → default to 'user-owned' (backward compatible)
+- New shared jump hosts → mark as 'shared'
+- Remote users → type 'any' + MFA required
+
+**Edge case - Same person, different IPs:**
+```
+User at office (IP: 10.1.1.50) opens Stay
+→ Goes home, connects via VPN (IP: 10.8.1.200)
+→ Should match same Stay? OR new Stay?
+
+Proposal: Match by session_identifier (SSH key FP or custom ID), NOT by source IP
+→ Stay lookup: WHERE session_identifier = ? AND person_id = ?
+```
+
+---
+
+### 3. Password-Only Target Servers (Switches, Routers)
+
+**Current workaround:** User must NOT send SSH key (`.ssh/config` hack)
+
+**Problem:** Forces user to manage config, error-prone
+
+**Better architecture:**
+
+**Option A - Accept key first (session matching), then ask password:**
+```python
+# Gate flow:
+1. User connects with SSH key → authenticate via key ✅
+2. Match to existing Stay (or MFA for new Stay)
+3. Target server requires password-only → Gate accepts key but DOESN'T forward it
+4. Gate does keyboard-interactive to backend with user's password
+5. Stay remains open, session_identifier preserved
+
+Benefits:
+- User always sends key (zero config)
+- Stay matching works
+- Password collected via keyboard-interactive
+
+Implementation:
+- Gate: check if target.auth_method == 'password-only'
+- If yes: accept user key, DON'T include in backend auth, trigger keyboard-interactive
+```
+
+**Option B - Dual authentication (key + password):**
+```python
+# User authenticates to Gate with key → session_identifier extracted
+# Gate authenticates to backend with password (via keyboard-interactive)
+# Two separate auth methods, no conflict
+
+Flow:
+User --[SSH key]--> Gate --[password]--> Backend
+       (session ID)        (user input)
+```
+
+**Option C - Keep current hack (user disables key):**
+```
+ssh -o PubkeyAuthentication=no router.company.local
+# Works but forces user config
+```
+
+**Recommendation:** Option A or B - preserve key-based session matching while supporting password backends
+
+---
+
+### 4. Stay Lifecycle with Session Identifiers
+
+**Question:** How do Stays close when using session_identifier?
+
+**Current model:**
+```
+Stay = (person, gate, source_ip)
+→ Close when: last connection from that IP ends
+```
+
+**New model with session_identifier:**
+```
+Stay = (person, gate, session_identifier)
+→ Close when: ???
+
+Options:
+A) Last connection with that session_identifier ends
+B) Explicit timeout (e.g., 8 hours)
+C) Hybrid: timeout OR last connection + grace period
+```
+
+**Proposal (C - Hybrid):**
+```python
+Stay closes when:
+- All connections with session_identifier closed + 5 min grace period
+  OR
+- Stay age > 8 hours (configurable per-grant)
+  OR
+- User clicks "Close Stay" in Tower UI
+  OR
+- Grant expires
+
+Grace period allows:
+- Quick reconnects without MFA
+- Network hiccups don't force re-auth
+```
+
+---
+
+### 5. Multiple Sessions from Same User
+
+**Scenario:** User opens SSH from laptop (session_id = key_fp_1), then opens another SSH from same laptop but different terminal/key
+
+**Question:** One Stay or two Stays?
+
+**Options:**
+- **One Stay:** Group by person + gate only (ignore session_identifier for stay grouping)
+- **Multiple Stays:** Each session_identifier = separate Stay
+
+**Implications:**
+
+**One Stay approach:**
+```python
+# Stay lookup:
+stay = db.query(Stay).filter_by(
+    person_id=person.id,
+    gate_id=gate.id,
+    is_active=True
+).first()
+
+# All connections from same person share Stay
+# session_identifier only for MFA skip decision
+
+if stay and stay.session_identifier == current_session_id:
+    # Skip MFA (same session)
+else:
+    # Require MFA (different session, same Stay)
+```
+
+**Multiple Stays approach:**
+```python
+# Stay lookup:
+stay = db.query(Stay).filter_by(
+    person_id=person.id,
+    gate_id=gate.id,
+    session_identifier=current_session_id,
+    is_active=True
+).first()
+
+# Each SSH key/custom ID = separate Stay
+# More isolated but more MFA prompts
+```
+
+**Recommendation:** Start with Multiple Stays (simpler, more secure), evaluate user feedback
+
+---
+
+### 6. AAD Group Sync Strategy
+
+**Question:** How to handle users removed from AAD "insideAccess" group?
+
+**Options:**
+- **A) Check at login only:** User removed from group → next login fails, existing sessions continue
+- **B) Background sync:** Cron job fetches AAD group members, disables persons not in group
+- **C) Hybrid:** Check at login + periodic sync (e.g., daily)
+
+**Recommendation:** Start with A (simple), add B if needed
+
+**Implementation A (login-time check):**
+```python
+# Every MFA callback:
+if INSIDE_ACCESS_GROUP not in aad_claims['groups']:
+    # Removed from group → deny access
+    # Existing Stays continue (until they expire naturally)
+    return "Access revoked", 403
+```
+
+**Implementation B (background sync):**
+```python
+# Cron job (daily):
+aad_members = fetch_aad_group_members(INSIDE_ACCESS_GROUP)
+db_persons = db.query(Person).filter_by(created_via='aad-auto-registry')
+
+for person in db_persons:
+    if person.email not in aad_members:
+        # Mark as disabled
+        person.disabled = True
+        # Close all active Stays
+        db.query(Stay).filter_by(person_id=person.id, is_active=True).update({'is_active': False})
+```
+
+**Tradeoff:** Immediate revocation (B) vs simpler implementation (A)
+
+---
+
+### 7. MFA Token Delivery Method
+
+**Current plan:** Gate sends banner with clickable URL
+
+**Alternative ideas:**
+
+**A) Email/Slack notification:**
+```python
+# Send MFA link via email
+send_email(
+    to=person.email,
+    subject="Inside MFA Required",
+    body=f"Click to authenticate: {mfa_url}"
+)
+```
+
+**B) QR code in terminal:**
+```python
+# Generate QR code, display in SSH session
+import qrcode
+qr = qrcode.make(mfa_url)
+print_ascii_qr(qr)  # ASCII art QR code in terminal
+```
+
+**C) SMS (expensive, requires Twilio/etc.)**
+
+**Recommendation:** Start with banner URL (simple), optionally add QR code for convenience
+
+---
+
+## Summary: What needs resolution before implementation
+
+1. ✅ **MFA phasing:** Agreed - MFA first, session persistence later
+2. ❓ **MFA granularity:** Per-stay vs per-connection policies (propose: per-grant config)
+3. ❓ **Source IP types:** user-owned vs shared vs any (propose: add type field)
+4. ❓ **Password-only targets:** Better than current .ssh/config hack? (propose: accept key, forward password)
+5. ❓ **Stay lifecycle:** Timeout strategy with session_identifier (propose: hybrid timeout + grace period)
+6. ❓ **Multiple sessions:** One Stay or separate? (propose: separate Stays initially)
+7. ❓ **AAD sync:** Login-time vs background (propose: start login-time, add background if needed)
+8. ❓ **MFA delivery:** Banner vs QR vs email (propose: banner + optional QR)
+
+**Action:** Review and decide on each before starting Phase 1 implementation.
 
 ---
 
