@@ -1,5 +1,113 @@
 # Inside - Roadmap & TODO
 
+## Next Planned: v2.0 (MFA Integration with Azure AD) 🎯 PLANNED
+
+**Waiting for:** Azure AD admin rights
+
+**Architecture - Hybrid Session Identifier:**
+
+MFA challenge required only for FIRST session in Stay. Subsequent sessions within same Stay skip MFA (persistent authentication).
+
+**Problem:** Multiple users from shared source IP (e.g., Windows jump host) - cannot identify person by IP alone.
+
+**Solution:** Session identifier to group connections from same user:
+
+**Priority 1 - SSH Key Fingerprint (Automatic, Zero Config):**
+```python
+if auth_method == 'publickey':
+    session_id = sha256(key.get_base64())
+    # User's public key fingerprint = unique identifier
+    # Works automatically, no user action needed
+```
+
+**Priority 2 - SetEnv INSIDE_SESSION_ID (One-Time Config):**
+```python
+# Gate paramiko config (server-side):
+AcceptEnv INSIDE_SESSION_ID
+
+# User ~/.ssh/config (client-side):
+Host gate.company.com
+    SendEnv INSIDE_SESSION_ID
+    SetEnv INSIDE_SESSION_ID=mojski-laptop-work
+
+# Gate code:
+if 'INSIDE_SESSION_ID' in channel.get_environment():
+    session_id = channel.get_environment()['INSIDE_SESSION_ID']
+```
+
+**Priority 3 - Fallback (Secure Default):**
+```python
+else:
+    # Password auth without custom ID = always MFA
+    session_id = f"password_{uuid4()}"
+    # Stay lifetime = single session only
+```
+
+**Database Changes:**
+```sql
+ALTER TABLE stays ADD COLUMN session_identifier VARCHAR(128);
+CREATE INDEX idx_stays_session_id ON stays(session_identifier);
+
+-- Stay lookup:
+SELECT * FROM stays 
+WHERE gate_id = ? 
+  AND session_identifier = ? 
+  AND is_active = true;
+```
+
+**MFA Flow:**
+1. User opens first SSH session
+2. Grant requires MFA → Gate sends banner: "MFA required: https://tower/mfa/<token>"
+3. User clicks link → Azure AD authentication in browser
+4. Tower creates Stay with session_identifier
+5. Gate polls Tower for MFA status → Stay verified → connection proceeds
+6. Subsequent connections with same session_id → Skip MFA (Stay active)
+7. User closes last session → Stay closes → MFA expires
+
+**User Experience Scenarios:**
+
+**Scenario A - SSH Key User (Zero Config):**
+- ✅ Persistent session via key fingerprint
+- ✅ MFA only on first Stay creation
+- ✅ No user action required
+
+**Scenario B - Password + Custom ID (Power User):**
+- ✅ One-time SSH config setup
+- ✅ Persistent session via custom identifier
+- ✅ MFA only on first Stay creation
+
+**Scenario C - Password Only (Lazy User):**
+- ⚠️ MFA required for EVERY connection
+- ⚠️ Secure by default but inconvenient
+- 💡 User can add custom ID to improve experience
+
+**Security:**
+- Session ID validation: `^[a-zA-Z0-9_-]{1,64}$` (alphanumeric, dash, underscore only)
+- Session ID does NOT determine person, only groups sessions
+- Person identified by grant check + MFA verification
+- Shared keys = shared session (user responsibility)
+
+**Implementation Phases:**
+1. **Database:** Add `session_identifier` to Stay model
+2. **Gate:** Implement hybrid identifier extraction (key → env → fallback)
+3. **Gate:** AcceptEnv for INSIDE_SESSION_ID
+4. **Tower:** Azure AD OAuth2 integration
+5. **Tower:** MFA challenge/verify endpoints
+6. **Gate:** MFA banner + polling logic
+7. **Documentation:** User guide for custom session IDs
+
+**Benefits:**
+- ✅ Solves shared source IP problem
+- ✅ Zero config for SSH key users (majority)
+- ✅ Flexible for password users (custom ID option)
+- ✅ Secure by default (fallback = always MFA)
+- ✅ No backend configuration needed (Gate-side only)
+- ✅ Audit trail via session_identifier in Stay
+
+**Status:** Blocked on Azure AD admin access. Design finalized, ready for implementation.
+
+---
+
 ## Current Status: v1.10.10 (Terminal Window Title Countdown) - January 2026 ✅ COMPLETE
 
 **v1.10.10 Completions:**
