@@ -1390,6 +1390,72 @@ When modifying the codebase:
 - Gate: Standalone package rebuilt and deployed (tailscale-etop 10.210.0.76)
 - Testing: Default 60-minute timeout, 5min/1min warnings working
 
+### v1.10.10 - Terminal Window Title Countdown (January 23, 2026) 🎯
+**Focus**: Non-intrusive real-time monitoring via window title
+
+**Problem Solved**:
+- Wall-style warnings are intrusive (spam terminal with banners)
+- Users want to see countdown but not be interrupted
+- Need to know both grant expiry AND idle timeout status
+- Window title always visible but doesn't interfere with work
+
+**Implementation**:
+- ✅ **ANSI Escape Sequences**: OSC 2 for window title (`\033]2;TITLE\007`)
+- ✅ **Terminal Compatibility**: xterm, gnome-terminal, konsole, iTerm2, Windows Terminal, PuTTY
+- ✅ **ASCII Only**: No emoji (PuTTY Windows title bar compatibility)
+- ✅ **Title Format**: `Inside: server-name | Grant: Xm | Idle: Y/Zm`
+- ✅ **Warning Indicator**: `[!]` suffix when <5 min remaining (either timer)
+- ✅ **Server Name Truncation**: Max 20 chars ("very-long-server-n..." if longer)
+- ✅ **Update Frequency**: 
+  - Normal: Every 60 seconds
+  - Warning: Every 10 seconds when grant <10min OR idle >50min
+- ✅ **Disconnect Status**: `Inside: server-name | disconnected` on session end
+- ✅ **Helper Functions**:
+  - `update_terminal_title()`: Set title with grant/idle countdown
+  - `clear_terminal_title()`: Set "disconnected" status
+- ✅ **Architecture**:
+  - `session_metadata` dict: Stores grant_end_time, inactivity_timeout, server_name per session
+  - Only `monitor_inactivity_timeout` updates title (runs every 10s)
+  - Reads grant info from metadata → shows BOTH timers in one title
+  - `monitor_grant_expiry` only updates metadata (no title conflicts)
+- ✅ **Disconnect Timing**: 
+  - Clear in `forward_channel()` finally block
+  - Called BEFORE `channel.close()` (while still writable)
+  - Catches ALL disconnect scenarios (exit, timeout, grant expiry, network drop)
+
+**Title Examples**:
+```
+Normal session:     Inside: vm-lin1 | Grant: 2h15m | Idle: 12/60m
+Warning state:      Inside: srv-db01 | Grant: 4m | Idle: 56/60m [!]
+Permanent grant:    Inside: backup-srv | Idle: 23/60m
+Disconnected:       Inside: rancher2 | disconnected
+Long server name:   Inside: very-long-serve... | Grant: 45m | Idle: 0/60m
+```
+
+**Edge Cases Tested**:
+- ✅ PuTTY SSH keepalive (30s interval) does NOT reset idle timer
+- ✅ PS1 title updates (user prompt) get overwritten every 60s by our title
+- ✅ Active sessions (tail -f, htop, watch) keep idle=0 (output resets timer)
+- ✅ Backend-initiated disconnect (Ctrl+D) clears title before channel close
+- ✅ Gate-initiated disconnect (grant/idle timeout) clears before disconnect message
+
+**Files Modified**:
+- Proxy: `src/proxy/ssh_proxy.py` (update_terminal_title, clear_terminal_title, session_metadata dict)
+- Integration: Both monitor threads pass server_name parameter
+- Forward channel: session_id and server_name params for disconnect handling
+
+**Benefits**:
+- ✅ Always-visible countdown without terminal spam
+- ✅ User can ignore if desired (non-intrusive)
+- ✅ Shows BOTH grant and idle timers simultaneously
+- ✅ Works in PuTTY (Windows users), Linux terminals, Mac iTerm2
+- ✅ No performance impact (update frequency: 60s normal, 10s warning)
+- ✅ Clean disconnect indication (no stale/misleading titles)
+
+**Deployment**:
+- Gate: Standalone package rebuilt and deployed (tailscale-etop 10.210.0.76)
+- Testing: Multiple terminals (PuTTY, gnome-terminal), keepalive tested, all disconnect scenarios verified
+
 ### v1.2-dev - RDP Session Viewer (January 2026)
 **Focus**: RDP session metadata and JSON event extraction
 

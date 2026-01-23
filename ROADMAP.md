@@ -1,6 +1,28 @@
 # Inside - Roadmap & TODO
 
-## Current Status: v1.10.9 (Session Inactivity Timeout) - January 2026 ✅ COMPLETE
+## Current Status: v1.10.10 (Terminal Window Title Countdown) - January 2026 ✅ COMPLETE
+
+**v1.10.10 Completions:**
+- ✅ **Terminal Window Title Updates**: Non-intrusive real-time countdown in window title
+  - ANSI OSC 2 escape sequence: `\033]2;TITLE\007` (xterm, PuTTY, Windows Terminal compatible)
+  - Format: `Inside: server-name | Grant: Xm | Idle: Y/Zm`
+  - Warning indicator: `[!]` suffix when <5 minutes remaining
+  - Server name truncation: Max 20 chars (longer names: "very-long-serve...")
+  - Update frequency: 60s normally, 10s when warning (<10min grant OR >50min idle)
+  - Disconnect status: `Inside: server-name | disconnected` on session end
+  - Helper functions: `update_terminal_title()`, `clear_terminal_title()`
+  - Integration: Only inactivity monitor updates title (reads grant info from metadata dict)
+  - Session metadata: `session_metadata` dict stores grant_end_time, timeout, server_name
+  - Disconnect timing: Clear in `forward_channel()` finally block (before channel.close())
+  - Benefits: Always-visible countdown, no terminal spam, PuTTY compatible (ASCII only)
+  - Edge case tested: PuTTY keepalive does NOT reset idle timer ✅
+  - Title examples:
+    * Normal: `Inside: vm-lin1 | Grant: 2h15m | Idle: 12/60m`
+    * Warning: `Inside: srv-db01 | Grant: 4m | Idle: 56/60m [!]`
+    * Permanent: `Inside: backup-srv | Idle: 23/60m`
+    * Disconnected: `Inside: rancher2 | disconnected`
+
+## Previous Status: v1.10.9 (Session Inactivity Timeout) - January 2026 ✅ COMPLETE
 
 **v1.10.9 Completions:**
 - ✅ **Inactivity Timeout**: Automatic disconnect after period of no activity
