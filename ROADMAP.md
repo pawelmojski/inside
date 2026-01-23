@@ -445,14 +445,17 @@ curl http://localhost:8080  # → evil-site.com ⚠️
 - Error: `channel open failed: administratively prohibited`
 
 **Policy 2 - Corporate Proxy Only (Smart Intercept):**
-- Accept reverse forward request from user
+- Accept reverse forward request from user's SSH client
 - **Intercept destination** - ignore user-requested target
-- Gate connects to predefined corporate proxy instead of client
+- **Gate acts as proxy** - connects to corporate proxy, NOT to client
+- Client never receives connection on reverse channel (complete isolation)
+- Traffic flow: `Backend Server ↔ Gate ↔ Corporate Proxy` (client bypassed)
 - User thinks they're forwarding to `jump:3128`, server actually gets `proxy.company.com:3128`
 - Benefits:
   - ✅ Server gets internet via corporate proxy
-  - ✅ Client network NOT exposed
+  - ✅ Client network NOT exposed (zero inbound connections)
   - ✅ Cannot bypass to arbitrary destinations
+  - ✅ Gate terminates both ends of connection
   - ✅ Audit log shows requested vs actual destination
 
 **Policy 3 - Allow All (Backward Compatible):**
@@ -497,15 +500,20 @@ def check_global_request(self, kind, msg):
 def handle_reverse_forward_connection(self, bind_port):
     # Backend opened connection to reverse-forwarded port
     if bind_port in self.reverse_forward_mappings:
-        # Connect to corporate proxy instead of client
+        # Corporate proxy mode: Gate acts as proxy
+        # Client SSH session is NEVER contacted
         mapping = self.reverse_forward_mappings[bind_port]
+        
+        # Gate connects directly to corporate proxy
         proxy_sock = socket.create_connection(
             (mapping['actual_host'], mapping['actual_port'])
         )
-        # Bridge: backend ↔ corporate proxy (NOT client)
+        
+        # Bridge: backend ↔ Gate ↔ corporate proxy
+        # Client is completely bypassed (no inbound connections)
         return proxy_sock
     else:
-        # Normal: backend ↔ client
+        # Normal mode: backend ↔ Gate ↔ client
         return self.transport.open_forwarded_tcpip_channel(...)
 ```
 
