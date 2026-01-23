@@ -114,6 +114,164 @@ WHERE gate_id = ?
 
 ---
 
+## Next After MFA: Code Optimization & Refactoring 🎯 PLANNED
+
+**Priority:** After MFA Phase 2 (session persistence) is complete and stable
+
+**Problem:** `ssh_proxy.py` has grown to 3300+ lines - becoming unmaintainable "monolith"
+
+### Modularization Plan
+
+**Current structure:**
+```
+src/proxy/ssh_proxy.py  (3301 lines)
+├── SSHProxyServer class (2800+ lines)
+├── Helper functions
+├── Monitor threads
+├── Channel handling
+├── Authentication
+├── Recording
+└── Session management
+```
+
+**Proposed structure:**
+```
+src/proxy/
+├── ssh_proxy.py              (200-300 lines - main entry point)
+├── server.py                 (SSHProxyServer skeleton - 300 lines)
+├── auth/
+│   ├── __init__.py
+│   ├── authentication.py     (publickey, password, MFA flow)
+│   ├── tower_client.py       (grant checks, stay management)
+│   └── session_identifier.py (key FP, custom env, fallback)
+├── channels/
+│   ├── __init__.py
+│   ├── session.py            (shell, exec channel handling)
+│   ├── forwarding.py         (port forward, reverse forward, proxy intercept)
+│   └── sftp.py               (SFTP channel handling)
+├── monitoring/
+│   ├── __init__.py
+│   ├── grant_monitor.py      (grant expiry thread)
+│   ├── inactivity_monitor.py (idle timeout thread)
+│   └── terminal_title.py     (title updates, helpers)
+├── recording/
+│   ├── __init__.py
+│   ├── recorder.py           (session recording, activity tracking)
+│   └── output_filter.py      (command filtering, censoring)
+└── utils/
+    ├── __init__.py
+    ├── terminal.py           (ANSI helpers, title updates)
+    └── networking.py         (socket helpers, IP extraction)
+```
+
+### Refactoring Goals
+
+1. **Separation of Concerns:**
+   - Authentication logic separate from channel handling
+   - Monitoring threads in dedicated modules
+   - Recording abstracted from transport
+
+2. **Testability:**
+   - Each module independently testable
+   - Mock-friendly interfaces
+   - Unit tests for critical paths (auth, MFA, recording)
+
+3. **Maintainability:**
+   - Max 300 lines per file
+   - Clear module responsibilities
+   - Docstrings and type hints
+
+4. **Performance:**
+   - Profile hot paths (forward_channel, recorder)
+   - Optimize buffer handling
+   - Reduce memory footprint for long sessions
+
+5. **Code Quality:**
+   - Remove duplicated code (DRY violations)
+   - Consistent error handling patterns
+   - Logging standardization
+
+### Migration Strategy
+
+**Phase 1 - Extract helpers (low risk):**
+- Move terminal title functions → `monitoring/terminal_title.py`
+- Move ANSI helpers → `utils/terminal.py`
+- Move IP/socket utils → `utils/networking.py`
+- Test: No behavior change
+
+**Phase 2 - Extract monitoring (medium risk):**
+- Move grant monitor thread → `monitoring/grant_monitor.py`
+- Move inactivity monitor thread → `monitoring/inactivity_monitor.py`
+- Test: Timers still work, title updates OK
+
+**Phase 3 - Extract authentication (medium risk):**
+- Move Tower API calls → `auth/tower_client.py`
+- Move key/password auth → `auth/authentication.py`
+- Move session_identifier logic → `auth/session_identifier.py`
+- Test: Auth flow unchanged, grants checked correctly
+
+**Phase 4 - Extract channels (high risk):**
+- Move port forwarding → `channels/forwarding.py`
+- Move SFTP handling → `channels/sftp.py`
+- Move session channel → `channels/session.py`
+- Test: All channel types work, recording OK
+
+**Phase 5 - Extract recording (high risk):**
+- Move Recorder class → `recording/recorder.py`
+- Move output filtering → `recording/output_filter.py`
+- Test: Sessions recorded correctly, playback works
+
+**Phase 6 - Final cleanup:**
+- SSHProxyServer becomes thin orchestrator
+- Main entry point cleaned up
+- Dead code removal
+- Documentation update
+
+### Success Criteria
+
+- ✅ No regression in functionality
+- ✅ All existing tests pass
+- ✅ Code coverage maintained or improved
+- ✅ No file >300 lines (except tests)
+- ✅ Import time unchanged or faster
+- ✅ Memory usage similar or lower
+- ✅ Performance benchmarks pass (connection time, throughput)
+
+### Additional Optimizations
+
+**Beyond modularization:**
+
+1. **Connection pooling to Tower:**
+   - Reuse HTTP connections for grant checks
+   - Reduce latency on session open
+
+2. **Async I/O for monitoring:**
+   - Consider asyncio for monitor threads
+   - Reduce thread overhead
+
+3. **Buffer optimization:**
+   - Profile `forward_channel` buffer sizes
+   - Optimize for typical session patterns
+
+4. **Logging performance:**
+   - Lazy string formatting
+   - Log level filtering
+
+5. **Startup optimization:**
+   - Lazy imports where possible
+   - Reduce initial memory footprint
+
+### Documentation Updates
+
+- Architecture diagram showing new module structure
+- Developer guide for adding features
+- Testing guide for contributors
+- Migration notes for deployments
+
+**Status:** Planned after MFA complete. Estimated effort: 2-3 weeks for full refactor + testing.
+
+---
+
 ## Architecture Challenges & Design Decisions 🤔 TO DISCUSS
 
 **IMPORTANT:** These are unresolved architectural questions. Document here for future discussion when implementing MFA/session features.
