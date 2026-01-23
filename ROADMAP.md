@@ -412,6 +412,129 @@ print_ascii_qr(qr)  # ASCII art QR code in terminal
 
 ---
 
+## Future Features - Wish List 💡
+
+### Reverse Forwarding Policy Control (Corporate Proxy Intercept)
+
+**Problem:** SSH reverse forwarding (`-R`) is dangerous - allows backend server to connect anywhere via user's network, bypassing corporate firewall policies.
+
+**Legitimate Use Case:** Admins need to provide internet access to isolated servers via corporate proxy:
+```bash
+# Admin wants:
+ssh -R 3128:proxy.company.com:3128 isolated-server
+
+# Server can then:
+export http_proxy=http://localhost:3128
+apt update  # via corporate proxy ✅
+```
+
+**Security Risk:**
+```bash
+# Malicious/compromised server:
+ssh -R 8080:evil-site.com:443 production-server
+
+# Server bypasses firewall:
+curl http://localhost:8080  # → evil-site.com ⚠️
+```
+
+**Solution: Three-Level Reverse Forwarding Policy**
+
+**Policy 1 - Deny (Secure Default):**
+- Block ALL reverse forwarding requests
+- Use for production servers with no internet needs
+- Error: `channel open failed: administratively prohibited`
+
+**Policy 2 - Corporate Proxy Only (Smart Intercept):**
+- Accept reverse forward request from user
+- **Intercept destination** - ignore user-requested target
+- Gate connects to predefined corporate proxy instead of client
+- User thinks they're forwarding to `jump:3128`, server actually gets `proxy.company.com:3128`
+- Benefits:
+  - ✅ Server gets internet via corporate proxy
+  - ✅ Client network NOT exposed
+  - ✅ Cannot bypass to arbitrary destinations
+  - ✅ Audit log shows requested vs actual destination
+
+**Policy 3 - Allow All (Backward Compatible):**
+- Current behavior - forward to client's network
+- Use only for trusted admin scenarios
+- Full reverse forwarding capability
+
+**Grant Model:**
+```python
+class Grant:
+    reverse_forwarding_policy = Enum('deny', 'corporate-proxy', 'allow-all')
+    corporate_proxy_host = VARCHAR(255)  # e.g., 'proxy.company.com'
+    corporate_proxy_port = INT           # e.g., 3128
+```
+
+**Gate Implementation:**
+```python
+def check_global_request(self, kind, msg):
+    # SSH -R request handler
+    if kind != 'tcpip-forward':
+        return False
+    
+    policy = self.current_grant.reverse_forwarding_policy
+    
+    if policy == 'deny':
+        return False
+    
+    elif policy == 'corporate-proxy':
+        # Accept request, store mapping for intercept
+        bind_port = msg.get_int()
+        self.reverse_forward_mappings[bind_port] = {
+            'requested_host': msg.get_string(),
+            'requested_port': msg.get_int(),
+            'actual_host': self.current_grant.corporate_proxy_host,
+            'actual_port': self.current_grant.corporate_proxy_port
+        }
+        return True  # Accept, but Gate will intercept connections
+    
+    elif policy == 'allow-all':
+        return True  # Normal reverse forward to client
+
+def handle_reverse_forward_connection(self, bind_port):
+    # Backend opened connection to reverse-forwarded port
+    if bind_port in self.reverse_forward_mappings:
+        # Connect to corporate proxy instead of client
+        mapping = self.reverse_forward_mappings[bind_port]
+        proxy_sock = socket.create_connection(
+            (mapping['actual_host'], mapping['actual_port'])
+        )
+        # Bridge: backend ↔ corporate proxy (NOT client)
+        return proxy_sock
+    else:
+        # Normal: backend ↔ client
+        return self.transport.open_forwarded_tcpip_channel(...)
+```
+
+**User Experience:**
+```bash
+# Admin with "corporate-proxy" policy:
+admin@laptop$ ssh -R 3128:anything:1234 server
+
+# Inside server session:
+admin@server$ export http_proxy=http://localhost:3128
+admin@server$ curl google.com
+# Works via proxy.company.com:3128 ✅
+
+# Gate audit log:
+# Reverse forward intercept: server:45678 → proxy.company.com:3128
+# (user requested: anything:1234)
+```
+
+**Benefits:**
+- ✅ Servers get internet access (via controlled proxy)
+- ✅ No arbitrary network bypass
+- ✅ Client network isolation maintained
+- ✅ Audit trail of intercepts
+- ✅ Granular per-grant control
+
+**Status:** Wish list - implement after MFA Phase 1
+
+---
+
 ## Current Status: v1.10.10 (Terminal Window Title Countdown) - January 2026 ✅ COMPLETE
 
 **v1.10.10 Completions:**
