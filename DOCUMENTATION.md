@@ -1456,6 +1456,155 @@ Long server name:   Inside: very-long-serve... | Grant: 45m | Idle: 0/60m
 - Gate: Standalone package rebuilt and deployed (tailscale-etop 10.210.0.76)
 - Testing: Multiple terminals (PuTTY, gnome-terminal), keepalive tested, all disconnect scenarios verified
 
+---
+
+## Infrastructure Configuration
+
+### HTTPS Nginx Reverse Proxy (January 2026)
+
+**Purpose**: SSL termination and proxy to Tower Flask application for Azure AD SAML authentication
+
+**Configuration**:
+- Domain: `https://inside.ideo.pl`
+- SSL Certificate: Wildcard `*.ideo.pl` (certificate + chain)
+- Backend: Flask Tower on `localhost:5000`
+- Config file: `/etc/nginx/sites-available/inside`
+
+**Certificates**:
+```bash
+/opt/jumphost/certs/ssl/ideo.pl.crt  # Certificate + chain (644)
+/opt/jumphost/certs/ssl/ideo.pl.key  # Private key (600, root owned)
+```
+
+**Nginx Configuration Highlights**:
+- HTTP → HTTPS redirect (port 80 → 443)
+- TLS 1.2/1.3 only
+- Security headers (HSTS, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection)
+- Proxy settings:
+  - Preserves original request headers (Host, X-Real-IP, X-Forwarded-*)
+  - 60s timeouts (connect, send, read)
+  - Buffering disabled (real-time streaming)
+- Health check endpoint: `/health` (returns 200 OK)
+- Logs: `/var/log/nginx/inside_access.log`, `/var/log/nginx/inside_error.log`
+
+**Service Management**:
+```bash
+sudo systemctl reload nginx      # Reload config
+sudo nginx -t                    # Test config syntax
+sudo systemctl status nginx      # Check status
+```
+
+**Testing**:
+```bash
+curl -I https://inside.ideo.pl/health  # Should return 200 OK
+```
+
+### Azure AD SAML Integration (January 2026)
+
+**Status**: Configuration prepared, implementation pending
+
+**Azure AD Enterprise Application Details**:
+- Tenant ID: `0d9653a4-4c3f-4752-9098-724fad471fa5`
+- Application ID: `05275222-1909-4d40-a0d0-2c41df7b512a`
+
+**SAML Endpoints (Azure AD - Identity Provider)**:
+```
+Login URL:      https://login.microsoftonline.com/0d9653a4-4c3f-4752-9098-724fad471fa5/saml2
+Logout URL:     https://login.microsoftonline.com/0d9653a4-4c3f-4752-9098-724fad471fa5/saml2
+Entity ID:      https://sts.windows.net/0d9653a4-4c3f-4752-9098-724fad471fa5/
+Metadata URL:   https://login.microsoftonline.com/0d9653a4-4c3f-4752-9098-724fad471fa5/federationmetadata/2007-06/federationmetadata.xml?appid=05275222-1909-4d40-a0d0-2c41df7b512a
+```
+
+**SAML Endpoints (Tower - Service Provider)**:
+```
+Entity ID:      https://inside.ideo.pl/metadata
+ACS URL:        https://inside.ideo.pl/auth/saml/acs  (POST binding)
+SLS URL:        https://inside.ideo.pl/auth/saml/sls  (Redirect binding)
+Metadata URL:   https://inside.ideo.pl/auth/saml/metadata
+```
+
+**Configuration File**: `/opt/jumphost/config/saml_config.py`
+
+**Azure AD Configuration Requirements** (for admin):
+
+1. **Basic SAML Configuration** (Enterprise Application):
+   - Identifier (Entity ID): `https://inside.ideo.pl/metadata`
+   - Reply URL (ACS): `https://inside.ideo.pl/auth/saml/acs`
+   - Sign on URL: `https://inside.ideo.pl` (optional)
+   - Logout URL: `https://inside.ideo.pl/auth/saml/sls` (optional)
+
+2. **User Attributes & Claims**:
+   - Name ID format: Email address
+   - Source attribute: `user.mail`
+   - Optional: Add groups claim (filter by security group, return Group ID)
+
+3. **Access Control**:
+   - Create Azure AD security group: `insideAccess`
+   - Assign users to group for access
+   - Get Group Object ID from Azure Portal (needed for auto-registry)
+
+**SAML Attribute Mappings**:
+```python
+Email:       http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
+Name:        http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name
+Given Name:  http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname
+Surname:     http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname
+Groups:      http://schemas.microsoft.com/ws/2008/06/identity/claims/groups
+```
+
+**MFA Flow Architecture** (planned):
+1. User connects to Gate via SSH
+2. Gate checks grant, requires MFA → Tower API `/api/mfa/challenge`
+3. Tower generates SAML AuthnRequest with RelayState = MFA token
+4. Gate displays banner: "MFA required: https://inside.ideo.pl/auth/saml/login?RelayState={token}"
+5. User opens URL in browser → redirected to Azure AD SAML login
+6. User authenticates (Azure AD enforces MFA if configured)
+7. Azure AD posts SAML Response to `/auth/saml/acs`
+8. Tower validates assertion, extracts email + groups
+9. Tower checks group membership (`insideAccess` group)
+10. Tower auto-registers person if first login
+11. Tower creates Stay, marks MFA challenge as verified
+12. Gate polls `/api/mfa/status/{token}` → verified → connection proceeds
+
+**Dependencies** (Python):
+```bash
+pip install python3-saml
+```
+
+**Security Features**:
+- SAML assertion validation (signature, audience, issuer, expiry)
+- Group-based access control (Azure AD group membership)
+- Auto-registry (users auto-created from AAD on first login)
+- MFA challenge timeout (5 minutes)
+- One-time use MFA tokens (cannot be reused)
+
+**Database Changes Required**:
+```sql
+-- MFA challenges table
+CREATE TABLE mfa_challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token VARCHAR(64) UNIQUE NOT NULL,
+    gate_id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    grant_id INTEGER NOT NULL,
+    session_identifier VARCHAR(128),
+    created_at DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL,
+    verified BOOLEAN DEFAULT FALSE,
+    verified_at DATETIME,
+    saml_email VARCHAR(255),
+    FOREIGN KEY (gate_id) REFERENCES gates(id),
+    FOREIGN KEY (person_id) REFERENCES persons(id),
+    FOREIGN KEY (grant_id) REFERENCES access_policies(id)
+);
+
+-- Add auto-registry tracking to persons
+ALTER TABLE persons ADD COLUMN created_via VARCHAR(50) DEFAULT 'manual';
+-- Values: 'manual', 'saml-auto-registry'
+```
+
+---
+
 ### v1.2-dev - RDP Session Viewer (January 2026)
 **Focus**: RDP session metadata and JSON event extraction
 

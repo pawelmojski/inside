@@ -46,3 +46,5 @@ rdp_recordings/
 # OS
 .DS_Store
 Thumbs.db
+certs/ssl/*.crt
+certs/ssl/*.key
