@@ -454,8 +454,16 @@ class SSHProxyHandler(paramiko.ServerInterface):
         return paramiko.AUTH_FAILED
         
     def check_auth_password(self, username: str, password: str):
-        """Check password authentication"""
-        logger.info(f"Auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
+        """Check password authentication
+        
+        Password auth flow (no SSH key):
+        1. Check grant (fingerprint=None because no key was used)
+        2. If unknown source IP → MFA required → challenge → poll
+        3. After MFA: check grant again with mfa_token
+        4. Grant OK → use password for backend authentication
+        5. Stay created WITHOUT fingerprint (per-session MFA for future)
+        """
+        logger.info(f"Password auth attempt: {username} from {self.source_ip} to {self.dest_ip}")
         
         # Check access permissions using Tower API (cache result)
         if not self.grant_checked:
@@ -464,17 +472,138 @@ class SSHProxyHandler(paramiko.ServerInterface):
                 destination_ip=self.dest_ip,
                 protocol='ssh',
                 ssh_login=username,
-                ssh_key_fingerprint=self.ssh_key_fingerprint
+                ssh_key_fingerprint=None  # No key used in password auth
             )
             self.grant_checked = True
             self.grant_result = result
         else:
             result = self.grant_result
         
+        # Check if MFA is required (unknown source IP, no fingerprint)
+        if not result.get('allowed') and result.get('mfa_required'):
+            logger.info(f"MFA required for password auth: {username}")
+            
+            try:
+                # Create MFA challenge
+                if 'user_id' in result and result['user_id']:
+                    # Known user (shouldn't happen without fingerprint/known IP, but handle it)
+                    mfa_resp = self.tower_client.create_mfa_challenge(
+                        ssh_username=username,
+                        user_id=result['user_id'],
+                        grant_id=result.get('grant_id')
+                    )
+                else:
+                    # Unknown user - will be identified via SAML email
+                    mfa_resp = self.tower_client.create_mfa_challenge(
+                        ssh_username=username,
+                        source_ip=self.source_ip,
+                        destination_ip=result.get('destination_ip', self.dest_ip)
+                    )
+                
+                mfa_token = mfa_resp['mfa_token']
+                mfa_url = mfa_resp['mfa_url']
+                timeout_min = mfa_resp.get('timeout_minutes', 5)
+                
+                # Track token for cleanup
+                self.pending_mfa_token = mfa_token
+                
+                # Build and send MFA banner
+                banner_lines = [
+                    "",
+                    "===============================================================",
+                    "  MFA AUTHENTICATION REQUIRED",
+                    "===============================================================",
+                    "",
+                    f"  User: {result.get('person_fullname', username)}",
+                    f"  Target: {result.get('server_name', self.dest_ip)}",
+                    "",
+                    "  Complete authentication in your browser:",
+                    f"  {mfa_url}",
+                    "",
+                    "  (Or visit: https://inside.ideo.pl/mfa)",
+                    "",
+                    "  Pro tip: Use SSH keys for persistent sessions",
+                    "            (no MFA needed for subsequent connections)",
+                    "",
+                    f"  Waiting for authentication (timeout: {timeout_min} min)...",
+                    "===============================================================",
+                    ""
+                ]
+                
+                # Send banner via SSH protocol
+                banner_msg = "\r\n".join(banner_lines)
+                try:
+                    from paramiko.message import Message
+                    from paramiko.common import MSG_USERAUTH_BANNER
+                    msg = Message()
+                    msg.add_byte(bytes([MSG_USERAUTH_BANNER]))
+                    msg.add_string(banner_msg.encode('utf-8'))
+                    msg.add_string(b'en')
+                    self.transport._send_message(msg)
+                    logger.info(f"MFA banner sent to client (password auth)")
+                except Exception as be:
+                    logger.warning(f"Could not send MFA banner: {be}")
+                
+                # Poll MFA status
+                poll_interval = 2
+                max_polls = (timeout_min * 60) // poll_interval
+                logger.info(f"Polling MFA status for password auth (max {max_polls} attempts)")
+                
+                for attempt in range(max_polls):
+                    if not self.transport.is_active() or not self.transport.is_alive():
+                        logger.info(f"Transport closed during MFA poll - client disconnected")
+                        return paramiko.AUTH_FAILED
+                    
+                    try:
+                        status = self.tower_client.check_mfa_status(mfa_token)
+                        
+                        if status.get('verified'):
+                            logger.info(f"MFA verified for password auth: {username}")
+                            self.pending_mfa_token = None
+                            
+                            # MFA verified - check grant again with mfa_token
+                            result = self.tower_client.check_grant(
+                                source_ip=self.source_ip,
+                                destination_ip=self.dest_ip,
+                                protocol='ssh',
+                                ssh_login=username,
+                                ssh_key_fingerprint=None,  # Still no key
+                                mfa_token=mfa_token
+                            )
+                            self.grant_result = result
+                            break
+                        elif status.get('expired'):
+                            logger.warning(f"MFA expired for password auth: {username}")
+                            self.pending_mfa_token = None
+                            self.no_grant_reason = "MFA authentication expired"
+                            return paramiko.AUTH_FAILED
+                        
+                        time.sleep(poll_interval)
+                        
+                    except Exception as pe:
+                        logger.error(f"MFA poll error: {pe}")
+                        time.sleep(poll_interval)
+                
+                # After poll loop - check if MFA was verified
+                if not result.get('allowed'):
+                    if result.get('verified'):
+                        # MFA succeeded but grant denied (no access rights)
+                        logger.warning(f"Access denied after MFA for {username}: {result.get('reason', 'no grant')}")
+                        self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
+                    else:
+                        # MFA timeout (user didn't authenticate in time)
+                        logger.warning(f"MFA timeout for password auth: {username}")
+                        self.no_grant_reason = "MFA authentication timeout"
+                    return paramiko.AUTH_FAILED
+                    
+            except Exception as mfa_err:
+                logger.error(f"MFA error in password auth: {mfa_err}", exc_info=True)
+                self.no_grant_reason = "MFA system error"
+                return paramiko.AUTH_FAILED
+        
+        # Normal denial (no MFA or MFA failed)
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
-            # Denied sessions are logged via Tower API audit trail (check_grant call)
-            
             # Format denial message using custom messages from Tower
             self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
             return paramiko.AUTH_FAILED
@@ -495,7 +624,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.ssh_login = username  # SSH login for backend (e.g., "ideo")
         self.client_password = password
         
-        logger.info(f"Access granted: {username} → {self.target_server.ip_address} (via {self.dest_ip})")
+        logger.info(f"Access granted (password auth): {username} → {self.target_server.ip_address} (via {self.dest_ip})")
         return paramiko.AUTH_SUCCESSFUL
     
     def check_auth_publickey(self, username: str, key):
@@ -727,6 +856,14 @@ class SSHProxyHandler(paramiko.ServerInterface):
             self.grant_result = result
         else:
             result = self.grant_result
+        
+        # Check if MFA is required (unknown source IP, no fingerprint)
+        if not result.get('allowed') and result.get('mfa_required'):
+            logger.info(f"MFA required for keyboard-interactive auth: {username}")
+            # Reject keyboard-interactive and let client fall back to password auth
+            # Password auth has full MFA support with banner
+            logger.info(f"Rejecting keyboard-interactive to force password auth (MFA support)")
+            return paramiko.AUTH_FAILED
         
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
@@ -2684,12 +2821,43 @@ class SSHProxyServer:
                                 continue
                         
                         if not authenticated:
-                            # No agent keys worked
-                            logger.info("No agent keys worked")
-                            channel.send(f"ERROR: None of your SSH keys are authorized on the backend server.\r\n".encode())
-                            channel.send(f"Try: ssh -o PubkeyAuthentication=no {server_handler.ssh_login}@{server_handler.dest_ip}\r\n".encode())
-                            channel.close()
-                            return
+                            # No agent keys worked - backend needs password
+                            logger.info("No agent keys worked, backend requires password - prompting user")
+                            
+                            # Send password prompt to client through the channel
+                            prompt = f"{server_handler.ssh_login}@{server_handler.target_server.name}'s password: "
+                            channel.send(prompt.encode())
+                            
+                            # Read password from client (echoing disabled by terminal)
+                            password_input = b""
+                            while len(password_input) < 1024:  # Max 1KB password
+                                try:
+                                    char = channel.recv(1)
+                                    if not char:
+                                        logger.warning("Client disconnected during password prompt")
+                                        channel.close()
+                                        return
+                                    if char == b'\r' or char == b'\n':
+                                        break
+                                    password_input += char
+                                except Exception as e:
+                                    logger.error(f"Error reading password: {e}")
+                                    channel.close()
+                                    return
+                            
+                            password = password_input.decode('utf-8', errors='ignore').strip()
+                            logger.info("Password received from user, trying backend auth")
+                            
+                            # Try password auth with backend
+                            try:
+                                backend_transport.auth_password(server_handler.ssh_login, password)
+                                logger.info("Backend authenticated with user-provided password")
+                                authenticated = True
+                            except Exception as e:
+                                logger.error(f"Backend password authentication failed: {e}")
+                                channel.send(b"\r\nERROR: Password authentication failed on backend.\r\n")
+                                channel.close()
+                                return
                     except Exception as e:
                         logger.info(f"Agent error: {e}")
                         channel.send(f"ERROR: Agent forwarding failed: {e}\r\n".encode())

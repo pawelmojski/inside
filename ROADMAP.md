@@ -1065,90 +1065,152 @@ admin@server$ curl google.com
 - Grant expiry warnings → ✅ Working correctly (5-minute, 1-minute warnings)
 - Grant expiry disconnect → ✅ Clean disconnect with countdown message
 
-### v1.11.1 - MFA Phase 2: SSH Key Fingerprint Session Persistence 🎯 ✅ COMPLETED (January 28, 2026)
+### v1.11.1 - MFA Phase 2: Full Password Auth & Per-Server MFA 🎯 ✅ COMPLETED (January 28, 2026)
 
-**Problem**: MFA Phase 1 required MFA challenge for EVERY SSH connection, even from same user with same SSH key
-- Opening multiple terminal windows = multiple MFA prompts
-- Poor user experience for legitimate users
-- No session persistence mechanism
+**Problems Solved**:
+1. MFA Phase 1 required MFA for EVERY connection, even with same SSH key
+2. Password authentication without SSH keys was not supported
+3. Agent forwarding failures on backend required manual reconnection
+4. Keyboard-interactive auth bypassed MFA flow
+5. Network switches using keyboard-interactive couldn't connect
+6. Per-server MFA enforcement not possible (Stay always bypassed MFA)
 
-**Solution**: Automatic session persistence via SSH public key fingerprint
-- Gate extracts SHA256 fingerprint of user's SSH public key
-- Tower stores fingerprint in Stay record
-- Subsequent connections with same key = user identified = skip MFA
-- Zero configuration required from users
+**Solution - Comprehensive SSH Authentication & MFA**:
+- SSH key fingerprint persistence in Stay (automatic session tracking)
+- Password authentication with full MFA support (no SSH keys required)
+- Password fallback when backend rejects agent keys
+- Keyboard-interactive → password auth fallback for MFA
+- Per-server MFA enforcement via policy.mfa_required flag
+- 3-tier user identification: fingerprint → known IP → MFA token
 
 **Implementation (January 28, 2026)**:
 
 **1. Database Schema**:
-- Added `ssh_key_fingerprint` column to Stay model (VARCHAR 255)
-- Created index on `ssh_key_fingerprint` for fast lookups
-- Migration: ALTER TABLE stays ADD COLUMN ssh_key_fingerprint VARCHAR(255)
-
-**2. Gate Fingerprint Extraction** (src/proxy/ssh_proxy.py):
-- Extract fingerprint in `check_auth_publickey()` method (line 514)
-- SHA256 hash of public key bytes: `hashlib.sha256(key.asbytes()).digest()`
-- Base64 encode: `base64.b64encode(fingerprint_hash).decode('ascii')`
-- Example fingerprint: `FrMnH/bvPbA5prMYh5QNbKs/Z4YLCXRrxY5uj1njtjA=`
-- Store in `self.ssh_key_fingerprint` for check_grant call
-
-**3. Critical Bug Fix - check_auth_none() Timing**:
-- **Problem**: Paramiko calls `check_auth_none()` BEFORE `check_auth_publickey()`
-- Original code did check_grant in check_auth_none() → fingerprint still None
-- Tower received `fingerprint=None` → always treated as unknown source IP
-- **Solution**: Commented out check_grant logic in check_auth_none() (lines 418-450)
-- Now first check_grant happens in check_auth_publickey() AFTER fingerprint extracted
-- Ensures Tower always receives valid fingerprint for Stay matching
-
-**4. Tower Stay Matching** (src/api/grants.py lines 193-198):
-```python
-active_stay = db.query(Stay).filter(
-    Stay.ssh_key_fingerprint == ssh_key_fingerprint,
-    Stay.gate_id == gate.id,
-    Stay.is_active == True
-).first()
-
-if active_stay:
-    source_ip = f"_fingerprint_{active_stay.user_id}"
-    # User identified from Stay, bypass MFA
+```sql
+ALTER TABLE stays ADD COLUMN ssh_key_fingerprint VARCHAR(255);
+CREATE INDEX idx_stays_fingerprint ON stays(ssh_key_fingerprint);
+-- ONE Stay per user+gate: UNIQUE(user_id, gate_id, is_active=true)
 ```
 
-**5. Banner Enhancement** (src/proxy/ssh_proxy.py lines 663-675):
-- **Problem**: Paramiko `get_banner()` called BEFORE authentication → denial message not shown
-- **Solution**: Send denial banner via SSH protocol message (MSG_USERAUTH_BANNER)
-- Uses Paramiko Message API to send banner immediately on denial
-- Works even when Stay exists but grant expired
-- Result: User sees personalized "Dear Paweł Mojski, you don't have access to rancher-2" message
+**2. SSH Key Fingerprint Persistence** (src/proxy/ssh_proxy.py):
+- Extract SHA256 fingerprint in `check_auth_publickey()` (line 514)
+- Format: `base64.b64encode(hashlib.sha256(key.asbytes()).digest())`
+- Example: `FrMnH/bvPbA5prMYh5QNbKs/Z4YLCXRrxY5uj1njtjA=`
+- Stay matching: First connection with key → MFA → Stay created with fingerprint
+- Subsequent connections: Same fingerprint → user identified → skip MFA (unless policy requires)
 
-**6. Stay Lifecycle**:
-- Create Stay: First MFA authentication → Stay with ssh_key_fingerprint created
-- Reuse Stay: Same key + gate → Stay found → user identified → skip MFA
-- Grant expires: Connection terminated, but Stay remains active
-- Reconnect: Stay found → user identified → personalized denial banner
-- Close Stay: Last session ends → Stay.is_active = false → next connection = MFA
+**3. Password Authentication with MFA** (src/proxy/ssh_proxy.py lines 456-620):
+- `check_auth_password()`: Full MFA flow support
+  - Check grant with fingerprint=None (unknown user)
+  - If mfa_required → create challenge → send banner via MSG_USERAUTH_BANNER
+  - Poll status every 2s (5min timeout)
+  - After MFA verified → re-check grant with mfa_token
+  - Store password for backend authentication
+- Stay creation without fingerprint (password-only sessions)
+- Fingerprint upgrade: Stay created via password → key arrives later → fingerprint added
+
+**4. Password Fallback After Agent Key Rejection** (src/proxy/ssh_proxy.py lines 2825-2860):
+- Problem: Laptop with agent forwarding, but keys not on backend
+- Gate accepts key → backend rejects all agent keys → **NEW**: Gate prompts for password
+- Flow: Send password prompt via channel → read user input → authenticate backend
+- Critical for mixed environments (keys on gate, passwords on backends)
+
+**5. Keyboard-Interactive MFA Handling** (src/proxy/ssh_proxy.py lines 823-860):
+- Problem: OpenSSH client prefers keyboard-interactive over password auth
+- Original behavior: keyboard-interactive had no MFA support → silent failure
+- **NEW**: Detect mfa_required → reject keyboard-interactive with AUTH_FAILED
+- Client fallback: OpenSSH falls back to password auth (which has MFA)
+- Network switches: keyboard-interactive still works when MFA not required
+
+**6. Per-Server MFA Enforcement** (src/api/grants.py lines 391-425):
+```python
+if gate.mfa_enabled and selected_policy and selected_policy.mfa_required:
+    if has_fingerprint_stay:
+        # Force MFA even with existing Stay
+        pass  # Fall through to MFA required logic
+    
+    if not recent_verified_challenge:
+        return jsonify({'allowed': False, 'mfa_required': True})
+```
+- Policy can enforce MFA for specific servers
+- Overrides Stay-based fingerprint bypass
+- Recent challenge window: 60 seconds
+- Use case: Sensitive servers always require MFA
+
+**7. 3-Tier User Identification** (src/api/grants.py lines 178-235):
+```python
+# Priority 1: Fingerprint match (if fingerprint provided)
+stay_by_fingerprint = Stay.query.filter(
+    ssh_key_fingerprint == fingerprint,
+    gate_id == gate.id,
+    is_active == True
+).first()
+
+# Priority 2: Known source IP
+known_ip = UserSourceIP.query.filter(
+    source_ip == source_ip,
+    is_active == True
+).first()
+
+# Priority 3: MFA token (verified challenge)
+challenge = MFAChallenge.query.filter(
+    token == mfa_token,
+    verified == True
+).first()
+```
+- **CRITICAL**: SSH username (e.g., "p.mojski") NOT used for person identification
+- Username only for backend login validation (policy.ssh_logins)
+- Secure: Anyone can provide any username, identification via fingerprint/IP/MFA only
+
+**8. Source IP Markers** (src/core/access_control_v2.py lines 240-290):
+- `_stay_{stay_id}` - Active Stay marker (lookup user from Stay table)
+- `_identified_user_{user_id}` - MFA/known IP identified user
+- `_fingerprint_{user_id}` - Legacy marker (deprecated)
+- **Bug fix**: Corrected marker parsing split indices
+  - `_identified_user_6` → split('_')[3] = '6' ✓ (was [2] = 'user' ✗)
+  - `_stay_134` → split('_')[2] = '134' ✓
+
+**9. Banner Improvements**:
+- ASCII-only banners (removed Unicode emoji that didn't render)
+- MFA banner sent via MSG_USERAUTH_BANNER (works even on auth failure)
+- Personalized denial messages: "Dear Paweł Mojski, you don't have access..."
+- Better error messages: "Access denied after MFA: {reason}" (not "MFA timeout")
 
 **Benefits Achieved**:
-- ✅ Zero configuration for SSH key users (no setup required)
-- ✅ Automatic persistence via SSH public key fingerprint
-- ✅ Multiple terminal windows = single MFA prompt
-- ✅ Works transparently for all SSH clients
-- ✅ Secure: Fingerprint + Tower verification + active Stay check
-- ✅ Personalized denial messages even when grant expired
-- ✅ Clean audit trail: ssh_key_fingerprint in Stay record
-- ✅ Production tested: Jan 28, 2026 - user p.mojski → rancher-2
+- ✅ SSH key users: Zero config, fingerprint persistence, single MFA per Stay
+- ✅ Password users: Full MFA support, no SSH keys required
+- ✅ Laptop users: Agent forwarding with password fallback when keys rejected
+- ✅ Network switches: keyboard-interactive auth works (when MFA not required)
+- ✅ Per-server MFA: Sensitive servers can enforce MFA even with active Stay
+- ✅ Secure identification: fingerprint/IP/MFA only (never SSH username)
+- ✅ Stay fingerprint upgrade: password → key arrives → fingerprint added
+- ✅ Clean audit trail: ssh_key_fingerprint + identification_method in logs
 
-**Testing Results**:
-- First connection → ✅ MFA challenge, SAML auth, Stay created
-- Second connection (same key) → ✅ No MFA, immediate connection
-- Grant expires → ✅ Personalized denial banner: "Dear Paweł Mojski..."
-- Stay closes → ✅ Next connection requires MFA again
-- Unknown IP detection → ✅ Replaced by fingerprint matching
+**Testing Results** (January 28, 2026):
+- ✅ Password-only auth (no SSH key) → MFA → connected
+- ✅ SSH key + agent forwarding, backend rejects → password prompt → connected
+- ✅ Network switch (keyboard-interactive) → connected (no MFA)
+- ✅ First connection with key → MFA → Stay created with fingerprint
+- ✅ Second connection (same key) → no MFA (fingerprint match)
+- ✅ Password-only second session → MFA → joins existing Stay
+- ✅ Server with policy.mfa_required=True → MFA enforced despite Stay
+- ✅ Server with policy.mfa_required=False → fingerprint bypass works
+
+**Production Deployment**:
+- Tower (10.0.160.5): Flask restarted with marker parsing fix
+- Gate tailscale-etop (10.210.0.76): v1.11.1-tproxy deployed
+- Gate tailscale-ideo (10.30.0.76): v1.11.1-tproxy deployed (new gate)
+- Database: New gate added, Stay #134 active (p.mojski, fingerprint-based)
 
 **Code Locations**:
 - Stay schema: src/core/database.py lines 481-520
 - Fingerprint extraction: src/proxy/ssh_proxy.py line 514
-- Stay matching: src/api/grants.py lines 193-198
-- Banner sending: src/proxy/ssh_proxy.py lines 663-675
+- Password auth with MFA: src/proxy/ssh_proxy.py lines 456-620
+- Keyboard-interactive handling: src/proxy/ssh_proxy.py lines 823-860
+- Password fallback: src/proxy/ssh_proxy.py lines 2825-2860
+- User identification: src/api/grants.py lines 178-235
+- Per-server MFA: src/api/grants.py lines 391-425
+- Marker parsing: src/core/access_control_v2.py lines 240-290
 - Stay creation: src/api/stays.py lines 55-140
 
 ### v1.12 - Auto-Registration & Auto-Grant Groups 🎯 FUTURE

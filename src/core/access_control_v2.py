@@ -240,22 +240,49 @@ class AccessControlEngineV2:
                             'reason': reason
                         }
             
-            # Step 1: Find user by source_ip or fingerprint/MFA marker
+            # Step 1: Find user by source_ip or special markers
             user = None
             user_ip = None
             
-            # Check if this is a fingerprint or MFA-based authentication
-            if source_ip.startswith('_fingerprint_'):
-                # Extract user_id from marker: _fingerprint_{user_id}
+            # Check if this is a special authentication marker
+            if source_ip.startswith('_fingerprint_') or source_ip.startswith('_identified_user_') or source_ip.startswith('_stay_'):
+                # Extract user_id from marker formats:
+                # _fingerprint_{user_id} (legacy)
+                # _identified_user_{user_id} (MFA/known IP identified)
+                # _stay_{stay_id} (active Stay - need to lookup user)
                 try:
-                    user_id = int(source_ip.split('_')[2])
+                    if source_ip.startswith('_stay_'):
+                        # Lookup user from Stay: _stay_{stay_id}
+                        stay_id = int(source_ip.split('_')[2])
+                        from src.core.database import Stay
+                        stay = db.query(Stay).filter(Stay.id == stay_id).first()
+                        if not stay:
+                            logger.error(f"Stay ID {stay_id} not found")
+                            return {
+                                'has_access': False,
+                                'user': None,
+                                'user_ip': None,
+                                'server': None,
+                                'policies': [],
+                                'selected_policy': None,
+                                'denial_reason': 'stay_not_found',
+                                'reason': 'Stay not found'
+                            }
+                        user_id = stay.user_id
+                    elif source_ip.startswith('_identified_user_'):
+                        # Extract user_id: _identified_user_{user_id}
+                        user_id = int(source_ip.split('_')[3])
+                    else:
+                        # Legacy: _fingerprint_{user_id}
+                        user_id = int(source_ip.split('_')[2])
+                    
                     user = db.query(User).filter(
                         User.id == user_id,
                         User.is_active == True
                     ).first()
                     
                     if not user:
-                        logger.warning(f"Access denied: User ID {user_id} from fingerprint marker not found or inactive")
+                        logger.warning(f"Access denied: User ID {user_id} from marker not found or inactive")
                         return {
                             'has_access': False,
                             'user': None,
@@ -267,11 +294,11 @@ class AccessControlEngineV2:
                             'reason': f'User not found or inactive'
                         }
                     
-                    logger.info(f"User identified via SSH key fingerprint: {user.username} (ID: {user.id})")
-                    # user_ip remains None - this is fingerprint-based auth, not IP-based
+                    logger.info(f"User identified via marker: {user.username} (ID: {user.id}, marker: {source_ip.split('_')[1]})")
+                    # user_ip remains None - this is marker-based auth, not IP-based
                     
                 except (IndexError, ValueError) as e:
-                    logger.error(f"Invalid fingerprint marker format: {source_ip}")
+                    logger.error(f"Invalid marker format: {source_ip}")
                     return {
                         'has_access': False,
                         'user': None,

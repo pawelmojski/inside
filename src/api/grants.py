@@ -179,85 +179,123 @@ def check_grant():
             'message': 'Protocol must be "ssh" or "rdp"'
         }), 400
     
-    # MFA PHASE 2: Fingerprint-based session persistence
-    # Check if gate has MFA enabled and handle fingerprint logic
+    # MFA PHASE 2: User identification and Stay management
+    # STEP 1: Identify user_id (required before Stay matching)
+    user_id = None
+    active_stay = None
+    identification_method = None
+    
     if gate.mfa_enabled:
-        from src.core.database import UserSourceIP, Stay
+        from src.core.database import UserSourceIP, Stay, MFAChallenge
         
-        # Check if source IP is known (belongs to a user)
-        known_ip = db.query(UserSourceIP).filter(
-            UserSourceIP.source_ip == source_ip,
-            UserSourceIP.is_active == True
-        ).first()
-        
-        if not known_ip:
-            # Unknown IP - check for existing Stay with this fingerprint (if provided)
-            active_stay = None
-            if ssh_key_fingerprint:
-                active_stay = db.query(Stay).filter(
-                    Stay.ssh_key_fingerprint == ssh_key_fingerprint,
-                    Stay.gate_id == gate.id,
-                    Stay.is_active == True
-                ).first()
+        # Method A: Fingerprint match (if fingerprint provided)
+        if ssh_key_fingerprint and not user_id:
+            stay_by_fingerprint = db.query(Stay).filter(
+                Stay.ssh_key_fingerprint == ssh_key_fingerprint,
+                Stay.gate_id == gate.id,
+                Stay.is_active == True
+            ).first()
             
-            if active_stay:
-                # Found Stay by fingerprint - override source_ip logic
-                # Use the user from Stay for access check
-                source_ip = f"_fingerprint_{active_stay.user_id}"  # Marker for engine
-                # Store stay info for later use
-                request.fingerprint_stay = active_stay
-            elif mfa_token:
-                # MFA was completed - verify the token and get user_id
-                from src.core.database import MFAChallenge
-                challenge = db.query(MFAChallenge).filter(
-                    MFAChallenge.token == mfa_token,
-                    MFAChallenge.gate_id == gate.id,
-                    MFAChallenge.verified == True
-                ).first()
-                
-                if challenge and challenge.user_id:
-                    logger.info(f"Using verified MFA token: user_id={challenge.user_id}")
-                    source_ip = f"_fingerprint_{challenge.user_id}"
-                    request.mfa_verified_user_id = challenge.user_id
-                    request.mfa_verified_fingerprint = ssh_key_fingerprint
-                else:
-                    logger.warning(f"Invalid or unverified MFA token: {mfa_token[:20]}")
-                    return jsonify({
-                        'allowed': False,
-                        'mfa_required': True,
-                        'error': 'invalid_mfa_token',
-                        'message': 'MFA token invalid or not verified'
-                    }), 403
+            if stay_by_fingerprint:
+                user_id = stay_by_fingerprint.user_id
+                active_stay = stay_by_fingerprint
+                identification_method = 'fingerprint'
+                logger.info(f"User identified by fingerprint: user_id={user_id}, stay_id={active_stay.id}")
+        
+        # Method B: Known source IP
+        if not user_id:
+            known_ip = db.query(UserSourceIP).filter(
+                UserSourceIP.source_ip == source_ip,
+                UserSourceIP.is_active == True
+            ).first()
+            
+            if known_ip:
+                user_id = known_ip.person_id
+                identification_method = 'known_ip'
+                logger.info(f"User identified by known IP: user_id={user_id}")
+        
+        # Method C: MFA token (verified challenge)
+        if not user_id and mfa_token:
+            challenge = db.query(MFAChallenge).filter(
+                MFAChallenge.token == mfa_token,
+                MFAChallenge.gate_id == gate.id,
+                MFAChallenge.verified == True
+            ).first()
+            
+            if challenge and challenge.user_id:
+                user_id = challenge.user_id
+                identification_method = 'mfa'
+                logger.info(f"User identified by MFA token: user_id={user_id}")
+                request.mfa_verified_user_id = user_id
+                request.mfa_verified_fingerprint = ssh_key_fingerprint
             else:
-                # No Stay with fingerprint found → MFA required
-                # Gate will create challenge, show banner, and poll status
-                # We don't know who the person is yet - they must authenticate via MFA
-                logger.info(f"No active Stay with fingerprint, no known source IP - MFA required")
-                
-                # Find backend server to include in response
-                from src.core.access_control_v2 import AccessControlEngineV2
-                engine = AccessControlEngineV2()
-                backend_info = engine.find_backend_by_proxy_ip(db, destination_ip, gate.id)
-                
-                server_info = {}
-                if backend_info and backend_info['server']:
-                    server = backend_info['server']
-                    server_info = {
-                        'server_id': server.id,
-                        'server_name': server.name,
-                        'server_ip': server.ip_address
-                    }
-                
+                logger.warning(f"Invalid or unverified MFA token: {mfa_token[:20] if mfa_token else None}")
                 return jsonify({
                     'allowed': False,
                     'mfa_required': True,
-                    'reason': 'MFA authentication required - unknown source IP',
-                    'gate_id': gate.id,
-                    'gate_name': gate.name,
-                    'destination_ip': destination_ip,
-                    'ssh_login': ssh_login,
-                    **server_info
+                    'error': 'invalid_mfa_token',
+                    'message': 'MFA token invalid or not verified'
                 }), 403
+        
+        # STEP 2: Check if user needs MFA (not identified yet)
+        if not user_id:
+            logger.info(f"User not identified (fingerprint={ssh_key_fingerprint[:20] if ssh_key_fingerprint else None}, known_ip=False) - MFA required")
+            
+            # Find backend server to include in response
+            from src.core.access_control_v2 import AccessControlEngineV2
+            engine = AccessControlEngineV2()
+            backend_info = engine.find_backend_by_proxy_ip(db, destination_ip, gate.id)
+            
+            server_info = {}
+            if backend_info and backend_info['server']:
+                server = backend_info['server']
+                server_info = {
+                    'server_id': server.id,
+                    'server_name': server.name,
+                    'server_ip': server.ip_address
+                }
+            
+            return jsonify({
+                'allowed': False,
+                'mfa_required': True,
+                'reason': 'MFA authentication required - user not identified',
+                'gate_id': gate.id,
+                'gate_name': gate.name,
+                'destination_ip': destination_ip,
+                'ssh_login': ssh_login,
+                **server_info
+            }), 403
+        
+        # STEP 3: User identified - check/update Stay
+        if not active_stay:
+            # Check if user has active Stay on this Gate
+            active_stay = db.query(Stay).filter(
+                Stay.user_id == user_id,
+                Stay.gate_id == gate.id,
+                Stay.is_active == True
+            ).first()
+            
+            if active_stay:
+                logger.info(f"Found existing Stay for user_id={user_id}: stay_id={active_stay.id}")
+        
+        # STEP 4: Update Stay fingerprint if needed
+        if active_stay:
+            if not active_stay.ssh_key_fingerprint and ssh_key_fingerprint:
+                # Stay has NULL fingerprint, but now user connected with key
+                # Update Stay to enable future fingerprint-based persistence
+                active_stay.ssh_key_fingerprint = ssh_key_fingerprint
+                db.commit()
+                logger.info(f"Updated Stay {active_stay.id} with fingerprint (upgrade from NULL)")
+            
+            # Use Stay for access check
+            source_ip = f"_stay_{active_stay.id}"
+            request.identified_stay = active_stay
+        else:
+            # No Stay yet - will be created after grant check passes
+            # Use special marker for access engine
+            source_ip = f"_identified_user_{user_id}"
+            request.identified_user_id = user_id
+            request.identified_fingerprint = ssh_key_fingerprint
     
     # Use AccessControlV2 engine - ALL the magic happens here!
     from src.core.access_control_v2 import AccessControlEngineV2

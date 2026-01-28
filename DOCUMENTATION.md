@@ -1566,45 +1566,109 @@ Groups:      http://schemas.microsoft.com/ws/2008/06/identity/claims/groups
 11. Tower creates Stay with ssh_key_fingerprint, marks MFA challenge as verified
 12. Gate polls `/api/v1/mfa/status/{token}` → verified → connection proceeds
 
-**MFA Phase 2 - SSH Key Fingerprint Session Persistence** ✅ **IMPLEMENTED (January 28, 2026)**:
-- Gate extracts SHA256 fingerprint of SSH public key during authentication
-- Fingerprint sent in check_grant API call: `ssh_key_fingerprint` parameter
-- Tower matches active Stay by: fingerprint + gate_id + is_active
-- If Stay found → user identified → skip MFA prompt
-- Result: First connection = MFA, subsequent connections = automatic
-- **Zero configuration required** - works transparently for all SSH key users
-- Stay lifecycle: Created on first MFA → Reused for all connections → Closed when last session ends
+**MFA Phase 2 - Full Password Auth & Per-Server MFA** ✅ **IMPLEMENTED (January 28, 2026)**:
+
+**SSH Authentication - Multiple Methods**:
+1. **SSH Key with Fingerprint Persistence**:
+   - Gate extracts SHA256 fingerprint of SSH public key
+   - Fingerprint sent in check_grant: `ssh_key_fingerprint` parameter
+   - Tower matches Stay by: fingerprint + gate_id + is_active
+   - First connection with key → MFA → Stay created with fingerprint
+   - Subsequent connections → fingerprint match → skip MFA (unless policy requires)
+   - **Zero configuration** - automatic for all SSH key users
+
+2. **Password Authentication (No SSH Keys)**:
+   - Gate accepts password authentication
+   - Tower check_grant with fingerprint=None
+   - If mfa_required → Gate displays MFA banner → User authenticates in browser
+   - After MFA verified → Stay created without fingerprint (password-only)
+   - Subsequent password connections → MFA required again (no persistent identifier)
+   - Optional: Stay fingerprint upgrade if key arrives later
+
+3. **Password Fallback (Agent Keys Rejected)**:
+   - Laptop with SSH agent forwarding (-A flag)
+   - Gate accepts key → Backend rejects all agent keys
+   - Gate prompts for password through channel
+   - User provides password → Backend authenticates → connection proceeds
+   - Critical for mixed environments (keys on gate, passwords on backends)
+
+4. **Keyboard-Interactive Handling**:
+   - OpenSSH client prefers keyboard-interactive over password
+   - If MFA required → Gate rejects keyboard-interactive
+   - Client falls back to password auth (which has MFA support)
+   - Network switches (non-MFA scenarios) → keyboard-interactive still works
+
+**3-Tier User Identification** (Security Critical):
+```python
+# Priority 1: SSH Key Fingerprint
+Stay.query.filter(
+    ssh_key_fingerprint == fingerprint,
+    gate_id == gate.id,
+    is_active == True
+)
+
+# Priority 2: Known Source IP
+UserSourceIP.query.filter(
+    source_ip == source_ip,
+    is_active == True
+)
+
+# Priority 3: MFA Token (Verified Challenge)
+MFAChallenge.query.filter(
+    token == mfa_token,
+    gate_id == gate.id,
+    verified == True
+)
+```
+**CRITICAL**: SSH username (e.g., "p.mojski", "pmojski") is **NEVER** used for person identification. Anyone can provide any username - identification uses fingerprint/IP/MFA only. Username only for backend login validation (policy.ssh_logins).
+
+**Per-Server MFA Enforcement**:
+- Access policy flag: `mfa_required` (boolean per policy)
+- Overrides Stay-based fingerprint bypass
+- Use case: Sensitive production servers always require MFA
+- Example: Development servers (mfa_required=False), Production servers (mfa_required=True)
+- Recent challenge window: 60 seconds after MFA verification
 
 **Session Persistence Examples**:
 ```bash
-# First connection (new SSH session)
-$ ssh user@target-server
-# → MFA challenge displayed
-# → User authenticates in browser
-# → Connection established
-# → Stay created with ssh_key_fingerprint
+# Scenario 1: SSH Key User (Automatic)
+$ ssh -A user@dev-server
+# → First connection: MFA challenge → Browser auth → Stay created with fingerprint
+# → Second connection: Fingerprint match → No MFA → Immediate connection
 
-# Second connection (new terminal window, same SSH key)
-$ ssh user@target-server
-# → Gate sends fingerprint
-# → Tower finds active Stay
-# → No MFA prompt
-# → Immediate connection
+# Scenario 2: Password-Only User
+$ ssh user@dev-server
+# → Every connection: MFA challenge → Browser auth → Connected
+# → No persistent identifier → MFA required each time
 
-# Grant expires while connected
-# → Connection terminated with countdown
-# → Stay remains active
+# Scenario 3: Agent Keys Rejected by Backend
+$ ssh -A user@backend
+# → Gate accepts key → Backend rejects agent keys
+# → Gate: "Password:" prompt appears
+# → User types password → Backend authenticates → Connected
 
-# Reconnect attempt (Stay exists, grant expired)
-$ ssh user@target-server
-# → Gate sends fingerprint
-# → Tower identifies user from Stay
-# → Personalized denial: "Dear Paweł Mojski, you don't have access to server-name"
-# → No MFA needed (user already identified)
+# Scenario 4: Per-Server MFA Enforcement
+$ ssh -A user@production-server  # policy.mfa_required=True
+# → MFA challenge (even with active Stay from fingerprint)
+$ ssh -A user@dev-server  # policy.mfa_required=False
+# → Fingerprint match → No MFA → Immediate connection
 
-# Close all sessions
-# → Stay.is_active = false
-# → Next connection requires MFA again
+# Scenario 5: Network Switch (Keyboard-Interactive)
+$ ssh admin@switch
+# → keyboard-interactive authentication works (when MFA not required)
+```
+
+**Database Schema**:
+```sql
+-- Stay with fingerprint tracking
+ALTER TABLE stays ADD COLUMN ssh_key_fingerprint VARCHAR(255);
+CREATE INDEX idx_stays_fingerprint ON stays(ssh_key_fingerprint);
+
+-- Access Policy per-server MFA flag
+ALTER TABLE access_policies ADD COLUMN mfa_required BOOLEAN DEFAULT FALSE;
+
+-- Unique constraint: ONE Stay per user+gate
+UNIQUE(user_id, gate_id, is_active=true)
 ```
 
 **Dependencies** (Python):
