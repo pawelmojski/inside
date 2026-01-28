@@ -3,7 +3,7 @@
 Gates use these endpoints to report session lifecycle events.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from src.api.auth import require_gate_auth, get_current_gate, get_db_session
 from src.core.database import Session, User, Server, Stay
@@ -90,54 +90,42 @@ def create_session():
             'message': f'Server ID {server_id} not found'
         }), 404
     
-    # STAY LOGIC: Check if person has any active sessions
-    # If this is first session → create Stay
-    # If person already has active session(s) → reuse existing Stay
-    active_sessions_count = db.query(Session).filter(
-        Session.user_id == person_id,
-        Session.is_active == True
-    ).count()
+    # STAY LOGIC: Check if person has any active sessions or active Stay
+    # Priority:
+    # 1. If there's an active Stay (even without sessions) → reuse it (fingerprint Stay case)
+    # 2. If person has active session(s) → reuse their Stay
+    # 3. Otherwise → create new Stay
     
-    if active_sessions_count == 0:
-        # First session - create new Stay
-        logger.info(f"First session for person {person.username} - creating new Stay")
+    # First check if there's ANY active Stay for this person (including fingerprint Stays without sessions)
+    existing_stay = db.query(Stay).filter(
+        Stay.user_id == person_id,
+        Stay.is_active == True
+    ).first()
+    
+    if existing_stay:
+        stay_id = existing_stay.id
+        logger.info(f"Reusing existing Stay #{stay_id} for person {person.username}")
+    else:
+        # No active Stay - create new one
+        # MFA Phase 2: Include fingerprint if provided (from MFA verification)
+        ssh_key_fingerprint = data.get('ssh_key_fingerprint')
+        logger.info(f"No active Stay found for person {person.username} - creating new Stay (fingerprint={'Yes' if ssh_key_fingerprint else 'No'})")
         stay = Stay(
             user_id=person_id,
             policy_id=data.get('grant_id'),  # Policy used for first session
             gate_id=gate.id,
             server_id=server_id,  # First server for metadata
             started_at=datetime.utcnow(),
-            is_active=True
+            is_active=True,
+            ssh_key_fingerprint=ssh_key_fingerprint  # Phase 2: Save fingerprint for session persistence
         )
         db.add(stay)
         db.flush()  # Get stay.id before creating session
         stay_id = stay.id
-        logger.info(f"Created Stay #{stay_id} for person {person.username}")
-    else:
-        # Person already has active session(s) - reuse existing Stay
-        existing_stay = db.query(Stay).filter(
-            Stay.user_id == person_id,
-            Stay.is_active == True
-        ).first()
-        
-        if existing_stay:
-            stay_id = existing_stay.id
-            logger.info(f"Reusing existing Stay #{stay_id} for person {person.username} (has {active_sessions_count} active sessions)")
+        if ssh_key_fingerprint:
+            logger.info(f"Created Stay #{stay_id} for person {person.username} with fingerprint {ssh_key_fingerprint[:20]}")
         else:
-            # Edge case: has active sessions but no active Stay (data inconsistency)
-            # Create new Stay
-            logger.warning(f"Person {person.username} has {active_sessions_count} active sessions but no active Stay - creating new Stay")
-            stay = Stay(
-                user_id=person_id,
-                policy_id=data.get('grant_id'),
-                gate_id=gate.id,
-                server_id=server_id,
-                started_at=datetime.utcnow(),
-                is_active=True
-            )
-            db.add(stay)
-            db.flush()
-            stay_id = stay.id
+            logger.info(f"Created Stay #{stay_id} for person {person.username}")
     
     # Create session
     now = datetime.utcnow()
@@ -167,6 +155,17 @@ def create_session():
     db.commit()
     db.refresh(db_session)
     
+    # Get grant end_time for monitoring
+    # Use effective_end_time from request if provided (schedule-aware, MFA-adjusted)
+    # Otherwise fallback to policy end_time from database
+    grant_end_time = data.get('effective_end_time')
+    if not grant_end_time and db_session.policy_id:
+        from src.core.database import AccessPolicy
+        grant = db.query(AccessPolicy).get(db_session.policy_id)
+        if grant and grant.end_time:
+            # Database stores naive UTC datetime - add 'Z' suffix
+            grant_end_time = grant.end_time.isoformat() + 'Z'
+    
     return jsonify({
         'session_id': session_id,
         'db_session_id': db_session.id,
@@ -179,6 +178,7 @@ def create_session():
         'stay_id': stay_id,
         'started_at': db_session.started_at.isoformat(),
         'is_active': True,
+        'grant_end_time': grant_end_time,  # For Gate to update session_grant_endtimes
         'message': 'Session created successfully'
     }), 201
 

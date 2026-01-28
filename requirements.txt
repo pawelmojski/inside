@@ -50,8 +50,10 @@ pyOpenSSL==23.3.0
 pyrdp-mitm==2.1.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
+python-saml==1.16.0
 python-utils==3.9.1
 pytz==2025.2
+qrcode==8.2
 rich==14.2.0
 rsa==4.9.1
 scapy==2.7.0

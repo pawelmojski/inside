@@ -25,7 +25,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Only create engine if DATABASE_URL is set (all-in-one mode)
 # In standalone/gate-only mode, this module won't be fully initialized
 if DATABASE_URL:
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, connect_args={"options": "-c timezone=utc"})
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 else:
     engine = None
@@ -158,6 +158,9 @@ class Gate(Base):
     # Maintenance mode
     in_maintenance = Column(Boolean, default=False, nullable=False)
     maintenance_scheduled_at = Column(DateTime)
+    
+    # MFA configuration - fingerprint-based session persistence
+    mfa_enabled = Column(Boolean, default=False, nullable=False)  # If true, gate uses MFA for unknown IPs
     maintenance_reason = Column(Text)
     maintenance_grace_minutes = Column(Integer, default=15)
     
@@ -360,6 +363,9 @@ class AccessPolicy(Base):
     # Inactivity timeout (minutes) - NULL or 0 = disabled, default 60 minutes
     inactivity_timeout_minutes = Column(Integer, nullable=True, default=60)
     
+    # MFA requirement - if True, user must complete SAML authentication before access
+    mfa_required = Column(Boolean, default=False, nullable=False)
+    
     # Schedule-based access (recurring time windows)
     use_schedules = Column(Boolean, default=False, nullable=False)  # If True, check policy_schedules
     
@@ -492,6 +498,9 @@ class Stay(Base):
     # Status
     is_active = Column(Boolean, default=True, nullable=False, index=True)  # True = person is inside
     termination_reason = Column(String(255))  # grant_expired, revoked, manual_disconnect, schedule_ended
+    
+    # MFA session persistence - SSH key fingerprint acts as session cookie
+    ssh_key_fingerprint = Column(String(255), index=True)  # SHA256 fingerprint for cross-IP session identification
     
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -751,6 +760,30 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+class MFAChallenge(Base):
+    """MFA Challenge for SAML authentication."""
+    __tablename__ = "mfa_challenges"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    gate_id = Column(Integer, ForeignKey("gates.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # Nullable in Phase 2
+    grant_id = Column(Integer, ForeignKey("access_policies.id", ondelete="CASCADE"), nullable=True)  # Nullable in Phase 2
+    ssh_username = Column(String(255), nullable=False)
+    source_ip = Column(String(45))  # Client source IP
+    destination_ip = Column(String(45))  # Phase 2: target server IP for grant lookup after SAML
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    verified = Column(Boolean, default=False, nullable=False)
+    verified_at = Column(DateTime)
+    saml_email = Column(String(255))
+    
+    # Relationships
+    gate = relationship("Gate")
+    user = relationship("User")
+    grant = relationship("AccessPolicy")
 
 
 if __name__ == "__main__":

@@ -197,6 +197,20 @@
                         </small>
                     </div>
                     
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input type="checkbox" class="form-check-input" id="mfa_required" 
+                                   name="mfa_required">
+                            <label class="form-check-label" for="mfa_required">
+                                <i class="bi bi-shield-lock"></i> Require MFA (Multi-Factor Authentication)
+                            </label>
+                            <small class="form-text text-muted d-block">
+                                User must complete Azure AD SAML authentication before accessing the server.
+                                MFA challenge displayed in SSH banner with link and QR code.
+                            </small>
+                        </div>
+                    </div>
+                    
                     <hr class="my-4">
                     
                     <h5 class="mb-3">7. Recurring Schedule (Optional)</h5>

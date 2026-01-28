@@ -6,10 +6,18 @@ Flask-based web interface for managing SSH/RDP jumphost access control.
 
 import os
 import sys
+import logging
 from datetime import datetime
 from flask import Flask, render_template, redirect, url_for, flash, request
 from flask_login import LoginManager, login_required, current_user
+from werkzeug.middleware.proxy_fix import ProxyFix
 import pytz
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -21,6 +29,10 @@ from src.core.access_control_v2 import AccessControlEngineV2
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://jumphost_user:password@localhost/jumphost')
+app.config['PREFERRED_URL_SCHEME'] = 'https'
+
+# Apply ProxyFix middleware - Flask is behind nginx reverse proxy
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -171,6 +183,7 @@ from blueprints.auth import auth_bp
 from blueprints.gates import gates_bp as gates_ui_bp  # Web UI for gates management
 from blueprints.stays import stays_bp as stays_ui_bp  # Web UI for stays tracking
 from search import search_bp
+from auth_saml import saml_bp  # SAML authentication for MFA
 
 # Import Tower API blueprints
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -178,6 +191,8 @@ from api.grants import grants_bp
 from api.stays import stays_bp as stays_api_bp  # API for gate communication
 from api.gates import gates_bp as gates_api_bp  # API for gate communication
 from api.maintenance import maintenance_bp  # API for maintenance mode
+from api.mfa import mfa_bp  # API for MFA challenge/status
+from api.mfa_pending import mfa_pending_bp  # API for pending MFA list
 
 app.register_blueprint(dashboard_bp, url_prefix='/')
 app.register_blueprint(users_bp, url_prefix='/users')
@@ -189,6 +204,7 @@ app.register_blueprint(sessions_bp, url_prefix='/sessions')
 app.register_blueprint(stays_ui_bp, url_prefix='/stays')  # Web UI for stays
 app.register_blueprint(monitoring_bp, url_prefix='/monitoring')
 app.register_blueprint(auth_bp, url_prefix='/auth')
+app.register_blueprint(saml_bp)  # SAML endpoints (/auth/saml/*)
 app.register_blueprint(gates_ui_bp, url_prefix='/gates')  # Web UI for gates
 app.register_blueprint(search_bp, url_prefix='/search')
 
@@ -197,9 +213,14 @@ app.register_blueprint(grants_bp)
 app.register_blueprint(stays_api_bp, name='stays_api')  # API endpoint, unique name
 app.register_blueprint(gates_api_bp, name='gates_api')  # API for gates (/api/v1/gates/*) - unique name
 app.register_blueprint(maintenance_bp)  # Maintenance mode endpoints
+app.register_blueprint(mfa_bp)  # MFA API (/api/v1/mfa/*)
+app.register_blueprint(mfa_pending_bp)  # MFA pending list (/api/v1/mfa/pending)
 
 from src.api.sessions import api_sessions_bp
 app.register_blueprint(api_sessions_bp)
+
+from src.api.sessions_grant_status import bp as sessions_grant_status_bp
+app.register_blueprint(sessions_grant_status_bp)
 
 from src.api.recordings import recordings_bp
 app.register_blueprint(recordings_bp)

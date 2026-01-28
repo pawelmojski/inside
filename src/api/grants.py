@@ -147,10 +147,14 @@ def check_grant():
         
         400 Bad Request: Missing parameters
     """
+    from sqlalchemy import and_, or_
+    
     gate = get_current_gate()
     db = get_db_session()
     
     data = request.get_json()
+    logger.info(f"=== check_grant START === gate={gate.name if gate else 'None'}, data keys={list(data.keys()) if data else 'None'}")
+    
     if not data:
         return jsonify({'error': 'missing_body', 'message': 'Request body required'}), 400
     
@@ -158,6 +162,10 @@ def check_grant():
     destination_ip = data.get('destination_ip')
     protocol = data.get('protocol')
     ssh_login = data.get('ssh_login')
+    ssh_key_fingerprint = data.get('ssh_key_fingerprint')  # Optional: for MFA session persistence
+    mfa_token = data.get('mfa_token')  # Optional: verified MFA challenge token
+    
+    logger.info(f"check_grant params: source_ip={source_ip}, dest_ip={destination_ip}, protocol={protocol}, ssh_login={ssh_login}, fingerprint={ssh_key_fingerprint[:20] if ssh_key_fingerprint else None}, mfa_token={mfa_token[:20] if mfa_token else None}")
     
     if not source_ip or not destination_ip or not protocol:
         return jsonify({
@@ -170,6 +178,86 @@ def check_grant():
             'error': 'invalid_protocol',
             'message': 'Protocol must be "ssh" or "rdp"'
         }), 400
+    
+    # MFA PHASE 2: Fingerprint-based session persistence
+    # Check if gate has MFA enabled and handle fingerprint logic
+    if gate.mfa_enabled:
+        from src.core.database import UserSourceIP, Stay
+        
+        # Check if source IP is known (belongs to a user)
+        known_ip = db.query(UserSourceIP).filter(
+            UserSourceIP.source_ip == source_ip,
+            UserSourceIP.is_active == True
+        ).first()
+        
+        if not known_ip:
+            # Unknown IP - check for existing Stay with this fingerprint (if provided)
+            active_stay = None
+            if ssh_key_fingerprint:
+                active_stay = db.query(Stay).filter(
+                    Stay.ssh_key_fingerprint == ssh_key_fingerprint,
+                    Stay.gate_id == gate.id,
+                    Stay.is_active == True
+                ).first()
+            
+            if active_stay:
+                # Found Stay by fingerprint - override source_ip logic
+                # Use the user from Stay for access check
+                source_ip = f"_fingerprint_{active_stay.user_id}"  # Marker for engine
+                # Store stay info for later use
+                request.fingerprint_stay = active_stay
+            elif mfa_token:
+                # MFA was completed - verify the token and get user_id
+                from src.core.database import MFAChallenge
+                challenge = db.query(MFAChallenge).filter(
+                    MFAChallenge.token == mfa_token,
+                    MFAChallenge.gate_id == gate.id,
+                    MFAChallenge.verified == True
+                ).first()
+                
+                if challenge and challenge.user_id:
+                    logger.info(f"Using verified MFA token: user_id={challenge.user_id}")
+                    source_ip = f"_fingerprint_{challenge.user_id}"
+                    request.mfa_verified_user_id = challenge.user_id
+                    request.mfa_verified_fingerprint = ssh_key_fingerprint
+                else:
+                    logger.warning(f"Invalid or unverified MFA token: {mfa_token[:20]}")
+                    return jsonify({
+                        'allowed': False,
+                        'mfa_required': True,
+                        'error': 'invalid_mfa_token',
+                        'message': 'MFA token invalid or not verified'
+                    }), 403
+            else:
+                # No Stay with fingerprint found → MFA required
+                # Gate will create challenge, show banner, and poll status
+                # We don't know who the person is yet - they must authenticate via MFA
+                logger.info(f"No active Stay with fingerprint, no known source IP - MFA required")
+                
+                # Find backend server to include in response
+                from src.core.access_control_v2 import AccessControlEngineV2
+                engine = AccessControlEngineV2()
+                backend_info = engine.find_backend_by_proxy_ip(db, destination_ip, gate.id)
+                
+                server_info = {}
+                if backend_info and backend_info['server']:
+                    server = backend_info['server']
+                    server_info = {
+                        'server_id': server.id,
+                        'server_name': server.name,
+                        'server_ip': server.ip_address
+                    }
+                
+                return jsonify({
+                    'allowed': False,
+                    'mfa_required': True,
+                    'reason': 'MFA authentication required - unknown source IP',
+                    'gate_id': gate.id,
+                    'gate_name': gate.name,
+                    'destination_ip': destination_ip,
+                    'ssh_login': ssh_login,
+                    **server_info
+                }), 403
     
     # Use AccessControlV2 engine - ALL the magic happens here!
     from src.core.access_control_v2 import AccessControlEngineV2
@@ -236,6 +324,70 @@ def check_grant():
     server = result['server']
     selected_policy = result['selected_policy']
     
+    # MFA Phase 2: Create Stay with fingerprint if user was just verified via MFA
+    logger.info(f"DEBUG Stay creation: gate.mfa_enabled={gate.mfa_enabled}, ssh_key_fingerprint={ssh_key_fingerprint[:20] if ssh_key_fingerprint else None}")
+    if gate.mfa_enabled and ssh_key_fingerprint:
+        from src.core.database import Stay, MFAChallenge
+        from datetime import datetime, timedelta
+        
+        logger.info(f"DEBUG: Querying for recent verified MFA challenge for user {user.id}, gate {gate.id}")
+        # Check if user just completed MFA verification (within last 60 seconds)
+        recent_verified_challenge = db.query(MFAChallenge).filter(
+            MFAChallenge.gate_id == gate.id,
+            MFAChallenge.user_id == user.id,
+            MFAChallenge.verified == True,
+            MFAChallenge.verified_at > datetime.utcnow() - timedelta(seconds=60)
+        ).order_by(MFAChallenge.verified_at.desc()).first()
+        
+        logger.info(f"DEBUG: Found challenge: {recent_verified_challenge.id if recent_verified_challenge else None}")
+        
+        has_fingerprint_stay = hasattr(request, 'fingerprint_stay') and request.fingerprint_stay
+        logger.info(f"DEBUG: has_fingerprint_stay={has_fingerprint_stay}")
+        
+        # Mark that this user was verified via MFA and should get Stay with fingerprint when session is created
+        if recent_verified_challenge and not has_fingerprint_stay and ssh_key_fingerprint:
+            request.mfa_verified_fingerprint = ssh_key_fingerprint
+            logger.info(f"DEBUG: Marked fingerprint {ssh_key_fingerprint[:20]} for Stay creation on session start")
+    
+    # MFA Phase 2: Check if MFA required based on gate config and grant
+    if gate.mfa_enabled and selected_policy and selected_policy.mfa_required:
+        # Check if we have fingerprint-based Stay (from earlier lookup)
+        has_fingerprint_stay = hasattr(request, 'fingerprint_stay') and request.fingerprint_stay
+        
+        if has_fingerprint_stay:
+            # Have Stay from fingerprint, but grant REQUIRES MFA for this server
+            # Force MFA even with existing Stay
+            pass  # Fall through to MFA required logic below
+        
+        # Check if user has verified MFA challenge (not expired)
+        # Challenge must be recent (last 60 seconds) to prevent reuse
+        from src.core.database import MFAChallenge
+        from datetime import datetime, timedelta
+        
+        # Phase 2: challenge.grant_id may be NULL, so check by user_id and gate_id only
+        recent_verified_challenge = db.query(MFAChallenge).filter(
+            MFAChallenge.gate_id == gate.id,
+            MFAChallenge.user_id == user.id,
+            MFAChallenge.verified == True,
+            MFAChallenge.verified_at > datetime.utcnow() - timedelta(seconds=60)  # 60 second window after verification
+        ).order_by(MFAChallenge.verified_at.desc()).first()
+        
+        if not recent_verified_challenge:
+            # MFA required - no recent verified challenge
+            # Return special response telling Gate to trigger MFA flow
+            return jsonify({
+                'allowed': False,
+                'mfa_required': True,
+                'user_id': user.id,
+                'person_username': user.username,
+                'person_fullname': transliterate_polish(user.full_name) if hasattr(user, 'full_name') else user.username,
+                'grant_id': selected_policy.id,
+                'server_id': server.id,
+                'server_name': server.name,
+                'reason': 'MFA authentication required',
+                'message': 'Please complete MFA authentication to proceed'
+            }), 200  # Return 200 (not 403) - this is expected flow, not denial
+    
     # Build success response
     response = {
         'allowed': True,
@@ -247,13 +399,18 @@ def check_grant():
         'server_ip': server.ip_address,
         'grant_id': selected_policy.id if selected_policy else None,
         'grant_scope': selected_policy.scope_type if selected_policy else None,
-        'effective_end_time': result['effective_end_time'].isoformat() if result.get('effective_end_time') else None,
+        'effective_end_time': result['effective_end_time'].isoformat() + 'Z' if result.get('effective_end_time') else None,
         'port_forwarding_allowed': selected_policy.port_forwarding_allowed if selected_policy else False,
         'inactivity_timeout_minutes': selected_policy.inactivity_timeout_minutes if selected_policy else 60,
         'reason': result.get('reason', 'Access granted'),
         'gate_id': gate.id,
         'gate_name': gate.name
     }
+    
+    # MFA Phase 2: If this was MFA verification, tell Gate to save fingerprint in Stay
+    if hasattr(request, 'mfa_verified_fingerprint') and request.mfa_verified_fingerprint:
+        response['ssh_key_fingerprint'] = request.mfa_verified_fingerprint
+        logger.info(f"Sending fingerprint to Gate for Stay creation: {request.mfa_verified_fingerprint[:20]}")
     
     # Add SSH logins if protocol is SSH
     if protocol == 'ssh' and selected_policy:

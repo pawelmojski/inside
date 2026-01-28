@@ -1552,19 +1552,60 @@ Surname:     http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname
 Groups:      http://schemas.microsoft.com/ws/2008/06/identity/claims/groups
 ```
 
-**MFA Flow Architecture** (planned):
+**MFA Flow Architecture** ✅ **IMPLEMENTED (January 2026)**:
 1. User connects to Gate via SSH
-2. Gate checks grant, requires MFA → Tower API `/api/mfa/challenge`
+2. Gate checks grant, requires MFA → Tower API `/api/v1/mfa/challenge`
 3. Tower generates SAML AuthnRequest with RelayState = MFA token
-4. Gate displays banner: "MFA required: https://inside.ideo.pl/auth/saml/login?RelayState={token}"
+4. Gate displays banner: "MFA required: https://inside.ideo.pl/auth/saml/login?token={token}"
 5. User opens URL in browser → redirected to Azure AD SAML login
 6. User authenticates (Azure AD enforces MFA if configured)
 7. Azure AD posts SAML Response to `/auth/saml/acs`
 8. Tower validates assertion, extracts email + groups
 9. Tower checks group membership (`insideAccess` group)
 10. Tower auto-registers person if first login
-11. Tower creates Stay, marks MFA challenge as verified
-12. Gate polls `/api/mfa/status/{token}` → verified → connection proceeds
+11. Tower creates Stay with ssh_key_fingerprint, marks MFA challenge as verified
+12. Gate polls `/api/v1/mfa/status/{token}` → verified → connection proceeds
+
+**MFA Phase 2 - SSH Key Fingerprint Session Persistence** ✅ **IMPLEMENTED (January 28, 2026)**:
+- Gate extracts SHA256 fingerprint of SSH public key during authentication
+- Fingerprint sent in check_grant API call: `ssh_key_fingerprint` parameter
+- Tower matches active Stay by: fingerprint + gate_id + is_active
+- If Stay found → user identified → skip MFA prompt
+- Result: First connection = MFA, subsequent connections = automatic
+- **Zero configuration required** - works transparently for all SSH key users
+- Stay lifecycle: Created on first MFA → Reused for all connections → Closed when last session ends
+
+**Session Persistence Examples**:
+```bash
+# First connection (new SSH session)
+$ ssh user@target-server
+# → MFA challenge displayed
+# → User authenticates in browser
+# → Connection established
+# → Stay created with ssh_key_fingerprint
+
+# Second connection (new terminal window, same SSH key)
+$ ssh user@target-server
+# → Gate sends fingerprint
+# → Tower finds active Stay
+# → No MFA prompt
+# → Immediate connection
+
+# Grant expires while connected
+# → Connection terminated with countdown
+# → Stay remains active
+
+# Reconnect attempt (Stay exists, grant expired)
+$ ssh user@target-server
+# → Gate sends fingerprint
+# → Tower identifies user from Stay
+# → Personalized denial: "Dear Paweł Mojski, you don't have access to server-name"
+# → No MFA needed (user already identified)
+
+# Close all sessions
+# → Stay.is_active = false
+# → Next connection requires MFA again
+```
 
 **Dependencies** (Python):
 ```bash
@@ -1602,6 +1643,79 @@ CREATE TABLE mfa_challenges (
 ALTER TABLE persons ADD COLUMN created_via VARCHAR(50) DEFAULT 'manual';
 -- Values: 'manual', 'saml-auto-registry'
 ```
+
+---
+
+### v1.11 - Simplified Grant Expiry Architecture (January 28, 2026) ✅
+**Focus**: Complete rewrite of grant expiry monitoring for reliability and maintainability
+
+**Problem Addressed**:
+- Previous implementation: ~400 lines with complex state machines
+- Multiple time tracking variables causing confusion and bugs
+- Extension/shortening detection logic prone to false positives
+- MFA grant time mismatch: stale cached values causing premature disconnects
+- Spam warnings from "detected extension" restart loops
+- Timezone comparison bugs: naive UTC vs CET interpretation issues
+
+**New Architecture - API Polling Based**:
+
+1. **Single Source of Truth - New Endpoint**:
+   - `GET /api/v1/sessions/{session_id}/grant_status`
+   - Returns: `{'valid': bool, 'end_time': 'ISO+Z' or null, 'reason': str}`
+   - Always queries AccessPolicy directly (no caching)
+   - All datetime values in UTC with 'Z' suffix
+
+2. **Simplified Monitor Thread** (src/proxy/ssh_proxy.py):
+   - `monitor_grant_expiry_v11()` - NEW polling-based implementation
+   - Polls API every 10 seconds using TowerClient
+   - State-based warnings: `sent_5min_warning`, `sent_1min_warning` flags
+   - No restart logic - just check current state and react
+   - Reduced from ~400 lines to ~150 lines
+   - Works for extension, shortening, and revoke without special cases
+
+3. **Critical Timezone Fix** (src/core/database.py):
+   - Problem: Postgres interpreted naive datetime as CET, Python as UTC
+   - Comparison failures: valid grants appeared expired
+   - Solution: `connect_args={'options': '-c timezone=utc'}` in SQLAlchemy engine
+   - Database columns: `timestamp without time zone` (naive datetime)
+   - Postgres session: forced to UTC timezone
+   - Result: Consistent UTC interpretation throughout system
+
+4. **API Datetime Handling** (src/api/*.py):
+   - All endpoints return UTC with 'Z' suffix: `datetime.isoformat() + 'Z'`
+   - Gate parsing: handles both 'Z' and +HH:MM timezone formats
+   - Conversion to naive UTC: `astimezone(pytz.utc).replace(tzinfo=None)`
+   - Robust against database schema changes
+
+**Code Changes**:
+- **NEW**: src/api/sessions_grant_status.py - Grant status polling endpoint
+- **MODIFIED**: src/proxy/ssh_proxy.py - New monitor_grant_expiry_v11() function
+- **MODIFIED**: src/gate/api_client.py - Added get_session_grant_status() method
+- **MODIFIED**: src/core/database.py - Added timezone=utc to SQLAlchemy engine
+- **MODIFIED**: src/api/sessions.py - UTC datetime handling
+- **REMOVED**: session_grant_endtimes dict tracking (obsolete)
+- **REMOVED**: session_forced_endtimes dict tracking (obsolete)
+- **REMOVED**: Extension/shortening detection logic (obsolete)
+- **REMOVED**: Complex state flags: grant_was_extended, grant_extended_during_warning
+
+**Benefits**:
+- ✅ Much simpler code (~150 lines vs ~400 lines)
+- ✅ Easier to understand and maintain
+- ✅ No complex state machines or countdown restarts
+- ✅ Natural handling of time changes (extension/shortening/revoke)
+- ✅ Fixes MFA grant time bug: always fresh data from API
+- ✅ No timezone comparison bugs: consistent UTC handling
+- ✅ Less prone to edge case bugs
+
+**Testing Status**:
+- ✅ MFA authentication with grant: correct time displayed
+- ✅ Connection established: no premature disconnects
+- ⏳ Grant expiry warnings: pending test at actual expiry time
+
+**Deployment**:
+- Tower (Flask): Updated API endpoints, restarted jumphost-flask.service
+- Gate (tailscale-etop): Updated monitor code, restarted inside-ssh-proxy.service
+- Database: Schema unchanged (timestamp without time zone), timezone enforcement in SQLAlchemy
 
 ---
 

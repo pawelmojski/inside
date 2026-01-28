@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}MFA Authentication{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="row">
+        <div class="col-12">
+            <h1 class="mb-4">
+                <i class="fas fa-shield-alt"></i> MFA Authentication
+            </h1>
+            
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <strong>Complete your authentication:</strong> Find your pending connection below and click "Authorize" to authenticate.
+                This page shows connections waiting for MFA approval from the last 5 minutes.
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Pending Connections</h5>
+                </div>
+                <div class="card-body">
+                    <div id="loading" class="text-center py-5">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                        <p class="mt-3">Loading pending authentications...</p>
+                    </div>
+
+                    <div id="no-pending" class="text-center py-5" style="display: none;">
+                        <i class="fas fa-check-circle text-success fa-3x mb-3"></i>
+                        <h5>No Pending Authentications</h5>
+                        <p class="text-muted">There are no connections waiting for MFA approval.</p>
+                        <small class="text-muted">This page auto-refreshes every 5 seconds</small>
+                    </div>
+
+                    <div id="challenges-list" style="display: none;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.challenge-card {
+    border-left: 4px solid #007bff;
+    margin-bottom: 1rem;
+    transition: all 0.3s;
+}
+
+.challenge-card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    transform: translateY(-2px);
+}
+
+.challenge-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.challenge-icon {
+    font-size: 2rem;
+    color: #007bff;
+}
+
+.challenge-details {
+    flex-grow: 1;
+}
+
+.challenge-meta {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+
+.expires-soon {
+    border-left-color: #ffc107;
+}
+
+.expires-soon .challenge-icon {
+    color: #ffc107;
+}
+</style>
+
+<script>
+let autoRefreshInterval;
+
+function loadPendingChallenges() {
+    fetch('/api/v1/mfa/pending')
+        .then(response => response.json())
+        .then(data => {
+            const loading = document.getElementById('loading');
+            const noPending = document.getElementById('no-pending');
+            const challengesList = document.getElementById('challenges-list');
+            
+            loading.style.display = 'none';
+            
+            if (data.challenges.length === 0) {
+                noPending.style.display = 'block';
+                challengesList.style.display = 'none';
+            } else {
+                noPending.style.display = 'none';
+                challengesList.style.display = 'block';
+                
+                // Build challenges list
+                let html = '<div class="list-group">';
+                
+                data.challenges.forEach(challenge => {
+                    const createdDate = new Date(challenge.created_at);
+                    const expiresDate = new Date(challenge.expires_at);
+                    const now = new Date();
+                    const remainingMs = expiresDate - now;
+                    const remainingMin = Math.floor(remainingMs / 60000);
+                    
+                    const expiresSoon = remainingMin < 2;
+                    const cardClass = expiresSoon ? 'challenge-card expires-soon' : 'challenge-card';
+                    
+                    html += `
+                    <div class="list-group-item ${cardClass}">
+                        <div class="challenge-info">
+                            <div class="challenge-icon">
+                                <i class="fas fa-user-lock"></i>
+                            </div>
+                            <div class="challenge-details">
+                                <h5 class="mb-1">
+                                    <strong>${challenge.user_fullname || challenge.username}</strong>
+                                    <i class="fas fa-arrow-right mx-2"></i>
+                                    <strong>${challenge.server_name}</strong>
+                                </h5>
+                                <div class="challenge-meta">
+                                    <span><i class="fas fa-laptop"></i> ${challenge.source_ip || '(unknown)'}</span>
+                                    <span class="mx-2">→</span>
+                                    <span><i class="fas fa-network-wired"></i> ${challenge.server_ip || challenge.destination_ip}</span>
+                                    ${challenge.ssh_login ? `<span class="mx-2">|</span><span><i class="fas fa-user"></i> ${challenge.ssh_login}</span>` : ''}
+                                    <span class="mx-2">|</span>
+                                    <span><i class="fas fa-server"></i> ${challenge.gate_name}</span>
+                                    <span class="mx-2">|</span>
+                                    <span><i class="fas fa-clock"></i> Expires in ${remainingMin} min</span>
+                                </div>
+                            </div>
+                            <div>
+                                <a href="${challenge.mfa_url}" class="btn btn-primary btn-lg" target="_blank">
+                                    <i class="fas fa-check-circle"></i> Authorize
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    `;
+                });
+                
+                html += '</div>';
+                challengesList.innerHTML = html;
+            }
+        })
+        .catch(error => {
+            console.error('Error loading challenges:', error);
+            document.getElementById('loading').innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    Error loading pending authentications. Please refresh the page.
+                </div>
+            `;
+        });
+}
+
+// Load on page load
+loadPendingChallenges();
+
+// Auto-refresh every 5 seconds
+autoRefreshInterval = setInterval(loadPendingChallenges, 5000);
+
+// Stop auto-refresh when leaving page
+window.addEventListener('beforeunload', () => {
+    clearInterval(autoRefreshInterval);
+});
+</script>
+{% endblock %}

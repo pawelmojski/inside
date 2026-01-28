@@ -384,29 +384,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.no_grant_reason = None  # Reason for no grant (for banner message)
         self.attempted_username = None  # Username from first auth attempt (for banner)
         self.is_tproxy = False  # Will be set to True by handle_client if TPROXY connection
-        
-        # EARLY grant check - BEFORE get_banner() is called
-        # Check if source IP has ANY access to this destination
-        # This allows us to show banner early if IP has no access at all
-        logger.info(f"SSHProxyHandler init: early check for {source_ip} -> {dest_ip}")
-        try:
-            # Call Tower API for access check (without ssh_login for early check)
-            result = self.tower_client.check_grant(
-                source_ip=self.source_ip,
-                destination_ip=self.dest_ip,
-                protocol='ssh',
-                ssh_login=None  # Early check without specific username
-            )
-            
-            if not result.get('allowed'):
-                logger.warning(f"No grant for IP {self.source_ip} to {self.dest_ip}: {result.get('reason')}")
-                # Format denial message for banner
-                self.no_grant_reason = format_denial_message(result, "user", self.dest_ip, self.tower_client)
-            else:
-                logger.debug(f"Grant found for {self.source_ip}, proceeding with auth")
-                
-        except Exception as e:
-            logger.error(f"Error in early grant check: {e}", exc_info=True)
+        self.ssh_key_fingerprint = None  # SSH key fingerprint for session persistence
+        self.pending_mfa_token = None  # MFA challenge token (for cleanup on disconnect)
         
         # PTY parameters from client
         self.pty_term = None
@@ -438,32 +417,40 @@ class SSHProxyHandler(paramiko.ServerInterface):
         # Save username
         self.attempted_username = username
         
+        # SKIP check_grant in auth_none - wait for pubkey auth to extract fingerprint first
+        # This ensures check_grant has ssh_key_fingerprint for Stay matching
         # If no_grant_reason already set from early check, or if not yet checked,
         # do grant check now with username for proper person info
-        if not self.grant_checked:
-            try:
-                result = self.tower_client.check_grant(
-                    source_ip=self.source_ip,
-                    destination_ip=self.dest_ip,
-                    protocol='ssh',
-                    ssh_login=username
-                )
-                
-                # Cache result regardless of outcome to avoid redundant API calls
-                self.grant_checked = True
-                self.grant_result = result
-                
-                if not result.get('allowed'):
-                    # NO GRANT - format denial message with username
-                    logger.warning(f"Access denied in check_auth_none: {result.get('reason')}")
-                    self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
-                else:
-                    # Grant OK - clear any early denial
-                    self.no_grant_reason = None  # Clear early denial if now granted
-            except Exception as e:
-                logger.error(f"Failed to check grant in check_auth_none: {e}")
-                self.no_grant_reason = f"Hello, I'm Gate, an entry point of Inside.\nInternal error occurred. Please contact your system administrator."
+        # if not self.grant_checked:
+        #     try:
+        #         result = self.tower_client.check_grant(
+        #             source_ip=self.source_ip,
+        #             destination_ip=self.dest_ip,
+        #             protocol='ssh',
+        #             ssh_login=username,
+        #             ssh_key_fingerprint=self.ssh_key_fingerprint
+        #         )
+        #         
+        #         # Cache result regardless of outcome to avoid redundant API calls
+        #         self.grant_checked = True
+        #         self.grant_result = result
+        #         
+        #         if not result.get('allowed'):
+        #             # Don't set no_grant_reason if MFA required - will be handled in check_auth_publickey
+        #             if not result.get('mfa_required'):
+        #                 logger.warning(f"Access denied in check_auth_none: {result.get('reason')}")
+        #                 self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
+        #             else:
+        #                 logger.info(f"MFA required for {username}, will be handled in publickey auth")
+        #                 self.no_grant_reason = None
+        #         else:
+        #             # Grant OK - clear any early denial
+        #             self.no_grant_reason = None  # Clear early denial if now granted
+        #     except Exception as e:
+        #         logger.error(f"Failed to check grant in check_auth_none: {e}")
+        #         self.no_grant_reason = f"Hello, I'm Gate, an entry point of Inside.\nInternal error occurred. Please contact your system administrator."
         
+        # Always return AUTH_FAILED - force client to try pubkey (where we extract fingerprint)
         return paramiko.AUTH_FAILED
         
     def check_auth_password(self, username: str, password: str):
@@ -476,7 +463,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
                 source_ip=self.source_ip,
                 destination_ip=self.dest_ip,
                 protocol='ssh',
-                ssh_login=username
+                ssh_login=username,
+                ssh_key_fingerprint=self.ssh_key_fingerprint
             )
             self.grant_checked = True
             self.grant_result = result
@@ -521,23 +509,172 @@ class SSHProxyHandler(paramiko.ServerInterface):
         """
         logger.debug(f"Pubkey auth attempt: {username} from {self.source_ip} to {self.dest_ip}, key type: {key.get_name()}")
         
+        # Extract SSH key fingerprint for session persistence
+        import hashlib
+        import base64
+        key_bytes = key.asbytes()
+        fingerprint_hash = hashlib.sha256(key_bytes).digest()
+        self.ssh_key_fingerprint = base64.b64encode(fingerprint_hash).decode('ascii')
+        logger.debug(f"SSH key fingerprint: {self.ssh_key_fingerprint}")
+        
         # Check access permissions using Tower API (cache result)
         if not self.grant_checked:
             result = self.tower_client.check_grant(
                 source_ip=self.source_ip,
                 destination_ip=self.dest_ip,
                 protocol='ssh',
-                ssh_login=username
+                ssh_login=username,
+                ssh_key_fingerprint=self.ssh_key_fingerprint
             )
             self.grant_checked = True
             self.grant_result = result
         else:
             result = self.grant_result
         
+        # Check if MFA is required
+        if not result.get('allowed') and result.get('mfa_required'):
+            logger.info(f"MFA required for {username}, starting authentication flow")
+            
+            try:
+                # Create MFA challenge
+                # Phase 2: If user_id not provided, pass destination_ip for SAML-based identification
+                if 'user_id' in result and result['user_id']:
+                    # Phase 1: Known user
+                    mfa_resp = self.tower_client.create_mfa_challenge(
+                        ssh_username=username,
+                        user_id=result['user_id'],
+                        grant_id=result.get('grant_id')
+                    )
+                else:
+                    # Phase 2: Unknown user - will be identified via SAML email
+                    mfa_resp = self.tower_client.create_mfa_challenge(
+                        ssh_username=username,
+                        source_ip=self.source_ip,
+                        destination_ip=result.get('destination_ip', self.dest_ip)
+                    )
+                
+                mfa_token = mfa_resp['mfa_token']
+                mfa_url = mfa_resp['mfa_url']
+                mfa_qr = mfa_resp.get('mfa_qr', '')
+                timeout_min = mfa_resp.get('timeout_minutes', 5)
+                
+                # Track token for cleanup on disconnect
+                self.pending_mfa_token = mfa_token
+                
+                # Build and send MFA banner
+                banner_lines = [
+                    "",
+                    "===============================================================",
+                    "  MFA AUTHENTICATION REQUIRED",
+                    "===============================================================",
+                    "",
+                    f"  User: {result.get('person_fullname', username)}",
+                    f"  Target: {result.get('server_name', self.dest_ip)}",
+                    "",
+                    "  Complete authentication in your browser:",
+                    f"  {mfa_url}",
+                    "",
+                    "  (Or visit: https://inside.ideo.pl/mfa)",
+                    f"  Waiting for authentication (timeout: {timeout_min} min)...",
+                    "===============================================================",
+                    ""
+                ]
+                
+                # Send banner via SSH protocol
+                banner_msg = "\r\n".join(banner_lines)
+                try:
+                    from paramiko.message import Message
+                    from paramiko.common import MSG_USERAUTH_BANNER
+                    msg = Message()
+                    msg.add_byte(bytes([MSG_USERAUTH_BANNER]))
+                    msg.add_string(banner_msg.encode('utf-8'))
+                    msg.add_string(b'en')
+                    self.transport._send_message(msg)
+                    logger.info(f"MFA banner sent to client")
+                except Exception as be:
+                    logger.warning(f"Could not send banner: {be}")
+                
+                # Poll MFA status
+                poll_interval = 2
+                max_polls = (timeout_min * 60) // poll_interval
+                logger.info(f"Polling MFA status (max {max_polls} attempts)")
+                
+                for attempt in range(max_polls):
+                    # Check if transport is still alive (client disconnected?)
+                    if not self.transport.is_active() or not self.transport.is_alive():
+                        logger.info(f"Transport closed during MFA polling - client disconnected")
+                        return paramiko.AUTH_FAILED
+                    
+                    try:
+                        status = self.tower_client.check_mfa_status(mfa_token)
+                        
+                        if status.get('verified'):
+                            logger.info(f"MFA verified for {username}, user_id={status.get('user_id')}")
+                            # Challenge verified - clear tracking
+                            self.pending_mfa_token = None
+                            # Re-check grant - now with MFA token to prove identity
+                            result = self.tower_client.check_grant(
+                                source_ip=self.source_ip,
+                                destination_ip=self.dest_ip,
+                                protocol='ssh',
+                                ssh_login=username,
+                                ssh_key_fingerprint=self.ssh_key_fingerprint,
+                                mfa_token=mfa_token  # Proof of verified MFA
+                            )
+                            self.grant_result = result
+                            break
+                        elif status.get('expired'):
+                            logger.warning(f"MFA expired for {username}")
+                            self.pending_mfa_token = None  # Clear on expiry
+                            self.no_grant_reason = "MFA authentication expired"
+                            return paramiko.AUTH_FAILED
+                        
+                        time.sleep(poll_interval)
+                        
+                        # Check again after sleep (user might have disconnected during sleep)
+                        if not self.transport.is_active() or not self.transport.is_alive():
+                            logger.info(f"Transport closed during sleep - client disconnected")
+                            return paramiko.AUTH_FAILED
+                            
+                    except Exception as pe:
+                        logger.error(f"MFA poll error: {pe}")
+                        # Check if it's transport closed
+                        if not self.transport.is_active():
+                            logger.info(f"Transport closed during MFA poll - client disconnected")
+                            return paramiko.AUTH_FAILED
+                        time.sleep(poll_interval)
+                
+                if not result.get('allowed'):
+                    logger.warning(f"MFA timeout for {username}")
+                    self.no_grant_reason = "MFA authentication timeout"
+                    return paramiko.AUTH_FAILED
+                    
+            except Exception as mfa_err:
+                logger.error(f"MFA error: {mfa_err}", exc_info=True)
+                self.no_grant_reason = "MFA system error"
+                return paramiko.AUTH_FAILED
+        
+        # Normal denial (no MFA or MFA failed)
         if not result.get('allowed'):
             logger.warning(f"Access denied for {username} from {self.source_ip}: {result.get('reason')}")
             # Format denial message using custom messages from Tower
-            self.no_grant_reason = format_denial_message(result, username, self.dest_ip, self.tower_client)
+            denial_message = format_denial_message(result, username, self.dest_ip, self.tower_client)
+            
+            # Send banner immediately via transport userauth banner
+            try:
+                banner_msg = f"\r\n{denial_message}\r\n\r\n"
+                from paramiko.message import Message
+                from paramiko.common import MSG_USERAUTH_BANNER
+                msg = Message()
+                msg.add_byte(bytes([MSG_USERAUTH_BANNER]))
+                msg.add_string(banner_msg.encode('utf-8'))
+                msg.add_string(b'en')
+                self.transport._send_message(msg)
+                logger.debug(f"Sent denial banner via SSH protocol ({len(banner_msg)} chars)")
+            except Exception as e:
+                logger.warning(f"Failed to send denial banner: {e}")
+            
+            self.no_grant_reason = denial_message
             return paramiko.AUTH_FAILED
         
         # Accept pubkey - backend will verify agent forwarding works
@@ -583,7 +720,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
                 source_ip=self.source_ip,
                 destination_ip=self.dest_ip,
                 protocol='ssh',
-                ssh_login=username
+                ssh_login=username,
+                ssh_key_fingerprint=self.ssh_key_fingerprint
             )
             self.grant_checked = True
             self.grant_result = result
@@ -1974,9 +2112,180 @@ class SSHProxyServer:
         except Exception as e:
             logger.error(f"Session {session_id}: Error in inactivity monitor: {e}")
     
+    def monitor_grant_expiry_v11(self, channel, backend_channel, transport, backend_transport,
+                                 db_session_id, session_id, server_name="unknown"):
+        """v1.11: Simplified grant expiry monitoring with periodic API polling.
+        
+        Single source of truth: API endpoint /api/v1/sessions/{id}/grant_status
+        Polls every 10 seconds to get current grant status.
+        State-based warnings: sent_5min, sent_1min flags.
+        No restart logic, no extension detection, no cached end_time.
+        
+        Args:
+            db_session_id: Database session ID for API queries
+            session_id: Gate session ID for tracking
+            server_name: Target server name for terminal title display
+        """
+        sent_5min_warning = False
+        sent_1min_warning = False
+        
+        try:
+            tower_client = TowerClient(GateConfig())
+            logger.info(f"Session {session_id}: Starting v1.11 grant monitor (polling every 10s)")
+            
+            while True:
+                # Sleep first (10 second polling interval)
+                time.sleep(10)
+                
+                # Check if session still active
+                if not transport.is_active() or not backend_transport.is_active():
+                    logger.info(f"Session {session_id}: Transport closed, exiting monitor")
+                    return
+                
+                # Poll API for current grant status
+                try:
+                    status = tower_client.get_session_grant_status(db_session_id)
+                except Exception as e:
+                    logger.error(f"Session {session_id}: Failed to poll grant status: {e}")
+                    continue  # Keep trying
+                
+                # Check if grant still valid
+                if not status['valid']:
+                    reason = status.get('reason', 'Access denied')
+                    logger.info(f"Session {session_id}: Grant no longer valid: {reason}")
+                    
+                    # Send termination message
+                    disconnect_msg = (
+                        f"\r\n\r\n"
+                        f"{'='*70}\r\n"
+                        f"  *** Session terminated: {reason} ***\r\n"
+                        f"  Disconnecting now...\r\n"
+                        f"{'='*70}\r\n\r\n"
+                    )
+                    try:
+                        channel.send(disconnect_msg.encode())
+                        time.sleep(1)
+                    except:
+                        pass
+                    
+                    # Close connection
+                    self._close_connection(channel, backend_channel, transport, backend_transport, session_id, 'grant_revoked')
+                    return
+                
+                # Grant still valid - check end_time for warnings
+                end_time_str = status.get('end_time')
+                if not end_time_str:
+                    # Permanent grant, no warnings needed
+                    continue
+                
+                # Parse end_time (can be 'Z' suffix or +HH:MM timezone)
+                # Convert to naive UTC for comparison
+                if end_time_str.endswith('Z'):
+                    end_time_str = end_time_str.replace('Z', '+00:00')
+                end_time_dt = datetime.fromisoformat(end_time_str)
+                # Convert to UTC and strip timezone for naive comparison
+                if end_time_dt.tzinfo is not None:
+                    end_time = end_time_dt.astimezone(pytz.utc).replace(tzinfo=None)
+                else:
+                    end_time = end_time_dt
+                
+                # Calculate remaining time
+                now = datetime.utcnow()
+                remaining_seconds = (end_time - now).total_seconds()
+                
+                if remaining_seconds <= 0:
+                    # Grant expired
+                    logger.info(f"Session {session_id}: Grant expired")
+                    
+                    disconnect_msg = (
+                        f"\r\n\r\n"
+                        f"{'='*70}\r\n"
+                        f"  *** Your access grant has expired ***\r\n"
+                        f"  Disconnecting now...\r\n"
+                        f"{'='*70}\r\n\r\n"
+                    )
+                    try:
+                        channel.send(disconnect_msg.encode())
+                        time.sleep(1)
+                    except:
+                        pass
+                    
+                    self._close_connection(channel, backend_channel, transport, backend_transport, session_id, 'grant_expired')
+                    return
+                
+                # Check if we should send 5-minute warning
+                if remaining_seconds <= 300 and not sent_5min_warning:
+                    sent_5min_warning = True
+                    warning_msg = (
+                        f"\r\n\r\n"
+                        f"{'='*70}\r\n"
+                        f"  *** WARNING: Your access grant expires in 5 minutes ***\r\n"
+                        f"  Your session will be automatically disconnected at {end_time} UTC\r\n"
+                        f"{'='*70}\r\n\r\n"
+                    )
+                    try:
+                        channel.send(warning_msg.encode())
+                        logger.info(f"Session {session_id}: Sent 5-minute warning")
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send 5-min warning: {e}")
+                
+                # Check if we should send 1-minute warning
+                elif remaining_seconds <= 60 and not sent_1min_warning:
+                    sent_1min_warning = True
+                    warning_msg = (
+                        f"\r\n\r\n"
+                        f"{'='*70}\r\n"
+                        f"  *** WARNING: Your access grant expires in 1 minute ***\r\n"
+                        f"  Your session will be automatically disconnected at {end_time} UTC\r\n"
+                        f"{'='*70}\r\n\r\n"
+                    )
+                    try:
+                        channel.send(warning_msg.encode())
+                        logger.info(f"Session {session_id}: Sent 1-minute warning")
+                    except Exception as e:
+                        logger.error(f"Session {session_id}: Failed to send 1-min warning: {e}")
+                
+        except Exception as e:
+            logger.error(f"Session {session_id}: Error in v1.11 grant monitor: {e}", exc_info=True)
+    
+    def _close_connection(self, channel, backend_channel, transport, backend_transport, session_id, termination_reason):
+        """Helper to close connection and update Tower API."""
+        # Close channels and transports
+        try:
+            backend_channel.close()
+        except:
+            pass
+        try:
+            channel.close()
+        except:
+            pass
+        try:
+            backend_transport.close()
+        except:
+            pass
+        try:
+            transport.close()
+        except:
+            pass
+        
+        # Update Tower API
+        try:
+            tower_client = TowerClient(GateConfig())
+            tower_client.update_session(
+                session_id=session_id,
+                ended_at=datetime.utcnow().isoformat(),
+                is_active=False,
+                termination_reason=termination_reason
+            )
+            logger.info(f"Session {session_id}: Updated via Tower API (reason: {termination_reason})")
+        except Exception as e:
+            logger.error(f"Session {session_id}: Failed to update Tower API: {e}")
+    
     def monitor_grant_expiry(self, channel, backend_channel, transport, backend_transport, 
                              grant_end_time, db_session_id, session_id, server_name="unknown"):
-        """Monitor grant expiry and send warnings, then disconnect when grant expires.
+        """OLD v1.10 monitoring - DEPRECATED, use monitor_grant_expiry_v11 instead.
+        
+        Monitor grant expiry and send warnings, then disconnect when grant expires.
         
         Also checks for forced disconnection times injected by heartbeat.
         For permanent grants (grant_end_time=None), only monitors for forced disconnection.
@@ -1986,6 +2295,11 @@ class SSHProxyServer:
             server_name: Target server name for terminal title display
         """
         try:
+            # Use updated grant_end_time from session_grant_endtimes if available (may be updated after MFA)
+            if session_id in self.session_grant_endtimes:
+                grant_end_time = self.session_grant_endtimes[session_id]
+                logger.info(f"Session {session_id}: Using grant_end_time from session tracking: {grant_end_time}")
+            
             # Check if there's a forced disconnection time (from heartbeat)
             if session_id in self.session_forced_endtimes:
                 forced_end = self.session_forced_endtimes[session_id]
@@ -2041,83 +2355,16 @@ class SSHProxyServer:
                         sleep_time = remaining - warning_seconds
                         logger.debug(f"Session {session_id}: Sleeping {sleep_time:.0f}s until {warning_text} warning")
                         
-                        # Sleep in 1-second increments to check for forced disconnect and grant extensions
+                        # Sleep in 1-second increments to check for forced disconnect
                         for _ in range(int(sleep_time)):
                             time.sleep(1)
                             
-                            # Check if grant was extended or shortened
-                            if session_id in self.session_grant_endtimes:
-                                new_end_time = self.session_grant_endtimes[session_id]
-                                if new_end_time > grant_end_time:
-                                    # Grant extended!
-                                    logger.info(f"Session {session_id}: Grant extended from {grant_end_time} to {new_end_time}")
-                                    
-                                    # Calculate new remaining time
-                                    now = datetime.utcnow()
-                                    new_remaining = (new_end_time - now).total_seconds()
-                                    extension_minutes = int((new_end_time - grant_end_time).total_seconds() / 60)
-                                    
-                                    # Convert to Europe/Warsaw for display
-                                    warsaw_tz = pytz.timezone('Europe/Warsaw')
-                                    new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
-                                    new_end_local = new_end_local.astimezone(warsaw_tz)
-                                    
-                                    # Send notification message
-                                    extension_msg = (
-                                        f"\r\n\r\n"
-                                        f"{'='*70}\r\n"
-                                        f"  *** GOOD NEWS: Your access grant has been extended! ***\r\n"
-                                        f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
-                                        f"  Extended by: {extension_minutes} minute(s)\r\n"
-                                        f"{'='*70}\r\n\r\n"
-                                    )
-                                    try:
-                                        channel.send(extension_msg.encode())
-                                        logger.info(f"Session {session_id}: Sent grant extension notification")
-                                    except Exception as e:
-                                        logger.error(f"Session {session_id}: Failed to send extension message: {e}")
-                                    
-                                    # Update grant_end_time and recalculate remaining time
-                                    grant_end_time = new_end_time
-                                    remaining = new_remaining
-                                    grant_extended_during_warning = True
-                                    # Break inner loop to restart warning countdown from new end time
-                                    break
-                                elif new_end_time < grant_end_time:
-                                    # Grant shortened!
-                                    logger.info(f"Session {session_id}: Grant shortened from {grant_end_time} to {new_end_time}")
-                                    
-                                    # Calculate new remaining time
-                                    now = datetime.utcnow()
-                                    new_remaining = (new_end_time - now).total_seconds()
-                                    reduction_minutes = int((grant_end_time - new_end_time).total_seconds() / 60)
-                                    
-                                    # Convert to Europe/Warsaw for display
-                                    warsaw_tz = pytz.timezone('Europe/Warsaw')
-                                    new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
-                                    new_end_local = new_end_local.astimezone(warsaw_tz)
-                                    
-                                    # Send notification message
-                                    shortening_msg = (
-                                        f"\r\n\r\n"
-                                        f"{'='*70}\r\n"
-                                        f"  *** NOTICE: Your access grant has been shortened! ***\r\n"
-                                        f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
-                                        f"  Reduced by: {reduction_minutes} minute(s)\r\n"
-                                        f"{'='*70}\r\n\r\n"
-                                    )
-                                    try:
-                                        channel.send(shortening_msg.encode())
-                                        logger.info(f"Session {session_id}: Sent grant shortening notification")
-                                    except Exception as e:
-                                        logger.error(f"Session {session_id}: Failed to send shortening message: {e}")
-                                    
-                                    # Update grant_end_time and recalculate remaining time
-                                    grant_end_time = new_end_time
-                                    remaining = new_remaining
-                                    grant_extended_during_warning = True
-                                    # Break inner loop to restart warning countdown from new end time
-                                    break
+                            # DISABLED: Extension detection causes false positives
+                            # TODO: v1.11 refactor will replace this with periodic polling
+                            # if session_id in self.session_grant_endtimes:
+                            #     new_end_time = self.session_grant_endtimes[session_id]
+                            #     if new_end_time != grant_end_time:
+                            #         logger.info(f"Session {session_id}: Grant time changed")
                             
                             # Check if forced disconnect was injected
                             if session_id in self.session_forced_endtimes:
@@ -2143,10 +2390,11 @@ class SSHProxyServer:
                         if remaining <= 0:
                             break
                         
+                        # DISABLED: grant_extended_during_warning causes false restart loops
                         # If grant was extended, restart from beginning of while loop
-                        if grant_extended_during_warning:
-                            logger.info(f"Session {session_id}: Restarting countdown due to grant extension")
-                            break
+                        # if grant_extended_during_warning:
+                        #     logger.info(f"Session {session_id}: Restarting countdown due to grant extension")
+                        #     break
                         
                         # Check if session is still active
                         if not transport.is_active() or not backend_transport.is_active():
@@ -2173,90 +2421,20 @@ class SSHProxyServer:
                         
                         remaining = (grant_end_time - now).total_seconds()
                 
+                # DISABLED: grant_extended_during_warning logic causes false positives
                 # If grant was extended during warnings, restart the while loop
-                if grant_extended_during_warning:
-                    continue
+                # if grant_extended_during_warning:
+                #     continue
                 
-                # Sleep until expiry (in small increments to check for forced disconnect and extensions)
+                # Sleep until expiry (in small increments to check for forced disconnect)
                 grant_was_extended = False
                 if remaining > 0:
                     logger.debug(f"Session {session_id}: Sleeping {remaining:.0f}s until grant expiry")
                     for _ in range(int(remaining)):
                         time.sleep(1)
                         
-                        # Check if grant was extended or shortened
-                        if session_id in self.session_grant_endtimes:
-                            new_end_time = self.session_grant_endtimes[session_id]
-                            if new_end_time > grant_end_time:
-                                # Grant extended during final countdown!
-                                logger.info(f"Session {session_id}: Grant extended during final countdown from {grant_end_time} to {new_end_time}")
-                                
-                                # Calculate new remaining time
-                                now = datetime.utcnow()
-                                new_remaining = (new_end_time - now).total_seconds()
-                                extension_minutes = int((new_end_time - grant_end_time).total_seconds() / 60)
-                                
-                                # Convert to Europe/Warsaw for display
-                                warsaw_tz = pytz.timezone('Europe/Warsaw')
-                                new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
-                                new_end_local = new_end_local.astimezone(warsaw_tz)
-                                
-                                # Send notification message
-                                extension_msg = (
-                                    f"\r\n\r\n"
-                                    f"{'='*70}\r\n"
-                                    f"  *** GOOD NEWS: Your access grant has been extended! ***\r\n"
-                                    f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
-                                    f"  Extended by: {extension_minutes} minute(s)\r\n"
-                                    f"{'='*70}\r\n\r\n"
-                                )
-                                try:
-                                    channel.send(extension_msg.encode())
-                                    logger.info(f"Session {session_id}: Sent grant extension notification during final countdown")
-                                except Exception as e:
-                                    logger.error(f"Session {session_id}: Failed to send extension message: {e}")
-                                
-                                # Update grant_end_time and set flag to restart countdown
-                                grant_end_time = new_end_time
-                                remaining = new_remaining
-                                grant_was_extended = True
-                                logger.info(f"Session {session_id}: Will restart countdown with new end time")
-                                break
-                            elif new_end_time < grant_end_time:
-                                # Grant shortened during final countdown!
-                                logger.info(f"Session {session_id}: Grant shortened during final countdown from {grant_end_time} to {new_end_time}")
-                                
-                                # Calculate new remaining time
-                                now = datetime.utcnow()
-                                new_remaining = (new_end_time - now).total_seconds()
-                                reduction_minutes = int((grant_end_time - new_end_time).total_seconds() / 60)
-                                
-                                # Convert to Europe/Warsaw for display
-                                warsaw_tz = pytz.timezone('Europe/Warsaw')
-                                new_end_local = new_end_time if new_end_time.tzinfo else pytz.utc.localize(new_end_time)
-                                new_end_local = new_end_local.astimezone(warsaw_tz)
-                                
-                                # Send notification message
-                                shortening_msg = (
-                                    f"\r\n\r\n"
-                                    f"{'='*70}\r\n"
-                                    f"  *** NOTICE: Your access grant has been shortened! ***\r\n"
-                                    f"  New expiry time: {new_end_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\r\n"
-                                    f"  Reduced by: {reduction_minutes} minute(s)\r\n"
-                                    f"{'='*70}\r\n\r\n"
-                                )
-                                try:
-                                    channel.send(shortening_msg.encode())
-                                    logger.info(f"Session {session_id}: Sent grant shortening notification during final countdown")
-                                except Exception as e:
-                                    logger.error(f"Session {session_id}: Failed to send shortening message: {e}")
-                                
-                                # Update grant_end_time and set flag to restart countdown
-                                grant_end_time = new_end_time
-                                remaining = new_remaining
-                                grant_was_extended = True
-                                logger.info(f"Session {session_id}: Will restart countdown with new end time")
-                                break
+                        # DISABLED: Extension detection during final countdown causes false positives
+                        # TODO: v1.11 refactor will replace this with periodic polling
                         
                         # Check if forced disconnect was injected
                         if session_id in self.session_forced_endtimes:
@@ -2270,10 +2448,7 @@ class SSHProxyServer:
                             logger.info(f"Session {session_id}: Already disconnected during final countdown")
                             return
                 
-                # If grant was extended, restart the warning loop
-                if grant_was_extended:
-                    continue
-                    
+                # DISABLED: grant_was_extended logic
                 # Break out of while loop - time to disconnect
                 break
             
@@ -2390,6 +2565,8 @@ class SSHProxyServer:
     
     def handle_client(self, client_socket, client_addr, is_tproxy=False):
         """Handle incoming client connection"""
+        from datetime import datetime  # Import at function start to avoid UnboundLocalError
+        
         source_ip = client_addr[0]
         
         # Extract destination IP (the IP client connected to)
@@ -2422,10 +2599,11 @@ class SSHProxyServer:
             # Create server handler with source and dest IPs
             server_handler = SSHProxyHandler(source_ip, dest_ip)
             server_handler.is_tproxy = is_tproxy  # Mark as TPROXY connection
+            server_handler.transport = transport  # Store transport reference for banner sending
             transport.start_server(server=server_handler)
             
-            # Wait for authentication
-            channel = transport.accept(20)
+            # Wait for authentication (increased timeout for MFA flow - up to 5 min + buffer)
+            channel = transport.accept(360)
             if channel is None:
                 logger.warning(f"No channel opened from {source_ip}")
                 # If no_grant_reason is set, send disconnect message with reason
@@ -2671,6 +2849,12 @@ class SSHProxyServer:
             # Get policy_id from access_result (Tower API response)
             grant_id = server_handler.access_result.get('grant_id') if hasattr(server_handler, 'access_result') else None
             
+            # MFA Phase 2: Get fingerprint from access_result if provided (from MFA verification)
+            ssh_key_fingerprint = server_handler.access_result.get('ssh_key_fingerprint') if hasattr(server_handler, 'access_result') else None
+            
+            # Get effective_end_time from access_result (schedule-aware, MFA-adjusted)
+            effective_end_time_str = server_handler.access_result.get('effective_end_time') if hasattr(server_handler, 'access_result') else None
+            
             # Get SSH protocol version from client
             client_version = transport.remote_version if hasattr(transport, 'remote_version') else None
             protocol_version = client_version.decode('utf-8') if isinstance(client_version, bytes) else str(client_version) if client_version else None
@@ -2696,10 +2880,28 @@ class SSHProxyServer:
                     subsystem_name=subsystem,
                     ssh_agent_used=bool(server_handler.agent_channel),
                     recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
-                    protocol_version=protocol_version
+                    protocol_version=protocol_version,
+                    ssh_key_fingerprint=ssh_key_fingerprint,  # Phase 2: Pass fingerprint for Stay
+                    effective_end_time=effective_end_time_str  # Pass effective_end_time for correct grant monitoring
                 )
                 db_session_id = session_response.get('db_session_id')
                 logger.info(f"Session {session_id} created via Tower API (DB ID: {db_session_id})")
+                
+                # Update grant_end_time if returned (in case it was refreshed after MFA)
+                # Store for monitor thread to use correct expiry time
+                if 'grant_end_time' in session_response and session_response['grant_end_time']:
+                    grant_time_str = session_response['grant_end_time']
+                    # Handle both 'Z' suffix and +HH:MM timezone
+                    if grant_time_str.endswith('Z'):
+                        grant_time_str = grant_time_str[:-1] + '+00:00'
+                    new_grant_end_dt = datetime.fromisoformat(grant_time_str)
+                    # Convert to naive UTC (rest of code uses naive datetime.utcnow())
+                    if new_grant_end_dt.tzinfo is not None:
+                        new_grant_end = new_grant_end_dt.astimezone(pytz.utc).replace(tzinfo=None)
+                    else:
+                        new_grant_end = new_grant_end_dt
+                    self.session_grant_endtimes[session_id] = new_grant_end
+                    logger.info(f"Session {session_id}: Set grant_end_time to {new_grant_end} from session creation")
                 
                 # Create local session object for compatibility
                 db_session = type('Session', (), {
@@ -2710,30 +2912,8 @@ class SSHProxyServer:
                 })()
                 
             except Exception as e:
-                logger.error(f"Failed to create session via Tower API: {e}", exc_info=True)
-                # Fallback to direct DB insert
-                db_session = DBSession(
-                    session_id=session_id,
-                    user_id=user.id,
-                    server_id=target_server.id,
-                    protocol='ssh',
-                    source_ip=source_ip,
-                    proxy_ip=dest_ip,
-                    backend_ip=target_server.ip_address,
-                    backend_port=22,
-                    ssh_username=server_handler.ssh_login,
-                    subsystem_name=subsystem if 'subsystem' in locals() else None,
-                    ssh_agent_used=bool(server_handler.agent_channel),
-                    started_at=datetime.utcnow(),
-                    is_active=True,
-                    recording_path=recorder.recording_file if recorder and hasattr(recorder, 'recording_file') else None,
-                    policy_id=grant_id,
-                    connection_status='active',
-                    protocol_version=protocol_version
-                )
-                db.add(db_session)
-                db.commit()
-                db.refresh(db_session)
+                logger.error(f"FATAL: Failed to create session via Tower API: {e}", exc_info=True)
+                raise  # Gate MUST use Tower API - no database fallback
             
             # Pass db_session to server_handler for port forwarding logging
             server_handler.db_session = db_session
@@ -2802,8 +2982,13 @@ class SSHProxyServer:
                 if grant_end_time:
                     logger.info(f"Session {session_id}: Grant expires at {grant_end_time}")
                     
-                    # Store initial grant end time for heartbeat monitoring
-                    self.session_grant_endtimes[session_id] = grant_end_time
+                    # Store initial grant end time for heartbeat monitoring (if not already set from session creation)
+                    if session_id not in self.session_grant_endtimes:
+                        self.session_grant_endtimes[session_id] = grant_end_time
+                    else:
+                        logger.info(f"Session {session_id}: Using grant_end_time from session creation: {self.session_grant_endtimes[session_id]}")
+                        # Use the value from session creation for welcome message
+                        grant_end_time = self.session_grant_endtimes[session_id]
                     
                     # Send welcome message with expiry time
                     now = datetime.utcnow()
@@ -2890,14 +3075,15 @@ class SSHProxyServer:
                     'server_name': target_server.name
                 }
                 
+                # v1.11: Use new polling-based monitor (no more grant_end_time parameter!)
                 monitor_thread = threading.Thread(
-                    target=self.monitor_grant_expiry,
+                    target=self.monitor_grant_expiry_v11,
                     args=(channel, backend_channel, transport, backend_transport, 
-                          grant_end_time, db_session.id, session_id, target_server.name),
+                          db_session.id, session_id, target_server.name),
                     daemon=True
                 )
                 monitor_thread.start()
-                logger.debug(f"Session {session_id}: Started grant monitor thread")
+                logger.debug(f"Session {session_id}: Started v1.11 grant monitor thread (API polling)")
                 
                 # Start inactivity timeout monitor (if enabled)
                 if inactivity_timeout_minutes and inactivity_timeout_minutes > 0:
@@ -2940,22 +3126,8 @@ class SSHProxyServer:
                 server_handler.tower_client.update_session(session_id, **update_payload)
                 logger.info(f"Session {session_id} ended normally via Tower API")
             except Exception as e:
-                logger.error(f"Failed to update session via Tower API: {e}")
-                # Fallback to direct DB update
-                try:
-                    db_session_obj = db.query(DBSession).filter(DBSession.session_id == session_id).first()
-                    if db_session_obj:
-                        db_session_obj.ended_at = ended_at
-                        db_session_obj.is_active = False
-                        db_session_obj.duration_seconds = int((ended_at - db_session_obj.started_at).total_seconds())
-                        db_session_obj.termination_reason = 'normal'
-                        if recorder and hasattr(recorder, 'recording_file') and os.path.exists(recorder.recording_file):
-                            db_session_obj.recording_size = os.path.getsize(recorder.recording_file)
-                        db.commit()
-                        logger.info(f"Session {session_id} ended normally (fallback DB update)")
-                except Exception as e2:
-                    logger.error(f"Failed fallback DB update: {e2}")
-                    db.rollback()
+                logger.error(f"FATAL: Failed to update session via Tower API: {e}")
+                # Gate MUST use Tower API - no database fallback
             
             # Write logout to utmp/wtmp
             write_utmp_logout(tty_name, user.username)
@@ -2985,16 +3157,8 @@ class SSHProxyServer:
                         )
                         logger.info(f"Session {session_id} closed due to error via Tower API")
                     except Exception as api_err:
-                        logger.error(f"Failed to close session via API: {api_err}")
-                        # Fallback to DB
-                        db_session_error = db.query(DBSession).filter(DBSession.session_id == session_id).first()
-                        if db_session_error and db_session_error.is_active:
-                            db_session_error.ended_at = datetime.utcnow()
-                            db_session_error.is_active = False
-                            db_session_error.duration_seconds = int((db_session_error.ended_at - db_session_error.started_at).total_seconds())
-                            db_session_error.termination_reason = 'error'
-                            db.commit()
-                            logger.info(f"Session {session_id} closed due to error (fallback DB)")
+                        logger.error(f"FATAL: Failed to close session via API: {api_err}")
+                        # Gate MUST use Tower API - no database fallback
                 
                 # Write logout to utmp
                 if 'db_session' in locals() and hasattr(db_session, 'id'):
@@ -3008,6 +3172,15 @@ class SSHProxyServer:
                 logger.error(f"Error closing session record: {cleanup_error}")
         
         finally:
+            # Clean up pending MFA challenge if user disconnected before completing MFA
+            if 'server_handler' in locals() and hasattr(server_handler, 'pending_mfa_token') and server_handler.pending_mfa_token:
+                try:
+                    logger.info(f"Cleaning up pending MFA challenge: {server_handler.pending_mfa_token[:20]}...")
+                    tower_client = TowerClient(GateConfig())
+                    tower_client.cancel_mfa_challenge(server_handler.pending_mfa_token)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup MFA challenge: {e}")
+            
             if backend_transport:
                 backend_transport.close()
             client_socket.close()

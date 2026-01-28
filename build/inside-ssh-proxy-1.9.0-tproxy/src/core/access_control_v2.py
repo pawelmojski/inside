@@ -240,42 +240,85 @@ class AccessControlEngineV2:
                             'reason': reason
                         }
             
-            # Step 1: Find user by source_ip
-            user_ip = db.query(UserSourceIP).filter(
-                UserSourceIP.source_ip == source_ip,
-                UserSourceIP.is_active == True
-            ).first()
+            # Step 1: Find user by source_ip or fingerprint/MFA marker
+            user = None
+            user_ip = None
             
-            if not user_ip:
-                logger.warning(f"Access denied: Unknown source IP {source_ip}")
-                return {
-                    'has_access': False,
-                    'user': None,
-                    'user_ip': None,
-                    'server': None,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'unknown_source_ip',
-                    'reason': f'Unknown source IP {source_ip}'
-                }
-            
-            user = db.query(User).filter(
-                User.id == user_ip.user_id,
-                User.is_active == True
-            ).first()
-            
-            if not user:
-                logger.warning(f"Access denied: User ID {user_ip.user_id} not found or inactive")
-                return {
-                    'has_access': False,
-                    'user': None,
-                    'user_ip': user_ip,
-                    'server': None,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'user_inactive',
-                    'reason': f'User not found or inactive'
-                }
+            # Check if this is a fingerprint or MFA-based authentication
+            if source_ip.startswith('_fingerprint_'):
+                # Extract user_id from marker: _fingerprint_{user_id}
+                try:
+                    user_id = int(source_ip.split('_')[2])
+                    user = db.query(User).filter(
+                        User.id == user_id,
+                        User.is_active == True
+                    ).first()
+                    
+                    if not user:
+                        logger.warning(f"Access denied: User ID {user_id} from fingerprint marker not found or inactive")
+                        return {
+                            'has_access': False,
+                            'user': None,
+                            'user_ip': None,
+                            'server': None,
+                            'policies': [],
+                            'selected_policy': None,
+                            'denial_reason': 'user_inactive',
+                            'reason': f'User not found or inactive'
+                        }
+                    
+                    logger.info(f"User identified via SSH key fingerprint: {user.username} (ID: {user.id})")
+                    # user_ip remains None - this is fingerprint-based auth, not IP-based
+                    
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Invalid fingerprint marker format: {source_ip}")
+                    return {
+                        'has_access': False,
+                        'user': None,
+                        'user_ip': None,
+                        'server': None,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'invalid_marker',
+                        'reason': 'Invalid authentication marker'
+                    }
+            else:
+                # Normal IP-based authentication
+                user_ip = db.query(UserSourceIP).filter(
+                    UserSourceIP.source_ip == source_ip,
+                    UserSourceIP.is_active == True
+                ).first()
+                
+                if not user_ip:
+                    logger.warning(f"Access denied: Unknown source IP {source_ip}")
+                    return {
+                        'has_access': False,
+                        'user': None,
+                        'user_ip': None,
+                        'server': None,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'unknown_source_ip',
+                        'reason': f'Unknown source IP {source_ip}'
+                    }
+                
+                user = db.query(User).filter(
+                    User.id == user_ip.user_id,
+                    User.is_active == True
+                ).first()
+                
+                if not user:
+                    logger.warning(f"Access denied: User ID {user_ip.user_id} not found or inactive")
+                    return {
+                        'has_access': False,
+                        'user': None,
+                        'user_ip': user_ip,
+                        'server': None,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'user_inactive',
+                        'reason': f'User not found or inactive'
+                    }
             
             # Step 2: Find backend server by dest_ip on this gate
             backend_info = self.find_backend_by_proxy_ip(db, dest_ip, gate_id)
@@ -345,9 +388,10 @@ class AccessControlEngineV2:
                 or_(AccessPolicy.end_time == None, AccessPolicy.end_time >= now)
             ).filter(
                 # Source IP match: NULL (all IPs) or specific user_source_ip_id
+                # Note: user_ip can be None when using fingerprint-based authentication
                 or_(
                     AccessPolicy.source_ip_id == None,
-                    AccessPolicy.source_ip_id == user_ip.id
+                    AccessPolicy.source_ip_id == user_ip.id if user_ip else None
                 )
             ).filter(
                 # Protocol match: NULL (all protocols) or specific

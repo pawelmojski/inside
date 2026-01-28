@@ -190,6 +190,9 @@ def add():
                 flash('Invalid inactivity timeout. Using default: 60 minutes', 'warning')
                 inactivity_timeout_minutes = 60
             
+            # Get MFA required checkbox
+            mfa_required = 'mfa_required' in request.form
+            
             # Create policy
             policy = AccessPolicy(
                 user_id=int(user_id) if user_id else None,
@@ -201,7 +204,8 @@ def add():
                 is_active=True,
                 start_time=start_time,
                 end_time=end_time,
-                inactivity_timeout_minutes=inactivity_timeout_minutes
+                inactivity_timeout_minutes=inactivity_timeout_minutes,
+                mfa_required=mfa_required
             )
             
             # Set target based on scope
@@ -299,6 +303,8 @@ def edit(policy_id):
                 'end_time': policy.end_time.isoformat() if policy.end_time else None,
                 'use_schedules': policy.use_schedules,
                 'is_active': policy.is_active,
+                'mfa_required': policy.mfa_required,
+                'inactivity_timeout_minutes': policy.inactivity_timeout_minutes,
                 'ssh_logins': [login.allowed_login for login in policy.ssh_logins],
                 'schedules': [{
                     'id': s.id,
@@ -341,6 +347,9 @@ def edit(policy_id):
                 flash('Invalid inactivity timeout. Keeping current value', 'warning')
                 inactivity_timeout_minutes = policy.inactivity_timeout_minutes or 60
             
+            # Get MFA required checkbox
+            mfa_required = 'mfa_required' in request.form
+            
             # Update policy
             policy.protocol = protocol
             policy.source_ip_id = int(source_ip_id) if source_ip_id else None
@@ -348,6 +357,7 @@ def edit(policy_id):
             policy.start_time = start_time
             policy.end_time = end_time
             policy.inactivity_timeout_minutes = inactivity_timeout_minutes
+            policy.mfa_required = mfa_required
             
             # Update SSH logins
             db.query(PolicySSHLogin).filter(PolicySSHLogin.policy_id == policy.id).delete()
@@ -424,6 +434,8 @@ def edit(policy_id):
                 'end_time': policy.end_time.isoformat() if policy.end_time else None,
                 'use_schedules': policy.use_schedules,
                 'is_active': policy.is_active,
+                'mfa_required': policy.mfa_required,
+                'inactivity_timeout_minutes': policy.inactivity_timeout_minutes,
                 'ssh_logins': [login.allowed_login for login in policy.ssh_logins],
                 'schedules': [{
                     'id': s.id,

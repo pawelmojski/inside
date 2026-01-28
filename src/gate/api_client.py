@@ -137,7 +137,8 @@ class TowerClient:
         raise TowerAPIError("Request failed with unknown error")
     
     def check_grant(self, source_ip: str, destination_ip: str, protocol: str, 
-                    ssh_login: Optional[str] = None) -> Dict[str, Any]:
+                    ssh_login: Optional[str] = None, ssh_key_fingerprint: Optional[str] = None,
+                    mfa_token: Optional[str] = None) -> Dict[str, Any]:
         """Check if connection is allowed via Tower API.
         
         Args:
@@ -145,6 +146,8 @@ class TowerClient:
             destination_ip: Destination IP (proxy IP on gate)
             protocol: 'ssh' or 'rdp'
             ssh_login: SSH login name (required for SSH)
+            ssh_key_fingerprint: SSH key SHA256 fingerprint for MFA session persistence
+            mfa_token: Verified MFA challenge token (proof of authentication)
         
         Returns:
             {
@@ -167,6 +170,10 @@ class TowerClient:
         }
         if ssh_login:
             data['ssh_login'] = ssh_login
+        if ssh_key_fingerprint:
+            data['ssh_key_fingerprint'] = ssh_key_fingerprint
+        if mfa_token:
+            data['mfa_token'] = mfa_token
         
         try:
             response = self._request('POST', '/api/v1/auth/check', data=data)
@@ -205,8 +212,89 @@ class TowerClient:
             logger.error(f"Grant check failed: {e}")
             raise
     
+    def create_mfa_challenge(
+        self, 
+        ssh_username: str,
+        source_ip: Optional[str] = None,
+        user_id: Optional[int] = None, 
+        grant_id: Optional[int] = None,
+        destination_ip: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create MFA challenge for user authentication.
+        
+        Phase 1 (known user):
+            user_id and grant_id provided
+        
+        Phase 2 (unknown user):
+            destination_ip provided, user identified via SAML email
+        
+        Args:
+            ssh_username: SSH login username
+            source_ip: Client source IP
+            user_id: User ID from check_grant response (Phase 1)
+            grant_id: Grant ID from check_grant response (Phase 1)
+            destination_ip: Destination IP for Phase 2 identification
+        
+        Returns:
+            {
+                'mfa_required': True,
+                'mfa_token': str,
+                'mfa_url': str,
+                'mfa_qr': str,  # ASCII QR code
+                'timeout_minutes': int
+            }
+        """
+        data = {
+            'ssh_username': ssh_username
+        }
+        
+        if source_ip:
+            data['source_ip'] = source_ip
+        if user_id:
+            data['user_id'] = user_id
+        if grant_id:
+            data['grant_id'] = grant_id
+        if destination_ip:
+            data['destination_ip'] = destination_ip
+        
+        response = self._request('POST', '/api/v1/mfa/challenge', data=data)
+        logger.info(f"MFA challenge created: user_id={user_id}, destination_ip={destination_ip}, token={response.get('mfa_token')}")
+        return response
+    
+    def check_mfa_status(self, token: str) -> Dict[str, Any]:
+        """Check MFA challenge verification status.
+        
+        Args:
+            token: MFA token from create_mfa_challenge
+        
+        Returns:
+            {
+                'verified': bool,
+                'stay_id': int,  # If verified
+                'expired': bool  # If challenge expired
+            }
+        """
+        response = self._request('GET', f'/api/v1/mfa/status/{token}', retry=False)
+        return response
+    
+    def cancel_mfa_challenge(self, token: str) -> Dict[str, Any]:
+        """Cancel pending MFA challenge (user disconnected before completing MFA).
+        
+        Args:
+            token: MFA token from create_mfa_challenge
+        
+        Returns:
+            {'success': bool, 'message': str}
+        """
+        try:
+            response = self._request('DELETE', f'/api/v1/mfa/challenge/{token}', retry=False)
+            return response
+        except Exception as e:
+            logger.warning(f"Failed to cancel MFA challenge {token[:20]}: {e}")
+            return {'success': False, 'message': str(e)}
+    
     def start_stay(self, username: str, server: str, grant_id: int, 
-                   source_ip: Optional[str] = None) -> int:
+                   source_ip: Optional[str] = None, ssh_key_fingerprint: Optional[str] = None) -> int:
         """Report person entered server (create Stay).
         
         Args:
@@ -214,6 +302,7 @@ class TowerClient:
             server: Server hostname or IP
             grant_id: Grant ID from check_grant()
             source_ip: Optional client source IP
+            ssh_key_fingerprint: Optional SSH key fingerprint for MFA session persistence
         
         Returns:
             dict: Stay details including stay_id
@@ -228,6 +317,8 @@ class TowerClient:
         }
         if source_ip:
             data['source_ip'] = source_ip
+        if ssh_key_fingerprint:
+            data['ssh_key_fingerprint'] = ssh_key_fingerprint
         
         response = self._request('POST', '/api/v1/stays/start', data=data)
         stay_id = response.get('stay_id')
@@ -390,7 +481,9 @@ class TowerClient:
                       subsystem_name: Optional[str] = None,
                       ssh_agent_used: bool = False,
                       recording_path: Optional[str] = None,
-                      protocol_version: Optional[str] = None) -> Dict[str, Any]:
+                      protocol_version: Optional[str] = None,
+                      ssh_key_fingerprint: Optional[str] = None,
+                      effective_end_time: Optional[str] = None) -> Dict[str, Any]:
         """Report session creation to Tower.
         
         Tower API will automatically create or reuse Stay based on user's active sessions.
@@ -446,8 +539,28 @@ class TowerClient:
             payload['recording_path'] = recording_path
         if protocol_version:
             payload['protocol_version'] = protocol_version
+        if ssh_key_fingerprint:
+            payload['ssh_key_fingerprint'] = ssh_key_fingerprint
+        if effective_end_time:
+            payload['effective_end_time'] = effective_end_time
         
         response = self._request('POST', '/api/v1/sessions/create', data=payload)
+        return response
+    
+    def get_session_grant_status(self, db_session_id: int) -> Dict[str, Any]:
+        """Get current grant status for a session (v1.11 - single source of truth).
+        
+        Args:
+            db_session_id: Database session ID from session creation
+        
+        Returns:
+            {
+                'valid': bool,  # Is grant still valid?
+                'end_time': str or null,  # ISO format with 'Z' suffix (UTC), null = permanent
+                'reason': str  # If invalid: reason for denial
+            }
+        """
+        response = self._request('GET', f'/api/v1/sessions/{db_session_id}/grant_status')
         return response
     
     def update_session(self, session_id: str, ended_at: Optional[str] = None,

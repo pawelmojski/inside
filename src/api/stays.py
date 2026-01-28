@@ -56,6 +56,7 @@ def start_stay():
     server_identifier = data.get('server')
     grant_id = data.get('grant_id')
     source_ip = data.get('source_ip')
+    ssh_key_fingerprint = data.get('ssh_key_fingerprint')  # Optional: for MFA session persistence
     
     if not username or not server_identifier or not grant_id:
         return jsonify({
@@ -121,6 +122,7 @@ def start_stay():
         policy_id=grant_id,
         gate_id=gate.id,
         server_id=server.id,
+        ssh_key_fingerprint=ssh_key_fingerprint,  # Store fingerprint for session persistence
         started_at=now,
         ended_at=None,  # NULL = person still inside
         is_active=True,
