@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="1.11.1-tproxy"
+VERSION="1.11.2-tproxy"
 BUILD_DIR="build/inside-ssh-proxy-${VERSION}"
 PACKAGE_NAME="inside-ssh-proxy-${VERSION}.tar.gz"
 

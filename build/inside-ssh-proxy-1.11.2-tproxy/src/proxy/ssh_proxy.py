@@ -1204,10 +1204,13 @@ class SSHProxyServer:
             except Exception as e:
                 logger.error(f"Failed to create SFTP transfer record: {e}")
         
+        logger.info(f"Starting forward_channel: client_closed={client_channel.closed}, backend_closed={backend_channel.closed}")
+        
         try:
             while True:
                 # Check if channels are still open
                 if client_channel.closed or backend_channel.closed:
+                    logger.info(f"Channel closed in loop: client={client_channel.closed}, backend={backend_channel.closed}")
                     break
                 
                 r, w, x = select.select([client_channel, backend_channel], [], [], 1.0)
@@ -1224,7 +1227,22 @@ class SSHProxyServer:
                 
                 if backend_channel in r:
                     data = backend_channel.recv(4096)
+                    logger.debug(f"Backend recv: {len(data)} bytes")
                     if len(data) == 0:
+                        # Backend closed - try to get exit status before breaking
+                        logger.info(f"Backend channel EOF, checking exit status")
+                        try:
+                            # Small delay for exit status to arrive
+                            import time
+                            time.sleep(0.05)
+                            if backend_channel.exit_status_ready():
+                                exit_status = backend_channel.recv_exit_status()
+                                client_channel.send_exit_status(exit_status)
+                                logger.info(f"Propagated exit status {exit_status} from backend to client")
+                            else:
+                                logger.warning(f"Exit status not ready after backend EOF")
+                        except Exception as e:
+                            logger.warning(f"Failed to propagate exit status: {e}", exc_info=True)
                         break
                     client_channel.send(data)
                     bytes_received += len(data)
@@ -2973,6 +2991,46 @@ class SSHProxyServer:
                 cmd_str = server_handler.exec_command.decode('utf-8') if isinstance(server_handler.exec_command, bytes) else server_handler.exec_command
                 logger.info(f"Executing command on backend: {cmd_str}")
                 backend_channel.exec_command(cmd_str)
+                
+                # For exec commands, read output immediately before backend closes channel
+                # (backend may close channel very quickly for fast commands like 'w')
+                exec_output = b''
+                exec_exit_status = None
+                try:
+                    logger.debug(f"Reading exec command output immediately")
+                    # Set short timeout to avoid hanging
+                    backend_channel.settimeout(5.0)
+                    
+                    # Read all output
+                    while True:
+                        try:
+                            chunk = backend_channel.recv(4096)
+                            if len(chunk) == 0:
+                                logger.debug(f"Backend EOF after reading {len(exec_output)} bytes")
+                                break
+                            exec_output += chunk
+                            # Send to client immediately
+                            channel.send(chunk)
+                        except socket.timeout:
+                            logger.debug(f"Timeout reading from backend")
+                            break
+                    
+                    # Try to get exit status
+                    import time
+                    time.sleep(0.05)
+                    if backend_channel.exit_status_ready():
+                        exec_exit_status = backend_channel.recv_exit_status()
+                        channel.send_exit_status(exec_exit_status)
+                        logger.info(f"Exec command exit status: {exec_exit_status}")
+                    else:
+                        logger.warning(f"Exit status not available for exec command")
+                        
+                except Exception as e:
+                    logger.warning(f"Error reading exec output: {e}")
+                
+                # For exec commands, we'll skip normal forward_channel() later
+                server_handler.exec_output_read = True
+                
             elif server_handler.channel_type == 'subsystem' and server_handler.subsystem_name:
                 # For SFTP and other subsystems
                 subsys_name = server_handler.subsystem_name.decode('utf-8') if isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name
@@ -3270,8 +3328,13 @@ class SSHProxyServer:
             is_sftp = (server_handler.channel_type == 'subsystem' and 
                       server_handler.subsystem_name and 
                       (server_handler.subsystem_name.decode('utf-8') if isinstance(server_handler.subsystem_name, bytes) else server_handler.subsystem_name) == 'sftp')
-            self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp, 
-                               session_id=session_id, server_name=target_server.name)
+            
+            # Skip forward_channel for exec commands where output was already read
+            if hasattr(server_handler, 'exec_output_read') and server_handler.exec_output_read:
+                logger.info(f"Skipping forward_channel for exec command (output already read)")
+            else:
+                self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp, 
+                                   session_id=session_id, server_name=target_server.name)
             
             # Calculate session duration
             started_at = datetime.utcnow() - timedelta(seconds=0)  # Will be calculated by Tower API

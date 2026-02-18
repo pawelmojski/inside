@@ -1213,6 +1213,94 @@ challenge = MFAChallenge.query.filter(
 - Marker parsing: src/core/access_control_v2.py lines 240-290
 - Stay creation: src/api/stays.py lines 55-140
 
+### v1.11.2 - Exec Commands Exit Status Fix 🎯 ✅ COMPLETED (February 18, 2026)
+
+**Problem**: SSH exec commands (e.g., `ssh user@host w`) didn't return output to client
+- Client received "Connection closed by remote host" without seeing command output
+- Issue: Backend closed channel immediately after sending output (fast commands like `w`, `uptime`)
+- By the time `forward_channel()` was called (~300 lines later), backend channel was already closed
+- Exit status propagation failed because channel was closed before reading it
+
+**Root Cause Analysis**:
+```python
+# OLD FLOW (BROKEN):
+backend_channel.exec_command('w')
+# ... 300 lines of code ...
+# - Session creation API call (~50-200ms)
+# - Recording setup
+# - Monitoring threads
+# Backend already closed by now!
+forward_channel(client_channel, backend_channel)  # Too late!
+```
+
+**Solution**: Immediate output reading for exec commands
+- Read backend output **immediately** after `exec_command()`
+- Forward each chunk to client in real-time
+- Capture exit status before channel closes
+- Skip `forward_channel()` for exec commands (output already forwarded)
+
+**Implementation** (February 18, 2026):
+
+**1. Immediate Output Reading** (src/proxy/ssh_proxy.py lines 2989-3033):
+```python
+backend_channel.exec_command(cmd_str)
+
+# Read output immediately before backend closes channel
+exec_output = b''
+backend_channel.settimeout(5.0)
+
+while True:
+    chunk = backend_channel.recv(4096)
+    if len(chunk) == 0:
+        break
+    exec_output += chunk
+    channel.send(chunk)  # Forward to client immediately
+
+# Get exit status
+time.sleep(0.05)
+if backend_channel.exit_status_ready():
+    exit_status = backend_channel.recv_exit_status()
+    channel.send_exit_status(exit_status)
+
+# Mark output as read - skip forward_channel
+server_handler.exec_output_read = True
+```
+
+**2. Skip forward_channel for Exec** (src/proxy/ssh_proxy.py lines 3327-3333):
+```python
+if hasattr(server_handler, 'exec_output_read') and server_handler.exec_output_read:
+    logger.info(f"Skipping forward_channel for exec command (output already read)")
+else:
+    self.forward_channel(channel, backend_channel, recorder, ...)
+```
+
+**Benefits Achieved**:
+- ✅ Exec commands return output correctly: `ssh user@host w` shows who is logged in
+- ✅ Exit status propagated properly (0 = success, non-zero = error)
+- ✅ Works for all exec commands: `w`, `uptime`, `ps`, `ls`, etc.
+- ✅ No timeout waiting for closed channel
+- ✅ Client sees output instantly (real-time forwarding)
+
+**Testing Results** (February 18, 2026):
+```bash
+root@vm-lin1:~# ssh -A 10.30.14.3 -lpmojski w
+ 13:47:00 up 94 days,  2:59,  2 users,  load average: 0,00, 0,02, 0,01
+UŻYTK.  TTY      Z                ZAL.OD   BEZCZ. JCPU   PCPU CO
+pmojski  pts/10   100.64.0.39      10:37   21:00   0.04s  0.04s -bash
+pmojski  pts/1    10.30.0.76       13:46    7.00s  0.02s  0.02s -bash
+Connection to 10.30.14.3 closed by remote host.
+# ✅ Output visible!
+```
+
+**Production Deployment**:
+- Gate tailscale-ideo (10.30.0.76): v1.11.2-tproxy deployed
+- Gate tailscale-etop (10.210.0.76): v1.11.2-tproxy deployed
+- Both gates tested and working correctly
+
+**Code Locations**:
+- Immediate exec output reading: src/proxy/ssh_proxy.py lines 2989-3033
+- Skip forward_channel logic: src/proxy/ssh_proxy.py lines 3327-3333
+
 ### v1.12 - Auto-Registration & Auto-Grant Groups 🎯 FUTURE
 
 **Concept**: Special user groups for automatic backend management
