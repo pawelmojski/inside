@@ -55,7 +55,7 @@ class GateConfig:
         self.gate_name = self.config.get('gate', 'name', fallback='gate-unknown')
         self.hostname = self.config.get('gate', 'hostname', fallback=os.uname().nodename)
         self.location = self.config.get('gate', 'location', fallback='Unknown')
-        self.version = self.config.get('gate', 'version', fallback='1.9.0')
+        self.version = self.config.get('gate', 'version', fallback='2.0')
         
         # Cache settings
         self.cache_enabled = self.config.getboolean('gate', 'cache_enabled', fallback=True)

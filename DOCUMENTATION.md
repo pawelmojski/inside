@@ -272,6 +272,248 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
    - Tracks session duration and recording file size
    - Access control handled by pre-connection validation (if implemented)
 
+## Admin Console & Session Multiplexer (NEW v2.0) 🚀🔥
+
+### Overview
+**Teleport-style SSH session sharing** - killer feature! Native session join/watch functionality built directly into the gate. No external tools like `screen` or `tmux` required. Admins can view and interact with live SSH sessions in real-time.
+
+### Features
+- **Session Multiplexing**: One SSH session shared between multiple viewers
+- **Watch Mode** (read-only): Observe sessions without interacting
+- **Join Mode** (read-write): Fully interact with the session
+- **Real-time Broadcasting**: Live output streaming to all participants
+- **Session History Buffer**: 50KB ring buffer - new watchers see recent history
+- **Announcements**: "*** admin joined ***" notifications
+- **Graceful Disconnect**: Watchers leave without interrupting the owner
+
+### Access Requirements
+- **Permission Level ≤100**: Admin/Operator level
+- **MFA Authentication**: Multi-factor authentication required
+- **Special Server**: "Gate Admin Console" (10.210.0.76 / 10.30.0.76)
+
+### How to Access
+1. SSH to gate: `ssh p.mojski@10.30.0.76 -p8022 -A`
+2. Complete MFA authentication
+3. Admin Console menu appears automatically
+
+### Admin Console Menu
+```
+========================================
+INSIDE - ADMIN CONSOLE
+========================================
+
+Connected as: p.mojski (Paweł Mojski)
+Permission Level: 100
+Gate: ideo-headscale-prod-router-ideo1
+Time: 2026-02-19 15:00:00 UTC
+
+========================================
+MAIN MENU
+========================================
+
+1. Active Stays
+2. Active Sessions
+3. Join Session (read-write) - 🔥 KILLER FEATURE
+4. Watch Session (read-only) - 🎯 NEW
+5. Kill Session
+6. Audit Logs - coming soon
+7. Grant Debug - coming soon
+8. MFA Status - coming soon
+9. Exit
+```
+
+### Option 3: Join Session (Read-Write) 🔥
+**Full session interaction** - type commands, see output, collaborate in real-time.
+
+**Workflow:**
+1. Select option 3 from menu
+2. See list of active SSH sessions on this gate
+3. Choose session number
+4. Enter live session with full control
+5. Type commands, navigate, edit files
+6. Press Ctrl+D or Ctrl+C to detach
+7. Return to admin console menu
+
+**Use Cases:**
+- Emergency troubleshooting with user
+- Pair programming/debugging sessions
+- Training - show commands in real-time
+- Security incident response
+- Command correction/assistance
+
+**Example:**
+```
+Found 2 joinable session(s):
+
+[1] jan.kowalski -> prod-app-01 (5m 30s)
+    ssh_session_abc123def456
+
+[2] anna.nowak -> prod-db-01 (15m 2s)
+    ssh_session_xyz789ghi
+
+Enter session number to join (0 to cancel): 1
+
+JOIN MODE (Read-Write)
+Press Ctrl+D or Ctrl+C to detach
+
+========================================
+Joined session: ssh_session_abc123def456
+Owner: jan.kowalski
+Server: prod-app-01
+Mode: join
+========================================
+
+--- Session History ---
+[last 50KB of output shown here]
+--- End History (Live Stream) ---
+
+*** p.mojski is now joined (read-write) this session ***
+
+# [you can now type commands and see live output]
+```
+
+### Option 4: Watch Session (Read-Only) 🎯
+**Silent observation** - see everything, type nothing. Perfect for monitoring.
+
+**Workflow:**
+1. Select option 4 from menu
+2. See list of active SSH sessions
+3. Choose session to watch
+4. View live session output (read-only)
+5. Cannot send commands
+6. Press Ctrl+D or Ctrl+C to stop watching
+
+**Use Cases:**
+- Monitoring junior admins
+- Security auditing
+- Training observation
+- Session recording verification
+- Incident investigation
+
+**Example:**
+```
+Found 2 watchable session(s):
+
+[1] jan.kowalski -> prod-app-01 (5m 30s)
+[2] anna.nowak -> prod-db-01 (15m 2s)
+
+Enter session number to watch (0 to cancel): 1
+
+WATCH MODE (Read-Only)
+Press Ctrl+D or Ctrl+C to detach
+
+*** p.mojski is now watching this session ***
+
+[live output streams here - you cannot type]
+```
+
+### Architecture
+
+```
+                              ┌──────────────────┐
+                              │  Backend Server  │
+                              └────────▲─────────┘
+                                       │
+                          ┌────────────┴─────────────┐
+                          │   forward_channel()      │
+                          │  - reads from backend    │
+                          │  - broadcasts to all     │
+                          │  - checks input_queue    │
+                          └────────────┬─────────────┘
+                                       │
+          ┌────────────────────────────┴──────────────────────────┐
+          │            SessionMultiplexer                         │
+          │   - output_buffer: Ring buffer (50KB history)         │
+          │   - input_queue: Commands from participants           │
+          │   - watchers: Dict {id -> channel, mode, username}    │
+          └────┬─────────────────────┬──────────────────────┬─────┘
+               │                     │                      │
+      ┌────────┴──────┐   ┌─────────┴────────┐  ┌─────────┴────────┐
+      │ Original User │   │  Admin 1         │  │  Admin 2         │
+      │ (owner)       │   │  watch mode      │  │  join mode       │
+      │ full control  │   │  read-only       │  │  read-write      │
+      └───────────────┘   └──────────────────┘  └──────────────────┘
+```
+
+### SessionMultiplexer Class
+Located in: `src/proxy/session_multiplexer.py`
+
+**Key Methods:**
+- `register_session(session_id, owner_username, server_name)` - Create multiplexer
+- `add_watcher(watcher_id, channel, username, mode)` - Add viewer
+- `remove_watcher(watcher_id)` - Remove viewer
+- `broadcast_output(data)` - Send backend output to all watchers
+- `handle_participant_input(watcher_id, data)` - Queue participant commands
+- `get_pending_input()` - Retrieve commands for backend
+- `deactivate()` - Mark session as ended
+
+**Properties:**
+- `output_buffer: deque(maxlen=50000)` - Ring buffer for history
+- `input_queue: deque()` - Commands from join-mode participants
+- `watchers: Dict[str, dict]` - Connected viewers
+- `lock: threading.RLock()` - Thread-safe operations
+
+### SessionMultiplexerRegistry (Singleton)
+Global registry of all active multiplexed sessions on gate.
+
+**Methods:**
+- `register_session()` - Add session to registry
+- `get_session(session_id)` - Retrieve multiplexer
+- `unregister_session(session_id)` - Remove on session end
+- `list_active_sessions()` - Get all joinable sessions
+- `cleanup_inactive()` - Remove dead sessions
+
+### Integration Points
+
+**ssh_proxy.py:**
+- Creates SessionMultiplexerRegistry on startup
+- Registers each SSH session with multiplexer
+- `forward_channel()` modified to:
+  - Broadcast backend output to all watchers
+  - Check input_queue for participant commands
+  - Unregister session on disconnect
+
+**admin_console_paramiko.py:**
+- Receives multiplexer_registry in constructor
+- Lists joinable sessions via Tower API
+- Filters to sessions with active multiplexers
+- Attaches admin channel as watcher/participant
+- Handles Ctrl+D/Ctrl+C graceful disconnect
+
+**Tower API:**
+- `/api/v1/admin/active-sessions` - Lists all sessions (with gate_id filter)
+- Sessions created after v2.0 have multiplexers
+- Legacy sessions (pre-v2.0) cannot be joined
+
+### Security Considerations
+- **Permission Level Check**: Only users with level ≤100 can access
+- **MFA Required**: Multi-factor authentication enforced
+- **Audit Trail**: All joins/watches logged with username and timestamp
+- **Announcements**: Session owner sees "*** admin joined ***" notifications
+- **Read-Only Mode**: Watch mode prevents accidental commands
+- **Graceful Exit**: Ctrl+D/Ctrl+C doesn't terminate owner's session
+
+### Limitations & Notes
+- **SSH only**: RDP session sharing not yet implemented
+- **Same Gate**: Can only join sessions on the same gate (local multiplexer registry)
+- **v2.0+ Sessions**: Only sessions started after v2.0 deployment are joinable
+- **No Stealth Mode**: Owner always sees join/leave announcements
+- **50KB Buffer**: New watchers see max 50KB of recent history
+- **Input Latency**: Join mode input goes through queue (~100ms delay)
+
+### Comparison with Commercial Solutions
+
+| Feature | Inside v2.0 | Teleport | PAM360 | Bastion |
+|---------|-------------|----------|---------|---------|
+| Session Join (R/W) | ✅ Built-in | ✅ Yes | ✅ Yes | ❌ No |
+| Session Watch (R/O) | ✅ Built-in | ✅ Yes | ⚠️ Paid | ❌ No |
+| History Buffer | ✅ 50KB | ✅ Full | ⚠️ Limited | N/A |
+| Native SSH | ✅ Yes | ✅ Yes | ⚠️ Agent | ✅ Yes |
+| Real-time | ✅ Yes | ✅ Yes | ⚠️ Delayed | N/A |
+| **Cost** | **FREE** | **$$$** | **$$$$** | **FREE** |
+
+**Inside v2.0 = Teleport functionality at AWS Bastion cost (FREE!)** 🚀🔥
+
 ## File Structure
 
 ```

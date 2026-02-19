@@ -26,6 +26,8 @@ from src.core.ip_pool import IPPoolManager
 from src.core.utmp_helper import write_utmp_login, write_utmp_logout
 from src.gate.api_client import TowerClient
 from src.gate.config import GateConfig
+from src.proxy.admin_console_paramiko import AdminConsoleParamiko
+from src.proxy.session_multiplexer import SessionMultiplexerRegistry
 
 # SO_ORIGINAL_DST constant for Linux TPROXY
 SO_ORIGINAL_DST = 80
@@ -63,6 +65,33 @@ def load_messages():
     except Exception as e:
         logger.error(f"Failed to load custom messages from Tower: {e}")
         # Use defaults - will be set when needed
+
+
+def is_local_ip(ip_address: str) -> bool:
+    """Check if IP address is a local interface on this machine."""
+    import socket
+    
+    # Check localhost
+    if ip_address in ['127.0.0.1', 'localhost', '::1']:
+        return True
+    
+    # Get all local IP addresses
+    try:
+        hostname = socket.gethostname()
+        local_ips = socket.gethostbyname_ex(hostname)[2]
+        
+        if ip_address in local_ips:
+            return True
+        
+        # Also check all socket addresses for all interfaces
+        # Get all IPs from socket.getaddrinfo
+        for info in socket.getaddrinfo(hostname, None):
+            if info[4][0] == ip_address:
+                return True
+    except Exception as e:
+        logger.debug(f"Error checking if IP is local: {e}")
+    
+    return False
 
 
 def format_denial_message(result: dict, username: str, dest_ip: str, tower_client) -> str:
@@ -618,7 +647,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.authenticated_user = type('User', (), {
             'id': result['person_id'],
             'username': result['person_username'],
-            'full_name': result.get('person_fullname')
+            'full_name': result.get('person_fullname'),
+            'permission_level': result.get('person_permission_level', 1000)
         })()
         self.access_result = result  # Store full result for effective_end_time
         self.ssh_login = username  # SSH login for backend (e.g., "ideo")
@@ -819,7 +849,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.authenticated_user = type('User', (), {
             'id': result['person_id'],
             'username': result['person_username'],
-            'full_name': result.get('person_fullname')
+            'full_name': result.get('person_fullname'),
+            'permission_level': result.get('person_permission_level', 1000)
         })()
         self.access_result = result  # Store full result for effective_end_time
         self.ssh_login = username  # SSH login for backend (e.g., "ideo")
@@ -925,7 +956,8 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.authenticated_user = type('User', (), {
             'id': result['person_id'],
             'username': result['person_username'],
-            'full_name': result.get('person_fullname')
+            'full_name': result.get('person_fullname'),
+            'permission_level': result.get('person_permission_level', 1000)
         })()
         self.access_result = result
         self.ssh_login = username
@@ -1136,6 +1168,8 @@ class SSHProxyServer:
         self.running = False
         # Registry of active connections: session_id -> (client_transport, backend_transport)
         self.active_connections = {}
+        # Session multiplexer registry for join/watch functionality
+        self.multiplexer_registry = SessionMultiplexerRegistry()
         # Forced disconnection times: session_id -> datetime (UTC)
         # Used by heartbeat to inject immediate/scheduled disconnections
         self.session_forced_endtimes = {}
@@ -1186,16 +1220,31 @@ class SSHProxyServer:
             logger.error(traceback.format_exc())
             return None
     
-    def forward_channel(self, client_channel, backend_channel, recorder: SSHSessionRecorder = None, db_session_id=None, is_sftp=False, session_id=None, server_name=None):
+    def forward_channel(self, client_channel, backend_channel, recorder: SSHSessionRecorder = None, db_session_id=None, is_sftp=False, session_id=None, server_name=None, owner_username=None):
         """Forward data between client and backend server via SSH channels
         
         Args:
-            session_id: Session identifier for terminal title clearing
+            session_id: Session identifier for terminal title clearing and multiplexing
             server_name: Server name for terminal title
+            owner_username: Username of session owner (for multiplexing)
         """
         bytes_sent = 0
         bytes_received = 0
         sftp_transfer_id = None
+        multiplexer = None
+        
+        # Register session with multiplexer (for join/watch functionality)
+        if session_id and server_name and owner_username and not is_sftp:
+            try:
+                multiplexer = self.multiplexer_registry.register_session(
+                    session_id=session_id,
+                    owner_username=owner_username,
+                    server_name=server_name
+                )
+                logger.info(f"Session {session_id} registered with multiplexer (owner: {owner_username})")
+            except Exception as e:
+                logger.error(f"Failed to register session {session_id} with multiplexer: {e}")
+                multiplexer = None
         
         # For SFTP, create transfer record
         if is_sftp and db_session_id:
@@ -1213,7 +1262,19 @@ class SSHProxyServer:
                     logger.info(f"Channel closed in loop: client={client_channel.closed}, backend={backend_channel.closed}")
                     break
                 
-                r, w, x = select.select([client_channel, backend_channel], [], [], 1.0)
+                # Check for pending input from multiplexed participants (join mode)
+                if multiplexer:
+                    participant_input = multiplexer.get_pending_input()
+                    if participant_input:
+                        try:
+                            backend_channel.send(participant_input)
+                            bytes_sent += len(participant_input)
+                            if recorder:
+                                recorder.write_data(participant_input, 'client')
+                        except Exception as e:
+                            logger.error(f"Error sending participant input to backend: {e}")
+                
+                r, w, x = select.select([client_channel, backend_channel], [], [], 0.1)
                 
                 if client_channel in r:
                     data = client_channel.recv(4096)
@@ -1244,8 +1305,16 @@ class SSHProxyServer:
                         except Exception as e:
                             logger.warning(f"Failed to propagate exit status: {e}", exc_info=True)
                         break
+                    
+                    # Send to original client
                     client_channel.send(data)
                     bytes_received += len(data)
+                    
+                    # Broadcast to all multiplexed watchers/participants
+                    if multiplexer:
+                        multiplexer.broadcast_output(data)
+                    
+                    # Record session data
                     if recorder:
                         # Stream server→client data to Tower as JSONL
                         recorder.write_data(data, 'server')
@@ -1254,6 +1323,14 @@ class SSHProxyServer:
             logger.debug(f"Channel forwarding ended: {e}")
         
         finally:
+            # Unregister session from multiplexer
+            if multiplexer and session_id:
+                try:
+                    self.multiplexer_registry.unregister_session(session_id)
+                    logger.info(f"Session {session_id} unregistered from multiplexer")
+                except Exception as e:
+                    logger.error(f"Failed to unregister session {session_id} from multiplexer: {e}")
+            
             # Clear terminal title BEFORE closing channels (still writable)
             if session_id and server_name:
                 try:
@@ -2783,6 +2860,61 @@ class SSHProxyServer:
             user = server_handler.authenticated_user
             target_server = server_handler.target_server
             
+            # Check if this is a gate connection (admin console)
+            # Detect ONLY by server name to avoid false positives
+            is_gate_console = (
+                hasattr(target_server, 'name') and 
+                target_server.name == 'Gate Admin Console'
+            )
+            
+            if is_gate_console and hasattr(user, 'permission_level') and user.permission_level <= 100:
+                logger.info(f"Admin console access for {user.username} (level {user.permission_level})")
+                
+                # Create session in Tower API for gate console
+                try:
+                    session_data = self.tower_client.create_session(
+                        session_id=session_id,
+                        person_id=user.id,
+                        server_id=target_server.id,
+                        source_ip=source_ip,
+                        proxy_ip=dest_ip,
+                        backend_ip=target_server.ip_address,
+                        backend_port=22,
+                        grant_id=server_handler.access_result.get('grant_id'),
+                        ssh_username=server_handler.ssh_login,
+                        protocol='ssh',
+                        subsystem_name=None,
+                        ssh_key_fingerprint=server_handler.ssh_key_fingerprint
+                    )
+                    logger.info(f"Gate console session created: {session_id}")
+                except Exception as e:
+                    logger.error(f"Failed to create gate console session: {e}")
+                
+                # Launch admin console
+                try:
+                    user_info = {
+                        'username': user.username,
+                        'full_name': user.full_name if hasattr(user, 'full_name') else user.username,
+                        'permission_level': user.permission_level
+                    }
+                    console = AdminConsoleParamiko(user_info, self.tower_client, self.multiplexer_registry)
+                    console.run(channel)
+                    
+                    logger.info(f"Admin console session ended: {session_id}")
+                except Exception as e:
+                    logger.error(f"Admin console error: {e}", exc_info=True)
+                    channel.send(f"\r\nAdmin console error: {e}\r\n".encode())
+                finally:
+                    # End session in Tower API
+                    try:
+                        self.tower_client.end_session(session_id)
+                    except Exception as e:
+                        logger.error(f"Failed to end gate console session: {e}")
+                    
+                    channel.close()
+                    return
+            
+            # Normal backend connection
             # Connect to backend server via SSH
             logger.debug(f"Connecting to backend: {target_server.ip_address}:22")
             backend_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -3334,7 +3466,8 @@ class SSHProxyServer:
                 logger.info(f"Skipping forward_channel for exec command (output already read)")
             else:
                 self.forward_channel(channel, backend_channel, recorder, db_session.id, is_sftp, 
-                                   session_id=session_id, server_name=target_server.name)
+                                   session_id=session_id, server_name=target_server.name, 
+                                   owner_username=user.username)
             
             # Calculate session duration
             started_at = datetime.utcnow() - timedelta(seconds=0)  # Will be calculated by Tower API

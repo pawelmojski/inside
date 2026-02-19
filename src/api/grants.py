@@ -432,6 +432,7 @@ def check_grant():
         'person_id': user.id,
         'person_username': user.username,
         'person_fullname': user.full_name if hasattr(user, 'full_name') else user.username,
+        'person_permission_level': user.permission_level if hasattr(user, 'permission_level') else 1000,
         'server_id': server.id,
         'server_name': server.name,
         'server_ip': server.ip_address,

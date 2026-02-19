@@ -1,6 +1,163 @@
 # Inside - Roadmap & TODO
 
-## Next Planned: v2.0 (MFA Integration with Azure AD) 🎯 PLANNED
+## ✅ v2.0 COMPLETED (February 19, 2026) 🚀🔥
+
+### KILLER FEATURE: Admin Console with Session Multiplexing (Teleport-Style)
+
+**Holy shit, this actually works!** Native SSH session sharing built into the gate. No external tools required.
+
+#### What Was Delivered:
+
+**1. Admin Console** (`src/proxy/admin_console_paramiko.py`)
+- Interactive SSH menu for admins (permission level ≤100)
+- MFA authentication required
+- Direct SSH to gate → Admin console appears
+- Clean text UI with proper CRLF line breaks
+- 9 menu options (5 functional, 4 coming soon)
+
+**2. Session Multiplexer** (`src/proxy/session_multiplexer.py`)
+- One SSH session shared between multiple viewers
+- **Ring buffer**: 50KB session history for new watchers
+- **Input queue**: Commands from join-mode participants
+- **Real-time broadcasting**: Live output to all watchers
+- **Announcements**: "*** admin joined ***" notifications
+- Thread-safe with RLock synchronization
+
+**3. SessionMultiplexerRegistry (Singleton)**
+- Global registry of all active multiplexed sessions
+- Lives in gate process memory
+- Tracks all joinable sessions
+- Automatic cleanup on disconnect
+
+**4. Join Session (Read-Write) - Option 3** 🔥
+- Full interaction with live SSH sessions
+- Type commands, see output in real-time
+- Multiple admins can collaborate simultaneously
+- Graceful disconnect (Ctrl+D/Ctrl+C)
+- Use cases: Emergency troubleshooting, pair programming, training
+
+**5. Watch Session (Read-Only) - Option 4** 🎯
+- Silent observation mode
+- See everything, type nothing
+- Perfect for monitoring, auditing, training
+- No impact on session owner
+- Use cases: Junior admin monitoring, security audits
+
+**6. Other Admin Console Functions:**
+- **Active Stays** - List all active stays with session count
+- **Active Sessions** - Detailed session list with duration
+- **Kill Session** - Terminate any active session via API
+- **Exit** - Return to shell
+
+**7. Integration & Architecture:**
+- Modified `ssh_proxy.py`:
+  - Imports SessionMultiplexerRegistry
+  - Registers each session on start
+  - `forward_channel()` broadcasts output to watchers
+  - Checks input_queue for participant commands
+  - Unregisters session on disconnect
+- Admin API endpoints (`/api/v1/admin/*`):
+  - Fixed authentication: Flask-Login → gate bearer token
+  - `/active-stays` - List stays
+  - `/active-sessions` - List sessions
+  - `/kill-session/<id>` - Terminate session
+- Tower API integration:
+  - Admin console fetches session list
+  - Filters to sessions with multiplexers (v2.0+)
+  - Cross-gate session tracking
+
+**8. Database & Access Control:**
+- Special server: "Gate Admin Console" (10.210.0.76, 10.30.0.76)
+- Grant ID 55 (admin), 56 (p.mojski)
+- Permission level ≤100 required
+- MFA enforcement via existing flow
+
+**9. Deployment:**
+- Package: `inside-ssh-proxy-2.0-tproxy.tar.gz` (1.5MB)
+- Deployed to both gates:
+  - 10.30.0.76 (tailscale-ideo)
+  - 10.210.0.76 (tailscale-ideo)
+- Flask service restarted with admin API
+- Zero downtime deployment
+
+#### Technical Details:
+
+**Files Created:**
+- `src/proxy/session_multiplexer.py` (380 lines)
+- `src/web/blueprints/admin_api.py` (135 lines)
+
+**Files Modified:**
+- `src/proxy/ssh_proxy.py`:
+  - Added SessionMultiplexerRegistry import
+  - Modified `forward_channel()` for broadcasting
+  - Pass `owner_username` for multiplexer
+  - Admin console integration
+- `src/proxy/admin_console_paramiko.py` (577 lines):
+  - Implemented join_session()
+  - Implemented watch_session()
+  - Added _attach_to_session() for multiplexer integration
+  - Fixed CRLF line breaks (\r\n)
+  - Removed ASCII art boxes (clean UI)
+- `src/api/grants.py`:
+  - Added `person_permission_level` to response
+- `scripts/build_standalone_package.sh`:
+  - Version: 1.11.2-tproxy → 2.0-tproxy
+
+**Architecture:**
+```
+Backend Server
+      ↕
+forward_channel()
+   (ssh_proxy.py)
+      ↕
+SessionMultiplexer
+   ├─ output_buffer (50KB ring)
+   ├─ input_queue (participant commands)
+   └─ watchers: {id → channel, mode}
+      ↕
+┌─────────┬──────────┬──────────┐
+│ Owner   │ Admin 1  │ Admin 2  │
+│ (full)  │ (watch)  │ (join)   │
+└─────────┴──────────┴──────────┘
+```
+
+#### Comparison with Commercial Solutions:
+
+| Feature | Inside v2.0 | Teleport | PAM360 | AWS Bastion |
+|---------|-------------|----------|---------|-------------|
+| Session Join | ✅ FREE | ✅ Paid | ✅ Paid | ❌ No |
+| Session Watch | ✅ FREE | ✅ Paid | ⚠️ Limited | ❌ No |
+| History Buffer | ✅ 50KB | ✅ Full | ⚠️ Limited | N/A |
+| Native SSH | ✅ Yes | ✅ Yes | ⚠️ Agent | ✅ Yes |
+| **Cost** | **$0** | **$$$** | **$$$$** | **$0** |
+
+**Inside v2.0 = Enterprise features at zero cost** 🎉
+
+#### Known Limitations:
+- SSH sessions only (RDP not yet supported)
+- Same gate only (local multiplexer registry)
+- v2.0+ sessions only (pre-v2.0 sessions not joinable)
+- Owner always sees join/leave announcements (no stealth mode)
+- 50KB history buffer (not full session recording)
+- Input latency ~100ms in join mode (queue-based)
+
+#### User Feedback:
+> "JA PIERDOLE TO DZIAŁA. TO PO PROSTU ZAJEBIŚCIE DZIAŁA!!!"
+> "kurwa, jaram się jak dziecko... To jest kill-feature. to jest coś czego chyba nie ma nikt w natywnym ssh!"
+> — p.mojski, February 19, 2026
+
+#### Future Enhancements (v2.1+):
+- RDP session sharing (via PyRDP multiplexer)
+- Cross-gate session joining (via Redis/WebSocket)
+- Stealth mode (silent watch without announcements)
+- Full session recording playback in multiplexer
+- Multiple simultaneous join-mode participants
+- Session recording synchronized with multiplexer buffer
+- Admin console options 6-8: Audit Logs, Grant Debug, MFA Status
+
+---
+
+## Next Planned: v2.1 (MFA Integration with Azure AD) 🎯 PLANNED
 
 **Waiting for:** Azure AD admin rights
 

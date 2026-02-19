@@ -183,6 +183,7 @@ from blueprints.auth import auth_bp
 from blueprints.gates import gates_bp as gates_ui_bp  # Web UI for gates management
 from blueprints.stays import stays_bp as stays_ui_bp  # Web UI for stays tracking
 from blueprints.whoami import whoami_bp  # Debug: check current user
+from blueprints.admin_api import admin_api_bp  # Admin console API
 from search import search_bp
 from auth_saml import saml_bp  # SAML authentication for MFA
 
@@ -209,6 +210,7 @@ app.register_blueprint(saml_bp)  # SAML endpoints (/auth/saml/*)
 app.register_blueprint(gates_ui_bp, url_prefix='/gates')  # Web UI for gates
 app.register_blueprint(search_bp, url_prefix='/search')
 app.register_blueprint(whoami_bp)  # Debug endpoint: /api/whoami
+app.register_blueprint(admin_api_bp)  # Admin console API endpoints
 
 # Register Tower API blueprints (for Gate communication)
 app.register_blueprint(grants_bp)

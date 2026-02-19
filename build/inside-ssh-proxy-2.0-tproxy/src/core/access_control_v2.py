@@ -63,7 +63,8 @@ class AccessControlEngineV2:
                 # Found in IP pool - NAT mode
                 server = db.query(Server).filter(
                     Server.id == allocation.server_id,
-                    Server.is_active == True
+                    Server.is_active == True,
+                    Server.deleted == False
                 ).first()
                 
                 if not server:
@@ -79,7 +80,8 @@ class AccessControlEngineV2:
             # Not found in pool - try TPROXY mode: direct server IP lookup
             server = db.query(Server).filter(
                 Server.ip_address == proxy_ip,
-                Server.is_active == True
+                Server.is_active == True,
+                Server.deleted == False
             ).first()
             
             if server:
@@ -148,6 +150,233 @@ class AccessControlEngineV2:
             return (False, "Outside allowed time windows")
         
         return (True, matched_name)
+    
+    def _create_auto_grant(
+        self,
+        db: Session,
+        user: 'User',
+        server: 'Server',
+        protocol: str,
+        now: datetime,
+        source_ip: str,
+        gate_id: int
+    ) -> 'AccessPolicy':
+        """
+        Create an automatic grant for user → server access.
+        
+        Auto-grants are created when:
+        - User connects to a server
+        - No existing grant (user or group policy) found
+        - No revoked (expired) grant exists
+        - Gate has auto_grant_enabled = True
+        
+        Auto-grant properties are configured per-gate:
+        - Duration: gate.auto_grant_duration_days (default: 7)
+        - Inactivity timeout: gate.auto_grant_inactivity_timeout_minutes (default: 60)
+        - Port forwarding: gate.auto_grant_port_forwarding (default: True)
+        - No SSH login restrictions (allow all logins)
+        - User-level policy (not group)
+        - Server scope
+        
+        Args:
+            db: Database session
+            user: User requesting access
+            server: Target server
+            protocol: 'ssh' or 'rdp'
+            now: Current time
+            source_ip: Client source IP (for audit log)
+            gate_id: ID of gate processing the connection
+            
+        Returns:
+            Created AccessPolicy object or None if auto-grant disabled
+        """
+        from datetime import timedelta
+        from .database import Gate
+        
+        # Get gate configuration
+        gate = db.query(Gate).filter(Gate.id == gate_id).first()
+        if not gate:
+            logger.error(f"Gate {gate_id} not found when creating auto-grant")
+            return None
+        
+        # Check if auto-grant is enabled for this gate
+        if not gate.auto_grant_enabled:
+            logger.warning(
+                f"Auto-grant DISABLED for gate {gate.name} (ID: {gate_id}). "
+                f"Connection denied for {user.username} → {server.name}"
+            )
+            return None
+        
+        logger.info(
+            f"Creating auto-grant: {user.username} (ID: {user.id}) → "
+            f"{server.name} (ID: {server.id}, IP: {server.ip_address}) [{protocol}] "
+            f"via gate {gate.name} (ID: {gate_id})"
+        )
+        
+        # Create access policy with gate-specific configuration
+        auto_grant = AccessPolicy(
+            user_id=user.id,
+            user_group_id=None,  # User-level grant, not group
+            source_ip_id=None,  # Allow from all user's IPs
+            scope_type='server',  # Grant access to specific server
+            target_server_id=server.id,
+            target_group_id=None,
+            protocol=protocol,  # ssh or rdp
+            port_forwarding_allowed=gate.auto_grant_port_forwarding,
+            start_time=now,
+            end_time=now + timedelta(days=gate.auto_grant_duration_days),
+            inactivity_timeout_minutes=gate.auto_grant_inactivity_timeout_minutes,
+            mfa_required=False,  # Already authenticated
+            use_schedules=False,  # No schedule restrictions
+            is_active=True,
+            granted_by='AUTO-GRANT',
+            reason=f'Automatically created grant ({gate.auto_grant_duration_days} days validity)',
+            created_by_user_id=None  # System-created
+        )
+        
+        db.add(auto_grant)
+        db.flush()  # Get ID without committing transaction
+        
+        # No SSH login restrictions - empty PolicySSHLogin list means all logins allowed
+        # We intentionally don't create any PolicySSHLogin records
+        
+        # Commit
+        db.commit()
+        
+        # Audit log
+        try:
+            audit = AuditLog(
+                user_id=user.id,
+                action='auto_grant_create',
+                details=(
+                    f'Auto-grant created: {user.username} → {server.name} '
+                    f'({server.ip_address}) [protocol: {protocol}, '
+                    f'valid: {gate.auto_grant_duration_days} days, '
+                    f'timeout: {gate.auto_grant_inactivity_timeout_minutes}min, '
+                    f'port_fwd: {gate.auto_grant_port_forwarding}] '
+                    f'via gate {gate.name}'
+                ),
+                source_ip=source_ip
+            )
+            db.add(audit)
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to create audit log for auto-grant: {e}")
+        
+        logger.info(
+            f"Auto-grant created: policy_id={auto_grant.id}, "
+            f"expires={auto_grant.end_time}, "
+            f"timeout={gate.auto_grant_inactivity_timeout_minutes}min"
+        )
+        
+        return auto_grant
+    
+    def _auto_create_server(
+        self,
+        db: Session,
+        dest_ip: str,
+        source_ip: str,
+        gate_id: int,
+        user: 'User'
+    ) -> Optional['Server']:
+        """
+        Auto-create server when connecting to unknown or deleted backend.
+        
+        This is called when:
+        - User connects to an IP that doesn't exist in servers table
+        - OR server exists but is soft-deleted (deleted=True)
+        
+        The new server is created with:
+        - ip_address = dest_ip (TPROXY mode - direct IP)
+        - name = auto-generated from IP
+        - Default ports: SSH:22, RDP:3389
+        - is_active = True
+        - No IP pool allocation (TPROXY doesn't need it)
+        
+        Args:
+            db: Database session
+            dest_ip: Destination IP to create server for
+            source_ip: Client IP (for audit log)
+            gate_id: Gate ID (for audit log)
+            user: User requesting access (for audit log)
+        
+        Returns:
+            Created Server object or None if creation failed
+        """
+        from .database import Server, Gate
+        
+        # Get gate info for logging
+        gate = db.query(Gate).filter(Gate.id == gate_id).first()
+        gate_name = gate.name if gate else f"gate-{gate_id}"
+        
+        # Generate server name from IP
+        server_name = f"auto-{dest_ip.replace('.', '-')}"
+        
+        logger.info(
+            f"Auto-creating server: {server_name} ({dest_ip}) "
+            f"triggered by {user.username} via {gate_name}"
+        )
+        
+        try:
+            # Check if server with this IP exists but is deleted
+            existing = db.query(Server).filter(
+                Server.ip_address == dest_ip
+            ).first()
+            
+            if existing and existing.deleted:
+                logger.info(
+                    f"Server {existing.name} ({dest_ip}) exists but is deleted. "
+                    f"Creating NEW server (history preserved in old entity ID: {existing.id})"
+                )
+            
+            # Create new server
+            new_server = Server(
+                name=server_name,
+                ip_address=dest_ip,
+                ssh_port=22,  # Default SSH port
+                rdp_port=3389,  # Default RDP port
+                description=f"Auto-created on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} by {user.username}",
+                is_active=True,
+                deleted=False,
+                deleted_at=None,
+                deleted_by_user_id=None
+            )
+            
+            db.add(new_server)
+            db.flush()  # Get ID without committing
+            
+            # Commit
+            db.commit()
+            
+            # Audit log
+            try:
+                audit = AuditLog(
+                    user_id=user.id,
+                    action='auto_create_server',
+                    details=(
+                        f'Server auto-created: {server_name} ({dest_ip}) '
+                        f'[SSH:{new_server.ssh_port}, RDP:{new_server.rdp_port}] '
+                        f'via {gate_name}'
+                    ),
+                    source_ip=source_ip,
+                    success=True
+                )
+                db.add(audit)
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to create audit log for auto-created server: {e}")
+            
+            logger.info(
+                f"Server auto-created successfully: ID={new_server.id}, "
+                f"name={server_name}, ip={dest_ip}"
+            )
+            
+            return new_server
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to auto-create server {server_name} ({dest_ip}): {e}", exc_info=True)
+            return None
     
     def check_access_v2(
         self,
@@ -350,19 +579,50 @@ class AccessControlEngineV2:
             # Step 2: Find backend server by dest_ip on this gate
             backend_info = self.find_backend_by_proxy_ip(db, dest_ip, gate_id)
             if not backend_info:
-                logger.warning(f"Access denied: No backend found for destination IP {dest_ip} on gate {gate_id}")
-                return {
-                    'has_access': False,
-                    'user': user,
-                    'user_ip': user_ip,
-                    'server': None,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'server_not_found',
-                    'reason': f'No backend server for destination IP {dest_ip}'
+                # Server not found (doesn't exist or is deleted)
+                # Try auto-create server
+                logger.info(
+                    f"No backend found for {dest_ip}, attempting auto-create "
+                    f"(user: {user.username})"
+                )
+                
+                auto_server = self._auto_create_server(
+                    db=db,
+                    dest_ip=dest_ip,
+                    source_ip=source_ip,
+                    gate_id=gate_id,
+                    user=user
+                )
+                
+                if not auto_server:
+                    # Auto-create failed
+                    logger.warning(
+                        f"Access denied: No backend found for destination IP {dest_ip} "
+                        f"on gate {gate_id} and auto-create failed"
+                    )
+                    return {
+                        'has_access': False,
+                        'user': user,
+                        'user_ip': user_ip,
+                        'server': None,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'server_not_found',
+                        'reason': f'No backend server for destination IP {dest_ip}'
+                    }
+                
+                # Auto-create succeeded - use the new server
+                logger.info(
+                    f"Server auto-created successfully: {auto_server.name} (ID: {auto_server.id}), "
+                    f"continuing access check"
+                )
+                server = auto_server
+                backend_info = {
+                    'server': auto_server,
+                    'allocation': None  # TPROXY mode - no IP allocation
                 }
-            
-            server = backend_info['server']
+            else:
+                server = backend_info['server']
             
             # Step 2b: Check backend server maintenance mode
             if server.in_maintenance and server.maintenance_scheduled_at:
@@ -484,8 +744,63 @@ class AccessControlEngineV2:
                 user_group_ids = get_all_user_groups(user.id, db)
                 
                 if not user_group_ids:
+                    # No groups - will check auto-grant later
+                    logger.debug(
+                        f"No direct policies and no groups for {user.username}, "
+                        f"will check auto-grant eligibility"
+                    )
+                    matching_policies = []
+                else:
+                    # Has groups - check group policies
+                    group_policies_query = db.query(AccessPolicy).filter(
+                        AccessPolicy.user_group_id.in_(user_group_ids),
+                        AccessPolicy.is_active == True,
+                        AccessPolicy.start_time <= now,
+                        or_(AccessPolicy.end_time == None, AccessPolicy.end_time >= now)
+                    ).filter(
+                        # Protocol match: NULL (all protocols) or specific
+                        or_(
+                            AccessPolicy.protocol == None,
+                            AccessPolicy.protocol == protocol
+                        )
+                    )
+                    
+                    matching_policies = []
+                    for policy in group_policies_query:
+                        if policy.scope_type == 'group':
+                            if policy.target_group_id in server_group_ids:
+                                matching_policies.append(policy)
+                        elif policy.scope_type in ('server', 'service'):
+                            if policy.target_server_id == server.id:
+                                matching_policies.append(policy)
+                    
+                    logger.debug(f"Using {len(matching_policies)} group policies (no direct user policies)")
+            
+            if not matching_policies:
+                # NO MATCHING POLICY FOUND (neither user nor group)
+                # Check if auto-grant should be created
+                
+                logger.info(
+                    f"No matching policy found for {user.username} → {server.name} ({protocol}), "
+                    f"checking revoke status..."
+                )
+                
+                # Step 1: Check if there was a REVOKED (expired) grant for this user+server
+                # Revoke = admin set end_time in the past
+                # If revoked grant exists, DENY access permanently (no auto-grant)
+                revoked_grant = db.query(AccessPolicy).filter(
+                    AccessPolicy.user_id == user.id,
+                    AccessPolicy.target_server_id == server.id,
+                    AccessPolicy.scope_type.in_(['server', 'service']),  # Only server-level grants
+                    AccessPolicy.end_time < now,  # Expired = revoked
+                    AccessPolicy.is_active == True  # Still in database (not deleted)
+                ).first()
+                
+                if revoked_grant:
+                    # Access was explicitly REVOKED - deny permanently
                     logger.warning(
-                        f"Access denied: No direct policies and no groups for {user.username}"
+                        f"Access DENIED (revoked): {user.username} → {server.name} "
+                        f"(grant {revoked_grant.id} was revoked at {revoked_grant.end_time})"
                     )
                     return {
                         'has_access': False,
@@ -494,49 +809,63 @@ class AccessControlEngineV2:
                         'server': server,
                         'policies': [],
                         'selected_policy': None,
-                        'denial_reason': 'no_matching_policy',
-                        'reason': 'No matching policy (user or group)'
+                        'denial_reason': 'access_revoked',
+                        'reason': f'Access to {server.name} was revoked by administrator'
                     }
                 
-                group_policies_query = db.query(AccessPolicy).filter(
-                    AccessPolicy.user_group_id.in_(user_group_ids),
-                    AccessPolicy.is_active == True,
-                    AccessPolicy.start_time <= now,
-                    or_(AccessPolicy.end_time == None, AccessPolicy.end_time >= now)
-                ).filter(
-                    # Protocol match: NULL (all protocols) or specific
-                    or_(
-                        AccessPolicy.protocol == None,
-                        AccessPolicy.protocol == protocol
+                # Step 2: No revoke found - CREATE AUTO-GRANT
+                logger.info(
+                    f"No revoke found, creating auto-grant: {user.username} → {server.name} ({protocol})"
+                )
+                
+                try:
+                    auto_grant = self._create_auto_grant(
+                        db=db,
+                        user=user,
+                        server=server,
+                        protocol=protocol,
+                        now=now,
+                        source_ip=source_ip,
+                        gate_id=gate_id
                     )
-                )
-                
-                matching_policies = []
-                for policy in group_policies_query:
-                    if policy.scope_type == 'group':
-                        if policy.target_group_id in server_group_ids:
-                            matching_policies.append(policy)
-                    elif policy.scope_type in ('server', 'service'):
-                        if policy.target_server_id == server.id:
-                            matching_policies.append(policy)
-                
-                logger.debug(f"Using {len(matching_policies)} group policies (no direct user policies)")
-            
-            if not matching_policies:
-                logger.warning(
-                    f"Access denied: No matching policy for {user.username} "
-                    f"from {source_ip} to {server.name} ({protocol})"
-                )
-                return {
-                    'has_access': False,
-                    'user': user,
-                    'user_ip': user_ip,
-                    'server': server,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'no_matching_policy',
-                    'reason': f'No matching access policy'
-                }
+                    
+                    # Check if auto-grant creation was disabled by gate config
+                    if not auto_grant:
+                        logger.warning(
+                            f"Auto-grant creation disabled for gate {gate_id}, "
+                            f"denying access to {user.username} → {server.name}"
+                        )
+                        return {
+                            'has_access': False,
+                            'user': user,
+                            'user_ip': user_ip,
+                            'server': server,
+                            'policies': [],
+                            'selected_policy': None,
+                            'denial_reason': 'auto_grant_disabled',
+                            'reason': 'Auto-grant disabled for this gate'
+                        }
+                    
+                    # Use the newly created auto-grant
+                    matching_policies = [auto_grant]
+                    
+                    logger.info(
+                        f"Auto-grant created successfully: policy_id={auto_grant.id}, "
+                        f"expires={auto_grant.end_time}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create auto-grant: {e}", exc_info=True)
+                    return {
+                        'has_access': False,
+                        'user': user,
+                        'user_ip': user_ip,
+                        'server': server,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'auto_grant_creation_failed',
+                        'reason': f'Failed to create automatic grant: {str(e)}'
+                    }
             
             # Step 3.5: Filter policies by schedule (if use_schedules enabled)
             schedule_filtered_policies = []

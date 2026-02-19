@@ -34,7 +34,7 @@
                     </li>
                     
                     <!-- Admin-only menu items -->
-                    {% if current_user.permission_level < 900 %}
+                    {% if current_user.is_authenticated and current_user.permission_level < 900 %}
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint and 'users' in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('users.index') }}">
@@ -91,7 +91,7 @@
                 </ul>
                 
                 <!-- Global Search (admin only) -->
-                {% if current_user.permission_level < 900 %}
+                {% if current_user.is_authenticated and current_user.permission_level < 900 %}
                 <form class="d-flex me-3" method="GET" action="{{ url_for('search.search') }}">
                     <input class="form-control me-2" type="search" name="q" placeholder="Szukaj..." 
                            aria-label="Search" style="width: 250px;">

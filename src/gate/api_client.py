@@ -709,6 +709,48 @@ class TowerClient:
         except Exception as e:
             logger.warning(f"Tower ping failed: {e}")
             return False
+    
+    def get_active_stays(self) -> List[Dict[str, Any]]:
+        """Get list of active stays from Tower (for admin console).
+        
+        Returns:
+            List of active stay dictionaries
+        """
+        try:
+            response = self._request('GET', '/api/v1/admin/active-stays')
+            return response.get('stays', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch active stays: {e}")
+            return []
+    
+    def get_active_sessions(self) -> List[Dict[str, Any]]:
+        """Get list of active sessions from Tower (for admin console).
+        
+        Returns:
+            List of active session dictionaries
+        """
+        try:
+            response = self._request('GET', '/api/v1/admin/active-sessions')
+            return response.get('sessions', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch active sessions: {e}")
+            return []
+    
+    def kill_session(self, session_id: str) -> Dict[str, Any]:
+        """Kill/terminate an active session (for admin console).
+        
+        Args:
+            session_id: Session ID to terminate
+        
+        Returns:
+            {'success': bool, 'message': str, 'error': str (optional)}
+        """
+        try:
+            response = self._request('POST', f'/api/v1/admin/kill-session/{session_id}')
+            return {'success': True, 'message': response.get('message', 'Session terminated')}
+        except Exception as e:
+            logger.error(f"Failed to kill session {session_id}: {e}")
+            return {'success': False, 'error': str(e)}
 
 
 # Global client instance
