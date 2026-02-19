@@ -149,6 +149,126 @@ class AccessControlEngineV2:
         
         return (True, matched_name)
     
+    def _create_auto_grant(
+        self,
+        db: Session,
+        user: 'User',
+        server: 'Server',
+        protocol: str,
+        now: datetime,
+        source_ip: str,
+        gate_id: int
+    ) -> 'AccessPolicy':
+        """
+        Create an automatic grant for user → server access.
+        
+        Auto-grants are created when:
+        - User connects to a server
+        - No existing grant (user or group policy) found
+        - No revoked (expired) grant exists
+        - Gate has auto_grant_enabled = True
+        
+        Auto-grant properties are configured per-gate:
+        - Duration: gate.auto_grant_duration_days (default: 7)
+        - Inactivity timeout: gate.auto_grant_inactivity_timeout_minutes (default: 60)
+        - Port forwarding: gate.auto_grant_port_forwarding (default: True)
+        - No SSH login restrictions (allow all logins)
+        - User-level policy (not group)
+        - Server scope
+        
+        Args:
+            db: Database session
+            user: User requesting access
+            server: Target server
+            protocol: 'ssh' or 'rdp'
+            now: Current time
+            source_ip: Client source IP (for audit log)
+            gate_id: ID of gate processing the connection
+            
+        Returns:
+            Created AccessPolicy object or None if auto-grant disabled
+        """
+        from datetime import timedelta
+        from .database import Gate
+        
+        # Get gate configuration
+        gate = db.query(Gate).filter(Gate.id == gate_id).first()
+        if not gate:
+            logger.error(f"Gate {gate_id} not found when creating auto-grant")
+            return None
+        
+        # Check if auto-grant is enabled for this gate
+        if not gate.auto_grant_enabled:
+            logger.warning(
+                f"Auto-grant DISABLED for gate {gate.name} (ID: {gate_id}). "
+                f"Connection denied for {user.username} → {server.name}"
+            )
+            return None
+        
+        logger.info(
+            f"Creating auto-grant: {user.username} (ID: {user.id}) → "
+            f"{server.name} (ID: {server.id}, IP: {server.ip_address}) [{protocol}] "
+            f"via gate {gate.name} (ID: {gate_id})"
+        )
+        
+        # Create access policy with gate-specific configuration
+        auto_grant = AccessPolicy(
+            user_id=user.id,
+            user_group_id=None,  # User-level grant, not group
+            source_ip_id=None,  # Allow from all user's IPs
+            scope_type='server',  # Grant access to specific server
+            target_server_id=server.id,
+            target_group_id=None,
+            protocol=protocol,  # ssh or rdp
+            port_forwarding_allowed=gate.auto_grant_port_forwarding,
+            start_time=now,
+            end_time=now + timedelta(days=gate.auto_grant_duration_days),
+            inactivity_timeout_minutes=gate.auto_grant_inactivity_timeout_minutes,
+            mfa_required=False,  # Already authenticated
+            use_schedules=False,  # No schedule restrictions
+            is_active=True,
+            granted_by='AUTO-GRANT',
+            reason=f'Automatically created grant ({gate.auto_grant_duration_days} days validity)',
+            created_by_user_id=None  # System-created
+        )
+        
+        db.add(auto_grant)
+        db.flush()  # Get ID without committing transaction
+        
+        # No SSH login restrictions - empty PolicySSHLogin list means all logins allowed
+        # We intentionally don't create any PolicySSHLogin records
+        
+        # Commit
+        db.commit()
+        
+        # Audit log
+        try:
+            audit = AuditLog(
+                user_id=user.id,
+                action='auto_grant_create',
+                details=(
+                    f'Auto-grant created: {user.username} → {server.name} '
+                    f'({server.ip_address}) [protocol: {protocol}, '
+                    f'valid: {gate.auto_grant_duration_days} days, '
+                    f'timeout: {gate.auto_grant_inactivity_timeout_minutes}min, '
+                    f'port_fwd: {gate.auto_grant_port_forwarding}] '
+                    f'via gate {gate.name}'
+                ),
+                source_ip=source_ip
+            )
+            db.add(audit)
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to create audit log for auto-grant: {e}")
+        
+        logger.info(
+            f"Auto-grant created: policy_id={auto_grant.id}, "
+            f"expires={auto_grant.end_time}, "
+            f"timeout={gate.auto_grant_inactivity_timeout_minutes}min"
+        )
+        
+        return auto_grant
+    
     def check_access_v2(
         self,
         db: Session,
@@ -523,20 +643,95 @@ class AccessControlEngineV2:
                 logger.debug(f"Using {len(matching_policies)} group policies (no direct user policies)")
             
             if not matching_policies:
-                logger.warning(
-                    f"Access denied: No matching policy for {user.username} "
-                    f"from {source_ip} to {server.name} ({protocol})"
+                # NO MATCHING POLICY FOUND (neither user nor group)
+                # Check if auto-grant should be created
+                
+                logger.info(
+                    f"No matching policy found for {user.username} → {server.name} ({protocol}), "
+                    f"checking revoke status..."
                 )
-                return {
-                    'has_access': False,
-                    'user': user,
-                    'user_ip': user_ip,
-                    'server': server,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'no_matching_policy',
-                    'reason': f'No matching access policy'
-                }
+                
+                # Step 1: Check if there was a REVOKED (expired) grant for this user+server
+                # Revoke = admin set end_time in the past
+                # If revoked grant exists, DENY access permanently (no auto-grant)
+                revoked_grant = db.query(AccessPolicy).filter(
+                    AccessPolicy.user_id == user.id,
+                    AccessPolicy.target_server_id == server.id,
+                    AccessPolicy.scope_type.in_(['server', 'service']),  # Only server-level grants
+                    AccessPolicy.end_time < now,  # Expired = revoked
+                    AccessPolicy.is_active == True  # Still in database (not deleted)
+                ).first()
+                
+                if revoked_grant:
+                    # Access was explicitly REVOKED - deny permanently
+                    logger.warning(
+                        f"Access DENIED (revoked): {user.username} → {server.name} "
+                        f"(grant {revoked_grant.id} was revoked at {revoked_grant.end_time})"
+                    )
+                    return {
+                        'has_access': False,
+                        'user': user,
+                        'user_ip': user_ip,
+                        'server': server,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'access_revoked',
+                        'reason': f'Access to {server.name} was revoked by administrator'
+                    }
+                
+                # Step 2: No revoke found - CREATE AUTO-GRANT
+                logger.info(
+                    f"No revoke found, creating auto-grant: {user.username} → {server.name} ({protocol})"
+                )
+                
+                try:
+                    auto_grant = self._create_auto_grant(
+                        db=db,
+                        user=user,
+                        server=server,
+                        protocol=protocol,
+                        now=now,
+                        source_ip=source_ip,
+                        gate_id=gate_id
+                    )
+                    
+                    # Check if auto-grant creation was disabled by gate config
+                    if not auto_grant:
+                        logger.warning(
+                            f"Auto-grant creation disabled for gate {gate_id}, "
+                            f"denying access to {user.username} → {server.name}"
+                        )
+                        return {
+                            'has_access': False,
+                            'user': user,
+                            'user_ip': user_ip,
+                            'server': server,
+                            'policies': [],
+                            'selected_policy': None,
+                            'denial_reason': 'auto_grant_disabled',
+                            'reason': 'Auto-grant disabled for this gate'
+                        }
+                    
+                    # Use the newly created auto-grant
+                    matching_policies = [auto_grant]
+                    
+                    logger.info(
+                        f"Auto-grant created successfully: policy_id={auto_grant.id}, "
+                        f"expires={auto_grant.end_time}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create auto-grant: {e}", exc_info=True)
+                    return {
+                        'has_access': False,
+                        'user': user,
+                        'user_ip': user_ip,
+                        'server': server,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'auto_grant_creation_failed',
+                        'reason': f'Failed to create automatic grant: {str(e)}'
+                    }
             
             # Step 3.5: Filter policies by schedule (if use_schedules enabled)
             schedule_filtered_policies = []

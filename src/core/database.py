@@ -45,6 +45,10 @@ class User(UserMixin, Base):
     source_ip = Column(String(45), index=True)  # DEPRECATED: Use user_source_ips table instead
     is_active = Column(Boolean, default=True)
     port_forwarding_allowed = Column(Boolean, default=False, nullable=False)
+    
+    # Permission system: 0=SuperAdmin, 100=Admin, 500=Operator, 1000=User (no GUI)
+    permission_level = Column(Integer, default=1000, nullable=False, index=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -163,6 +167,12 @@ class Gate(Base):
     mfa_enabled = Column(Boolean, default=False, nullable=False)  # If true, gate uses MFA for unknown IPs
     maintenance_reason = Column(Text)
     maintenance_grace_minutes = Column(Integer, default=15)
+    
+    # Auto-grant configuration (per-gate control)
+    auto_grant_enabled = Column(Boolean, default=True, nullable=False)
+    auto_grant_duration_days = Column(Integer, default=7, nullable=False)
+    auto_grant_inactivity_timeout_minutes = Column(Integer, default=60, nullable=False)
+    auto_grant_port_forwarding = Column(Boolean, default=True, nullable=False)
     
     # Custom messages for SSH banners and error messages
     msg_welcome_banner = Column(Text)  # Welcome message shown after successful auth

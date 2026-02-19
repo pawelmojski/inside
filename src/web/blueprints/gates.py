@@ -1,6 +1,7 @@
 """Gates management blueprint."""
 from flask import Blueprint, render_template, request, redirect, url_for, flash, abort, g
 from flask_login import login_required
+from src.web.permissions import admin_required
 from src.core.database import Gate
 from datetime import datetime, timedelta
 import ipaddress
@@ -140,6 +141,7 @@ def view(gate_id):
 
 @gates_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
     """Add new gate."""
     if request.method == 'POST':
@@ -164,6 +166,21 @@ def add():
                 flash(f'Invalid IP configuration: {e}', 'danger')
                 return render_template('gates/add.html')
             
+            # Parse auto-grant configuration
+            auto_grant_enabled = request.form.get('auto_grant_enabled') == 'on'
+            auto_grant_duration_days = int(request.form.get('auto_grant_duration_days', 7))
+            auto_grant_inactivity_timeout = int(request.form.get('auto_grant_inactivity_timeout_minutes', 60))
+            auto_grant_port_forwarding = request.form.get('auto_grant_port_forwarding') == 'on'
+            
+            # Validate auto-grant values
+            if auto_grant_duration_days < 1 or auto_grant_duration_days > 365:
+                flash('Auto-grant duration must be between 1 and 365 days!', 'danger')
+                return render_template('gates/add.html')
+            
+            if auto_grant_inactivity_timeout < 0 or auto_grant_inactivity_timeout > 1440:
+                flash('Inactivity timeout must be between 0 and 1440 minutes!', 'danger')
+                return render_template('gates/add.html')
+            
             # Generate API token
             import secrets
             api_token = secrets.token_urlsafe(32)
@@ -177,7 +194,11 @@ def add():
                 ip_pool_network=ip_pool_network,
                 ip_pool_start=ip_pool_start,
                 ip_pool_end=ip_pool_end,
-                is_active=request.form.get('is_active') == 'on'
+                is_active=request.form.get('is_active') == 'on',
+                auto_grant_enabled=auto_grant_enabled,
+                auto_grant_duration_days=auto_grant_duration_days,
+                auto_grant_inactivity_timeout_minutes=auto_grant_inactivity_timeout,
+                auto_grant_port_forwarding=auto_grant_port_forwarding
             )
             db.add(gate)
             db.commit()
@@ -193,15 +214,20 @@ def add():
     defaults = {
         'ip_pool_network': '10.0.160.128/25',
         'ip_pool_start': '10.0.160.129',
-        'ip_pool_end': '10.0.160.254'
+        'ip_pool_end': '10.0.160.254',
+        'auto_grant_enabled': True,
+        'auto_grant_duration_days': 7,
+        'auto_grant_inactivity_timeout_minutes': 60,
+        'auto_grant_port_forwarding': True
     }
     return render_template('gates/add.html', defaults=defaults)
 
 
 @gates_bp.route('/edit/<int:gate_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(gate_id):
-    """Edit gate configuration including IP pool."""
+    """Edit gate configuration including IP pool and auto-grant settings."""
     db = g.db
     gate = db.query(Gate).filter(Gate.id == gate_id).first()
     if not gate:
@@ -227,6 +253,21 @@ def edit(gate_id):
                 flash(f'Invalid IP configuration: {e}', 'danger')
                 return render_template('gates/edit.html', gate=gate)
             
+            # Parse auto-grant configuration
+            auto_grant_enabled = request.form.get('auto_grant_enabled') == 'on'
+            auto_grant_duration_days = int(request.form.get('auto_grant_duration_days', 7))
+            auto_grant_inactivity_timeout = int(request.form.get('auto_grant_inactivity_timeout_minutes', 60))
+            auto_grant_port_forwarding = request.form.get('auto_grant_port_forwarding') == 'on'
+            
+            # Validate auto-grant values
+            if auto_grant_duration_days < 1 or auto_grant_duration_days > 365:
+                flash('Auto-grant duration must be between 1 and 365 days!', 'danger')
+                return render_template('gates/edit.html', gate=gate)
+            
+            if auto_grant_inactivity_timeout < 0 or auto_grant_inactivity_timeout > 1440:
+                flash('Inactivity timeout must be between 0 and 1440 minutes!', 'danger')
+                return render_template('gates/edit.html', gate=gate)
+            
             # Update gate
             gate.name = request.form['name']
             gate.hostname = request.form['hostname']
@@ -236,6 +277,12 @@ def edit(gate_id):
             gate.ip_pool_start = ip_pool_start
             gate.ip_pool_end = ip_pool_end
             gate.is_active = request.form.get('is_active') == 'on'
+            
+            # Update auto-grant configuration
+            gate.auto_grant_enabled = auto_grant_enabled
+            gate.auto_grant_duration_days = auto_grant_duration_days
+            gate.auto_grant_inactivity_timeout_minutes = auto_grant_inactivity_timeout
+            gate.auto_grant_port_forwarding = auto_grant_port_forwarding
             
             # Update custom messages (optional fields)
             gate.msg_no_person = request.form.get('msg_no_person') or None
@@ -259,6 +306,7 @@ def edit(gate_id):
 
 @gates_bp.route('/delete/<int:gate_id>', methods=['POST'])
 @login_required
+@admin_required
 def delete(gate_id):
     """Delete gate (only if no active allocations)."""
     db = g.db
@@ -291,6 +339,7 @@ def delete(gate_id):
 
 @gates_bp.route('/<int:gate_id>/maintenance', methods=['POST'])
 @login_required
+@admin_required
 def enter_maintenance(gate_id):
     """Proxy endpoint to call Tower API maintenance mode.
     
@@ -347,6 +396,7 @@ def enter_maintenance(gate_id):
 
 @gates_bp.route('/<int:gate_id>/maintenance', methods=['DELETE'])
 @login_required
+@admin_required
 def exit_maintenance(gate_id):
     """Proxy endpoint to exit maintenance mode.
     

@@ -1301,6 +1301,473 @@ Connection to 10.30.14.3 closed by remote host.
 - Immediate exec output reading: src/proxy/ssh_proxy.py lines 2989-3033
 - Skip forward_channel logic: src/proxy/ssh_proxy.py lines 3327-3333
 
+### v1.12.0 - Auto-Grant & Permission System 🎯 ✅ COMPLETED (February 18, 2026)
+
+**Problem**: Opening Inside to external users requires:
+- Auto-grant creation to avoid admin support overhead for every new connection
+- Per-gate configuration (different rules per gate/environment)
+- Permission levels to control GUI access (prevent auto-created users from accessing admin panel)
+- Auto-user creation from SAML (zero-touch onboarding)
+- Revoke mechanism to permanently block specific users
+
+**Goal**: 
+1. Automatically create configurable grants when no matching policy exists
+2. Per-gate auto-grant settings (enable/disable, duration, timeout, port forwarding)
+3. Permission system for GUI access control
+4. Auto-create users from SAML authentication with restricted permissions
+
+**Requirements**:
+- ✅ **Per-gate configuration**: Admin can customize auto-grant behavior per gate in Web UI
+- ✅ Auto-grant defaults: 7 days duration, 60min timeout, port forwarding enabled
+- ✅ SSH login: Empty (allow any SSH login, no restrictions)
+- ✅ No IP whitelisting (if user reached jumphost, they're trusted)
+- ✅ **Permission levels**: 0=SuperAdmin, 100=Admin, 500=Operator, 1000=User (no GUI)
+- ✅ **Auto-user creation**: Extract username from SAML email, create with permission_level=1000
+- ✅ **Revoke mechanism**: Check for expired grants before creating auto-grant
+  - If expired grant exists for (user_id, server_id) → **PERMDEN** (no auto-grant)
+  - Admin can revoke by setting end_time in past (existing mechanism)
+
+**Solution**: Auto-grant creation in AccessControlEngineV2
+
+**Implementation** (February 18, 2026):
+
+**1. Database Migration 011** (migrations/011_auto_grant_config_and_permissions.sql):
+
+**Gates table** - Per-gate auto-grant configuration:
+```sql
+ALTER TABLE gates ADD COLUMN auto_grant_enabled BOOLEAN DEFAULT TRUE NOT NULL;
+ALTER TABLE gates ADD COLUMN auto_grant_duration_days INTEGER DEFAULT 7 NOT NULL;
+ALTER TABLE gates ADD COLUMN auto_grant_inactivity_timeout_minutes INTEGER DEFAULT 60 NOT NULL;
+ALTER TABLE gates ADD COLUMN auto_grant_port_forwarding BOOLEAN DEFAULT TRUE NOT NULL;
+CREATE INDEX idx_gates_auto_grant_enabled ON gates(auto_grant_enabled);
+```
+
+**Users table** - Permission level system:
+```sql
+ALTER TABLE users ADD COLUMN permission_level INTEGER DEFAULT 1000 NOT NULL;
+CREATE INDEX idx_users_permission_level ON users(permission_level);
+-- Update existing admin user to super admin
+UPDATE users SET permission_level = 0 WHERE username = 'admin' OR email LIKE '%admin%';
+```
+
+**Permission levels**:
+- 0 = Super Admin (full access to all features)
+- 100 = Admin (manage users, policies, gates)
+- 500 = Operator (view-only, manage active sessions)
+- 1000 = User (no GUI access, only proxy connections)
+
+**Reference view**:
+```sql
+CREATE VIEW permission_levels AS
+SELECT 0 AS level, 'Super Admin' AS name, 'Full system access' AS description
+UNION ALL SELECT 100, 'Admin', 'Manage users and policies'
+UNION ALL SELECT 500, 'Operator', 'View and manage sessions'
+UNION ALL SELECT 1000, 'User', 'Proxy access only (no GUI)';
+```
+
+**2. Permission System** (src/web/permissions.py - NEW FILE):
+
+```python
+def check_permission(user, min_level=100):
+    """Check if user has required permission level"""
+    if not user or not user.is_active:
+        return False
+    return user.permission_level <= min_level
+
+def permission_required(min_level=100):
+    """Decorator: Require minimum permission level"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not current_user.is_authenticated:
+                return redirect(url_for('auth.login'))
+            if not check_permission(current_user, min_level):
+                abort(403)  # Forbidden
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+# Convenience decorators:
+admin_required = permission_required(100)  # Admin or Super Admin
+super_admin_required = permission_required(0)  # Super Admin only
+operator_required = permission_required(500)  # Operator, Admin, or Super Admin
+```
+
+**Applied to routes**:
+- Gates: add, edit, delete, maintenance → `@admin_required`
+- Users: add, edit, delete → `@admin_required`
+- Policies: add, edit, delete → `@admin_required`
+- Dashboard: view → `@operator_required`
+
+**3. Auto-grant creation with gate configuration** (src/core/access_control_v2.py):
+
+```python
+def _create_auto_grant(self, db, user, server, protocol, now, source_ip, gate_id):
+    """Create automatic grant with gate-specific configuration"""
+    
+    # Load gate configuration
+    gate = db.query(Gate).filter(Gate.id == gate_id).first()
+    if not gate:
+        logger.error(f"Gate {gate_id} not found, cannot create auto-grant")
+        return None
+    
+    # Check if auto-grant disabled for this gate
+    if not gate.auto_grant_enabled:
+        logger.info(f"Auto-grant disabled for gate {gate.name}, denying access")
+        return None
+    
+    # Use gate-specific configuration
+    duration_days = gate.auto_grant_duration_days or 7
+    timeout_minutes = gate.auto_grant_inactivity_timeout_minutes or 60
+    port_forwarding = gate.auto_grant_port_forwarding if gate.auto_grant_port_forwarding is not None else True
+    
+    auto_grant = AccessPolicy(
+        user_id=user.id,
+        scope_type='server',
+        target_server_id=server.id,
+        protocol=protocol,
+        port_forwarding_allowed=port_forwarding,
+        inactivity_timeout_minutes=timeout_minutes,
+        start_time=now,
+        end_time=now + timedelta(days=duration_days),
+        mfa_required=False,
+        use_schedules=False,
+        is_active=True,
+        granted_by='AUTO-GRANT',
+        reason=f'Auto-grant from gate {gate.name} ({duration_days}d validity)'
+    )
+    # No PolicySSHLogin records = allow all SSH logins
+    db.add(auto_grant)
+    db.commit()
+    
+    logger.info(f"AUTO-GRANT created for {user.username} → {server.name} "
+                f"via gate {gate.name} (valid {duration_days} days)")
+    return auto_grant
+```
+
+**4. Revoke check before auto-grant** (src/core/access_control_v2.py):
+
+```python
+# In check_access_v2(), when no matching policies found:
+
+# Step 1: Check if access was REVOKED (expired grant exists)
+revoked_grant = db.query(AccessPolicy).filter(
+    AccessPolicy.user_id == user.id,
+    AccessPolicy.target_server_id == server.id,
+    AccessPolicy.end_time < now,  # Expired = revoked
+    AccessPolicy.is_active == True,
+    AccessPolicy.granted_by == 'AUTO-GRANT'  # Only check auto-grants
+).first()
+
+if revoked_grant:
+    logger.warning(f"Access revoked for {user.username} → {server.name}")
+    return {
+        'has_access': False,
+        'denial_reason': 'access_revoked',
+        'reason': 'Access to server was revoked by administrator'
+    }
+
+# Step 2: No revoke - create auto-grant (with gate config)
+auto_grant = self._create_auto_grant(db, user, server, protocol, now, source_ip, gate_id)
+
+# Step 3: Handle auto-grant disabled
+if auto_grant is None:
+    logger.info(f"Auto-grant disabled or failed for {user.username} → {server.name}")
+    return {
+        'has_access': False,
+        'denial_reason': 'auto_grant_disabled',
+        'reason': 'No matching policy and auto-grant is disabled for this gate'
+    }
+
+# Continue with normal flow (schedule check, SSH login check)
+matching_policies = [auto_grant]
+```
+
+**5. SAML Auto-User Creation** (src/web/auth_saml.py):
+
+```python
+# After SAML authentication, when user email not found:
+user = db.query(User).filter(User.email == saml_email).first()
+
+if not user:
+    # AUTO-CREATE new user from SAML
+    logger.info(f"Auto-creating user from SAML email: {saml_email}")
+    
+    # Extract username from email (before @)
+    username = saml_email.split('@')[0]
+    
+    # Check for username collision
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        # Use full email as username if collision
+        username = saml_email.replace('@', '_at_').replace('.', '_')
+        logger.warning(f"Username collision, using: {username}")
+    
+    # Create user with restricted permissions
+    user = User(
+        username=username,
+        email=saml_email,
+        full_name=saml_attributes.get('displayName', username),
+        permission_level=1000,  # No GUI access by default
+        is_active=True,
+        created_at=datetime.utcnow()
+    )
+    db.add(user)
+    db.commit()
+    
+    # Log auto-creation to audit trail
+    audit_log = AuditLog(
+        user_id=user.id,
+        action='auto_user_create',
+        target_type='user',
+        target_id=user.id,
+        description=f'User auto-created from SAML: {saml_email}',
+        source_ip=request.remote_addr,
+        timestamp=datetime.utcnow()
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    logger.info(f"User {username} (ID {user.id}) auto-created, permission_level=1000")
+
+# Continue with MFA flow...
+```
+
+**6. Web UI - Gate Configuration** (src/web/templates/gates/edit.html, add.html):
+
+Added "Auto-Grant Configuration" section to gate forms:
+- **Enable Auto-Grant** - Checkbox toggle (default: enabled)
+- **Grant Duration** - Number input (1-365 days, default: 7)
+- **Inactivity Timeout** - Number input (0-1440 minutes, default: 60)
+  - 0 = No timeout (session never expires from inactivity)
+  - 1-1440 = Timeout in minutes
+- **Port Forwarding** - Checkbox (default: enabled)
+
+Form includes help text:
+- "Auto-grant creates access policies automatically when user connects without existing grant"
+- "Useful for trusted environments where users need quick access"
+- "Security: Only enable for gates where all authenticated users are trusted"
+
+Badge "New in v1.12.0" highlights new feature
+
+**7. Backend - Gate Management** (src/web/blueprints/gates.py):
+
+Protected routes with permission decorators:
+```python
+from src.web.permissions import admin_required
+
+@gates_bp.route('/add', methods=['GET', 'POST'])
+@login_required
+@admin_required  # Requires permission_level ≤ 100
+def add_gate():
+    # ... gate creation logic ...
+    
+@gates_bp.route('/<int:gate_id>/edit', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_gate(gate_id):
+    if request.method == 'POST':
+        # ... existing validation ...
+        
+        # Parse auto-grant configuration from form
+        gate.auto_grant_enabled = 'auto_grant_enabled' in request.form
+        
+        duration_days = request.form.get('auto_grant_duration_days', '7')
+        gate.auto_grant_duration_days = max(1, min(365, int(duration_days)))
+        
+        timeout_mins = request.form.get('auto_grant_inactivity_timeout_minutes', '60')
+        gate.auto_grant_inactivity_timeout_minutes = max(0, min(1440, int(timeout_mins)))
+        
+        gate.auto_grant_port_forwarding = 'auto_grant_port_forwarding' in request.form
+        
+        db.commit()
+        flash(f'Gate {gate.name} updated successfully', 'success')
+        return redirect(url_for('gates.list_gates'))
+```
+
+**8. User Cleanup Script** (scripts/cleanup_user_p_mojski_v2.sh):
+
+Created script for complete user deletion with transaction safety:
+- Deletes MFA challenges, group memberships, source IPs
+- Deletes maintenance access, sessions, stays, access policies
+- Preserves audit logs (sets user_id=NULL for compliance)
+- Uses PostgreSQL transaction (ROLLBACK on error)
+- Peer authentication with `sudo -u postgres`
+
+**Tested on production**: Successfully deleted p.mojski account:
+- 110 MFA challenges deleted
+- 299 sessions deleted
+- 145 stays deleted
+- 19 access policies deleted
+- 31 audit logs preserved (user_id=NULL)
+- User record deleted
+
+---
+
+**Auto-grant Properties** (per-gate configurable):
+- **Validity**: 1-365 days (default: 7 days)
+- **Inactivity timeout**: 0-1440 minutes (default: 60, 0=no timeout)
+- **Port forwarding**: Enabled/disabled (default: enabled)
+- **SSH logins**: No restrictions (empty PolicySSHLogin list = allow all)
+- **Schedules**: No restrictions (use_schedules=False)
+- **MFA**: Not required (user already authenticated)
+- **Scope**: Server-level (specific user → specific server)
+- **Granted by**: 'AUTO-GRANT' (system marker for auditing)
+
+**Revoke Workflow**:
+1. Admin opens user's grant in web UI
+2. Clicks "Revoke" → Sets end_time to current time (makes grant expired)
+3. Active sessions killed by heartbeat mechanism (existing)
+4. User reconnects → Auto-grant logic checks for revoked grant
+5. If found → PERMDEN, no new auto-grant created
+6. User permanently blocked from that server until admin creates new grant
+
+**Flow Diagram**:
+```
+User connects → Gate → /api/v1/auth/check → check_access_v2() →
+  1. Find user by source_ip
+  2. Find server by destination_ip
+  3. Check user policies → empty
+  4. Check group policies → empty
+  5. Check revoked grants (expired ACCESS_POLICY for user+server+AUTO-GRANT)
+     → If found: DENY (access_revoked)
+     → If not found: Load gate configuration
+  6. Create auto-grant with gate config (if auto_grant_enabled=true)
+     → Duration: gate.auto_grant_duration_days
+     → Timeout: gate.auto_grant_inactivity_timeout_minutes
+     → Port forwarding: gate.auto_grant_port_forwarding
+  7. Continue with schedule check, SSH login validation
+  8. Return has_access=True with auto-grant as selected_policy
+Gate ← YES/NO + policy_id + timeout
+```
+
+**Benefits**:
+- ✅ Zero admin intervention for new connections
+- ✅ Per-gate customization (dev gates: 1 day, prod gates: 30 days)
+- ✅ Gradual rollout (disable for sensitive gates, enable for dev/test)
+- ✅ Auto-user creation from SAML (zero-touch onboarding)
+- ✅ Permission system prevents auto-users from accessing admin panel
+- ✅ Admin can revoke specific users permanently (sets end_time to past)
+- ✅ Revoke check prevents auto-grant after admin denial
+- ✅ Audit trail (AUTO-GRANT marker, auto_user_create events)
+- ✅ Works with existing MFA flow
+
+**Testing Scenarios**:
+```bash
+# Scenario 1: New user connecting to known server (no grant, auto-grant enabled)
+ssh user@10.30.14.5 -l test_user
+# Expected: Auto-grant created with gate config, connection succeeds
+
+# Scenario 2: Auto-grant disabled for gate
+# Web UI: Gates → Edit gate → Uncheck "Enable Auto-Grant"
+# User reconnects without grant:
+ssh user@10.30.14.5 -l test_user
+# Expected: PERMDEN (auto_grant_disabled), no grant created
+
+# Scenario 3: Admin revokes user access
+# Web UI: Policies → Find user's grant → Revoke (sets end_time = now)
+# Active sessions killed by heartbeat
+# User reconnects:
+ssh user@10.30.14.5 -l test_user
+# Expected: PERMDEN (access_revoked), no auto-grant created
+
+# Scenario 4: Existing group policy
+# User has group policy for server group
+ssh user@10.30.14.5 -l test_user
+# Expected: Uses existing group policy, no auto-grant created
+
+# Scenario 5: Auto-user creation via SAML
+# New email authenticates: john.doe@company.com
+# Expected: 
+#   - User created with username 'john_doe' (or 'john' if no collision)
+#   - permission_level=1000 (no GUI access)
+#   - Audit log entry: action='auto_user_create'
+#   - MFA challenge shown
+#   - After MFA: auto-grant created, connection succeeds
+
+# Scenario 6: Permission system - auto-user tries GUI
+# User created via SAML (permission_level=1000) tries to access Web UI
+# Expected: Login succeeds but dashboard redirects to "Access Denied" (403)
+
+# Scenario 7: Gate config customization
+# Web UI: Gates → Edit gate
+#   - Duration: 1 day (short-lived access for test gate)
+#   - Timeout: 30 minutes (aggressive timeout for security)
+#   - Port forwarding: Disabled (restrict tunneling)
+# User connects:
+# Expected: Auto-grant created with 1d validity, 30min timeout, no port forwarding
+```
+
+**Deployment** (February 18, 2026):
+
+**1. Database Backup**:
+```bash
+sudo -u postgres pg_dump jumphost_db > backup_before_v1.12.0_$(date +%Y%m%d_%H%M%S).sql
+# Created: backup_before_v1.12.0_20260218_143003.sql (262KB)
+```
+
+**2. Apply Migration**:
+```bash
+sudo -u postgres psql jumphost_db < migrations/011_auto_grant_config_and_permissions.sql
+# Result:
+#   ALTER TABLE (gates - 4 columns added)
+#   CREATE INDEX (idx_gates_auto_grant_enabled)
+#   ALTER TABLE (users - permission_level added)
+#   CREATE INDEX (idx_users_permission_level)
+#   UPDATE 1 (admin user → permission_level=0)
+#   CREATE VIEW (permission_levels)
+```
+
+**3. Verify Schema**:
+```bash
+sudo -u postgres psql jumphost_db -c "\d gates" | grep auto_grant
+# auto_grant_enabled | boolean | not null | true
+# auto_grant_duration_days | integer | not null | 7
+# auto_grant_inactivity_timeout_minutes | integer | not null | 60
+# auto_grant_port_forwarding | boolean | not null | true
+
+sudo -u postgres psql jumphost_db -c "\d users" | grep permission_level
+# permission_level | integer | not null | 1000
+```
+
+**4. Restart Tower Service**:
+```bash
+systemctl restart jumphost-flask
+systemctl status jumphost-flask
+# Active: active (running) ✓
+```
+
+**5. Test Cleanup Script** (production test):
+```bash
+bash scripts/cleanup_user_p_mojski_v2.sh
+# Result: SUCCESS
+#   - 110 MFA challenges deleted
+#   - 299 sessions deleted
+#   - 145 stays deleted
+#   - 19 access policies deleted
+#   - 31 audit logs preserved (user_id=NULL)
+#   - User p.mojski deleted
+```
+
+**Deployment Status**:
+- ✅ Tower v1.12.0: DEPLOYED (jumphost-flask restarted)
+- ✅ Gates: NO CHANGES (use existing API v1)
+- ✅ Database: Migration 011 APPLIED
+- ✅ Backup: Created (262KB)
+- ✅ Cleanup script: TESTED and WORKING
+
+**Code Locations**:
+- Migration: `/opt/jumphost/migrations/011_auto_grant_config_and_permissions.sql`
+- Permission system: `/opt/jumphost/src/web/permissions.py` (NEW)
+- Auto-grant logic: `/opt/jumphost/src/core/access_control_v2.py` `_create_auto_grant()`, `check_access_v2()`
+- SAML auto-user: `/opt/jumphost/src/web/auth_saml.py` (lines ~194-250)
+- Gate backend: `/opt/jumphost/src/web/blueprints/gates.py` (with @admin_required)
+- Gate forms: `/opt/jumphost/src/web/templates/gates/edit.html`, `add.html`
+- Cleanup script: `/opt/jumphost/scripts/cleanup_user_p_mojski_v2.sh`
+- Design docs: `/opt/jumphost/scripts/AUTO_REGISTRATION_DESIGN.md`, `DEPLOYMENT_v1.12.0.md`
+
+---
+
 ### v1.12 - Auto-Registration & Auto-Grant Groups 🎯 FUTURE
 
 **Concept**: Special user groups for automatic backend management

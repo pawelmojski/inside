@@ -78,6 +78,86 @@
                 
                 <div class="row">
                     <div class="col-12">
+                        <h5 class="mb-3">
+                            <i class="bi bi-lightning-charge"></i> Auto-Grant Configuration
+                            <span class="badge bg-success">New in v1.12.0</span>
+                        </h5>
+                        <p class="text-muted small">
+                            Automatically create temporary grants when users connect to servers without existing policies. 
+                            Useful for opening access to trusted users without manual grant management.
+                        </p>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="mb-3 form-check form-switch">
+                            <input type="checkbox" class="form-check-input" id="auto_grant_enabled" 
+                                   name="auto_grant_enabled" role="switch"
+                                   {% if gate.auto_grant_enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="auto_grant_enabled">
+                                <strong>Enable Auto-Grant</strong>
+                                <small class="d-block text-muted">Automatically create grants for new connections</small>
+                            </label>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="auto_grant_duration_days" class="form-label">
+                                Grant Duration (days) *
+                                <i class="bi bi-info-circle text-muted" title="How long auto-created grants remain valid"></i>
+                            </label>
+                            <input type="number" class="form-control" id="auto_grant_duration_days" 
+                                   name="auto_grant_duration_days" 
+                                   value="{{ gate.auto_grant_duration_days }}" 
+                                   min="1" max="365" required>
+                            <small class="text-muted">Min: 1 day, Max: 365 days. Default: 7 days</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="auto_grant_inactivity_timeout_minutes" class="form-label">
+                                Inactivity Timeout (minutes) *
+                                <i class="bi bi-info-circle text-muted" title="Disconnect sessions after inactivity"></i>
+                            </label>
+                            <input type="number" class="form-control" id="auto_grant_inactivity_timeout_minutes" 
+                                   name="auto_grant_inactivity_timeout_minutes" 
+                                   value="{{ gate.auto_grant_inactivity_timeout_minutes }}" 
+                                   min="0" max="1440" required>
+                            <small class="text-muted">0 = disabled, Max: 1440 (24 hours). Default: 60 minutes</small>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading"><i class="bi bi-shield-check"></i> How Auto-Grant Works</h6>
+                            <ul class="mb-0 small">
+                                <li><strong>Trigger:</strong> User connects to server without existing grant</li>
+                                <li><strong>Check:</strong> Verify no revoked grant exists (admin blocked access)</li>
+                                <li><strong>Create:</strong> Generate temporary grant with configured duration</li>
+                                <li><strong>Permissions:</strong> Full access (port forwarding, no SSH login restrictions)</li>
+                                <li><strong>Revoke:</strong> Admin can permanently block by setting grant end_time to past</li>
+                            </ul>
+                        </div>
+                        
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" class="form-check-input" id="auto_grant_port_forwarding" 
+                                   name="auto_grant_port_forwarding"
+                                   {% if gate.auto_grant_port_forwarding %}checked{% endif %}>
+                            <label class="form-check-label" for="auto_grant_port_forwarding">
+                                <strong>Allow Port Forwarding</strong>
+                                <small class="d-block text-muted">Enable SSH -L/-R port forwarding in auto-grants</small>
+                            </label>
+                        </div>
+                        
+                        <div class="alert alert-warning small">
+                            <i class="bi bi-exclamation-triangle"></i>
+                            <strong>Security Note:</strong> Auto-grant only works after MFA authentication. 
+                            Users must authenticate via SAML/Azure AD before auto-grants are created.
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+                
+                <div class="row">
+                    <div class="col-12">
                         <h5 class="mb-3">Custom Denial Messages</h5>
                         <p class="text-muted small">
                             Customize messages shown to users when SSH access is denied. 

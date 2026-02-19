@@ -88,6 +88,75 @@
                 
                 <hr>
                 
+                <div class="row">
+                    <div class="col-12">
+                        <h5 class="mb-3">
+                            <i class="bi bi-lightning-charge"></i> Auto-Grant Configuration
+                            <span class="badge bg-success">New in v1.12.0</span>
+                        </h5>
+                        <p class="text-muted small">
+                            Automatically create temporary grants when users connect to servers without existing policies.
+                        </p>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="mb-3 form-check form-switch">
+                            <input type="checkbox" class="form-check-input" id="auto_grant_enabled" 
+                                   name="auto_grant_enabled" role="switch" 
+                                   {% if defaults.auto_grant_enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="auto_grant_enabled">
+                                <strong>Enable Auto-Grant</strong>
+                                <small class="d-block text-muted">Recommended: ON for production</small>
+                            </label>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="auto_grant_duration_days" class="form-label">
+                                Grant Duration (days) *
+                            </label>
+                            <input type="number" class="form-control" id="auto_grant_duration_days" 
+                                   name="auto_grant_duration_days" 
+                                   value="{{ defaults.auto_grant_duration_days }}" 
+                                   min="1" max="365" required>
+                            <small class="text-muted">Default: 7 days</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="auto_grant_inactivity_timeout_minutes" class="form-label">
+                                Inactivity Timeout (minutes) *
+                            </label>
+                            <input type="number" class="form-control" id="auto_grant_inactivity_timeout_minutes" 
+                                   name="auto_grant_inactivity_timeout_minutes" 
+                                   value="{{ defaults.auto_grant_inactivity_timeout_minutes }}" 
+                                   min="0" max="1440" required>
+                            <small class="text-muted">0 = disabled, Default: 60 minutes</small>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" class="form-check-input" id="auto_grant_port_forwarding" 
+                                   name="auto_grant_port_forwarding"
+                                   {% if defaults.auto_grant_port_forwarding %}checked{% endif %}>
+                            <label class="form-check-label" for="auto_grant_port_forwarding">
+                                <strong>Allow Port Forwarding</strong>
+                                <small class="d-block text-muted">Enable SSH -L/-R in auto-grants</small>
+                            </label>
+                        </div>
+                        
+                        <div class="alert alert-info small">
+                            <strong>How it works:</strong>
+                            <ul class="mb-0">
+                                <li>User connects → no grant → auto-grant created</li>
+                                <li>Admin can revoke (sets end_time to past)</li>
+                                <li>Revoked grants block future auto-grants</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+                
                 <div class="d-flex justify-content-between">
                     <a href="{{ url_for('gates.list') }}" class="btn btn-secondary">
                         <i class="bi bi-x-circle"></i> Cancel

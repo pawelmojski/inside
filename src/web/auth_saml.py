@@ -188,23 +188,69 @@ def saml_acs():
         # Extract email from SAML response
         saml_email = nameid.lower()
         
+        # Extract additional SAML attributes (optional)
+        saml_attributes = auth.get_attributes()
+        saml_full_name = saml_attributes.get('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name', [saml_email])[0] if saml_attributes else None
+        
         # Find user by email (Phase 2 - user identified via SAML)
         if not challenge.user_id:
             # Phase 2: User not known yet, identify by SAML email
             user = db.query(User).filter(User.email == saml_email).first()
             
             if not user:
-                return render_template_string("""
-                <!DOCTYPE html>
-                <html>
-                <head><title>User Not Found</title></head>
-                <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
-                    <h1>❌ User Not Found</h1>
-                    <p>User with email {{ email }} not found in Inside database.</p>
-                    <p>Please contact your administrator.</p>
-                </body>
-                </html>
-                """, email=saml_email), 403
+                # AUTO-CREATE USER from SAML
+                # Extract username from email (before @ symbol)
+                try:
+                    username = saml_email.split('@')[0]
+                    
+                    # Check if username already exists (collision from different domain)
+                    existing_user = db.query(User).filter(User.username == username).first()
+                    if existing_user:
+                        # Use full email as username if collision
+                        username = saml_email.replace('@', '_').replace('.', '_')
+                    
+                    # Create new user
+                    user = User(
+                        username=username,
+                        email=saml_email,
+                        full_name=saml_full_name or saml_email,
+                        is_active=True,
+                        port_forwarding_allowed=False,
+                        permission_level=1000  # Regular user (no GUI access)
+                    )
+                    db.add(user)
+                    db.flush()  # Get user ID
+                    
+                    # Log auto-creation
+                    audit = AuditLog(
+                        user_id=user.id,
+                        action='auto_user_create',
+                        details=f'Auto-created user from SAML: {saml_email}',
+                        source_ip=request.remote_addr
+                    )
+                    db.add(audit)
+                    db.commit()
+                    
+                    logger.info(
+                        f"Auto-created user: username={user.username}, "
+                        f"email={saml_email}, id={user.id}"
+                    )
+                    
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Failed to auto-create user from SAML: {e}", exc_info=True)
+                    return render_template_string("""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>User Creation Failed</title></head>
+                    <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+                        <h1>❌ Failed to Create User</h1>
+                        <p>Email: {{ email }}</p>
+                        <p>Error: {{ error }}</p>
+                        <p>Please contact your administrator.</p>
+                    </body>
+                    </html>
+                    """, email=saml_email, error=str(e)), 500
             
             # Update challenge with identified user
             challenge.user_id = user.id
