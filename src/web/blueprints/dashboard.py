@@ -7,13 +7,13 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 from flask import Blueprint, render_template, g, jsonify
-from flask_login import login_required
+from flask_login import login_required, current_user
 from datetime import datetime, timedelta
 from sqlalchemy import func, and_
 import psutil
 import subprocess
 
-from src.core.database import SessionLocal, User, Server, AccessPolicy, AuditLog, UserSourceIP, ServerGroup, IPAllocation, Session, Stay
+from src.core.database import SessionLocal, User, Server, AccessPolicy, AuditLog, UserSourceIP, ServerGroup, IPAllocation, Session, Stay, AccessGrant
 
 # Import helper function from sessions blueprint
 import os
@@ -28,42 +28,55 @@ def index():
     """Main dashboard page"""
     db = g.db
     
-    # Service status
-    services_status = get_services_status()
+    # Check permission level for filtering
+    is_regular_user = current_user.permission_level >= 900
+    user_id_filter = current_user.id if is_regular_user else None
+    
+    # Service status (admin only)
+    services_status = get_services_status() if not is_regular_user else {}
     
     # Statistics
-    stats = get_statistics(db)
+    stats = get_statistics(db, user_id_filter=user_id_filter)
     
     # Active sessions
-    active_sessions = get_active_sessions()
+    active_sessions = get_active_sessions(user_id_filter=user_id_filter)
     
     # Recent closed sessions
-    recent_sessions = get_recent_sessions(limit=10)
+    recent_sessions = get_recent_sessions(limit=10, user_id_filter=user_id_filter)
     
-    # Servers with IP allocations
-    servers = db.query(Server).order_by(Server.name).all()
-    
-    # Get IP allocations for each server
+    # Servers with IP allocations (admin only - exclude deleted servers)
     server_allocations = []
-    for server in servers:
-        allocation = db.query(IPAllocation).filter(
-            IPAllocation.server_id == server.id,
-            IPAllocation.is_active == True,
-            IPAllocation.expires_at == None  # Permanent allocation
-        ).first()
+    if not is_regular_user:
+        servers = db.query(Server).filter(Server.deleted == False).order_by(Server.name).all()
         
-        server_allocations.append({
-            'server': server,
-            'allocation': allocation
-        })
+        # Get IP allocations for each server
+        for server in servers:
+            allocation = db.query(IPAllocation).filter(
+                IPAllocation.server_id == server.id,
+                IPAllocation.is_active == True,
+                IPAllocation.expires_at == None  # Permanent allocation
+            ).first()
+            
+            server_allocations.append({
+                'server': server,
+                'allocation': allocation
+            })
     
     # Active Stays with timeline data (active + recently ended for timeline)
     from datetime import timedelta
     two_hours_ago = datetime.utcnow() - timedelta(hours=2)
-    active_stays = db.query(Stay).filter(
+    
+    # Build query for stays
+    stays_query = db.query(Stay).filter(
         (Stay.is_active == True) | 
         ((Stay.is_active == False) & (Stay.ended_at >= two_hours_ago))
-    ).order_by(Stay.started_at.desc()).all()
+    )
+    
+    # Filter by user for regular users
+    if is_regular_user:
+        stays_query = stays_query.filter(Stay.user_id == current_user.id)
+    
+    active_stays = stays_query.order_by(Stay.started_at.desc()).all()
     
     return render_template('dashboard/index.html',
                          services=services_status,
@@ -72,14 +85,18 @@ def index():
                          recent_sessions=recent_sessions,
                          server_allocations=server_allocations,
                          active_stays=active_stays,
-                         now=datetime.utcnow())
+                         now=datetime.utcnow(),
+                         is_regular_user=is_regular_user)
 
 @dashboard_bp.route('/api/stats')
 @login_required
 def api_stats():
     """API endpoint for dashboard statistics (for AJAX updates)"""
     db = g.db
-    stats = get_statistics(db)
+    # Check permission level for filtering
+    is_regular_user = current_user.permission_level >= 900
+    user_id_filter = current_user.id if is_regular_user else None
+    stats = get_statistics(db, user_id_filter=user_id_filter)
     return jsonify(stats)
 
 @dashboard_bp.route('/api/active-sessions')
@@ -121,12 +138,21 @@ def api_stays():
     db = g.db
     from datetime import datetime, timedelta
     
+    # Check permission level for filtering
+    is_regular_user = current_user.permission_level >= 900
+    
     # Get active stays and recently ended stays (last 2 hours)
     two_hours_ago = datetime.utcnow() - timedelta(hours=2)
     stays_query = db.query(Stay).filter(
         (Stay.is_active == True) | 
         ((Stay.is_active == False) & (Stay.ended_at >= two_hours_ago))
-    ).order_by(Stay.started_at.desc()).limit(10).all()
+    )
+    
+    # Filter by user for regular users
+    if is_regular_user:
+        stays_query = stays_query.filter(Stay.user_id == current_user.id)
+    
+    stays_query = stays_query.order_by(Stay.started_at.desc()).limit(10).all()
     
     stays_list = []
     now = datetime.utcnow()
@@ -172,6 +198,38 @@ def api_stays():
         })
     
     return jsonify({'stays': stays_list, 'now': now.isoformat()})
+
+@dashboard_bp.route('/api/stays-chart')
+@login_required
+def api_stays_chart():
+    """API endpoint for stays/sessions chart data"""
+    db = g.db
+    
+    # Check permission level for filtering
+    is_regular_user = current_user.permission_level >= 900
+    
+    # Get only active stays
+    stays_query = db.query(Stay).filter(Stay.is_active == True)
+    
+    # Filter by user for regular users
+    if is_regular_user:
+        stays_query = stays_query.filter(Stay.user_id == current_user.id)
+    
+    active_stays = stays_query.all()
+    
+    chart_data = []
+    for stay in active_stays:
+        # Count active sessions for this stay
+        active_sessions_count = sum(1 for s in stay.sessions if s.is_active)
+        
+        chart_data.append({
+            'stay_id': stay.id,
+            'user_name': stay.user.full_name or stay.user.username if stay.user else 'Unknown',
+            'sessions_count': active_sessions_count,
+            'total_sessions': len(stay.sessions)
+        })
+    
+    return jsonify({'stays': chart_data})
 
 def get_services_status():
     """Get status of SSH and RDP proxy services"""
@@ -245,43 +303,91 @@ def get_process_uptime(process_name):
         pass
     return None
 
-def get_statistics(db):
-    """Get dashboard statistics"""
+def get_statistics(db, user_id_filter=None):
+    """Get dashboard statistics (filtered for regular users)"""
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day)
+    today_end = datetime(now.year, now.month, now.day, 23, 59, 59)
     
-    # Total counts
-    total_users = db.query(func.count(User.id)).scalar()
-    total_servers = db.query(func.count(Server.id)).scalar()
-    total_groups = db.query(func.count(ServerGroup.id)).scalar()
-    active_policies = db.query(func.count(AccessPolicy.id)).filter(
-        AccessPolicy.is_active == True,
-        (AccessPolicy.end_time == None) | (AccessPolicy.end_time > now)
-    ).scalar()
-    
-    # Today's activity
-    today_connections = db.query(func.count(AuditLog.id)).filter(
-        AuditLog.timestamp >= today_start,
-        AuditLog.action.in_(['ssh_access_granted', 'rdp_access_granted'])
-    ).scalar()
-    
-    today_denied = db.query(func.count(AuditLog.id)).filter(
-        AuditLog.timestamp >= today_start,
-        AuditLog.action.in_(['ssh_access_denied', 'rdp_access_denied'])
-    ).scalar()
-    
-    # Recent trends (last 7 days)
-    week_ago = now - timedelta(days=7)
-    week_connections = db.query(func.count(AuditLog.id)).filter(
-        AuditLog.timestamp >= week_ago,
-        AuditLog.action.in_(['ssh_access_granted', 'rdp_access_granted'])
-    ).scalar()
+    if user_id_filter:
+        # For regular users - show only their own stats
+        # Total counts (their own)
+        total_users = 1  # Just themselves
+        total_servers = db.query(func.count(func.distinct(Stay.server_id))).filter(
+            Stay.user_id == user_id_filter
+        ).scalar() or 0
+        total_groups = 0  # Don't show groups
+        active_grants = 0  # Shown separately in grants page
+        people_inside = 0  # Not relevant for regular users (only see themselves)
+        
+        # Today's connections: sessions started today OR ended today OR still active
+        today_connections = db.query(func.count(Session.id)).filter(
+            Session.user_id == user_id_filter,
+            (
+                (Session.started_at >= today_start) |  # Started today
+                (and_(Session.ended_at != None, Session.ended_at >= today_start, Session.ended_at <= today_end)) |  # Ended today
+                (Session.is_active == True)  # Still active
+            )
+        ).scalar() or 0
+        
+        today_denied = db.query(func.count(AuditLog.id)).filter(
+            AuditLog.timestamp >= today_start,
+            AuditLog.action.in_(['ssh_access_denied', 'rdp_access_denied']),
+            AuditLog.user_id == user_id_filter
+        ).scalar()
+        
+        # Recent trends (last 7 days - their own)
+        week_ago = now - timedelta(days=7)
+        week_connections = db.query(func.count(AuditLog.id)).filter(
+            AuditLog.timestamp >= week_ago,
+            AuditLog.action.in_(['ssh_access_granted', 'rdp_access_granted']),
+            AuditLog.user_id == user_id_filter
+        ).scalar()
+    else:
+        # For admins - show all stats
+        # Total counts (only active users and non-deleted servers)
+        total_users = db.query(func.count(User.id)).filter(User.is_active == True).scalar()
+        total_servers = db.query(func.count(Server.id)).filter(Server.deleted == False).scalar()
+        total_groups = db.query(func.count(ServerGroup.id)).scalar()
+        
+        # Active Grants - count active policies with valid end_time
+        active_grants = db.query(func.count(AccessPolicy.id)).filter(
+            AccessPolicy.is_active == True,
+            (AccessPolicy.end_time == None) | (AccessPolicy.end_time > now)
+        ).scalar()
+        
+        # People Inside - count unique users from active stays
+        people_inside = db.query(func.count(func.distinct(Stay.user_id))).filter(
+            Stay.is_active == True
+        ).scalar() or 0
+        
+        # Today's connections: sessions started today OR ended today OR still active
+        today_connections = db.query(func.count(Session.id)).filter(
+            (
+                (Session.started_at >= today_start) |  # Started today
+                (and_(Session.ended_at != None, Session.ended_at >= today_start, Session.ended_at <= today_end)) |  # Ended today
+                (Session.is_active == True)  # Still active
+            )
+        ).scalar() or 0
+        
+        today_denied = db.query(func.count(AuditLog.id)).filter(
+            AuditLog.timestamp >= today_start,
+            AuditLog.action.in_(['ssh_access_denied', 'rdp_access_denied'])
+        ).scalar()
+        
+        # Recent trends (last 7 days)
+        week_ago = now - timedelta(days=7)
+        week_connections = db.query(func.count(AuditLog.id)).filter(
+            AuditLog.timestamp >= week_ago,
+            AuditLog.action.in_(['ssh_access_granted', 'rdp_access_granted'])
+        ).scalar()
     
     return {
         'total_users': total_users,
         'total_servers': total_servers,
         'total_groups': total_groups,
-        'active_policies': active_policies,
+        'active_grants': active_grants,
+        'people_inside': people_inside,
         'today_connections': today_connections,
         'today_denied': today_denied,
         'week_connections': week_connections,
@@ -289,12 +395,18 @@ def get_statistics(db):
                              if (today_connections + today_denied) > 0 else 100, 1)
     }
 
-def get_active_sessions():
-    """Get currently active sessions from database"""
+def get_active_sessions(user_id_filter=None):
+    """Get currently active sessions from database (filtered for regular users)"""
     db = g.db
-    active = db.query(Session).filter(
-        Session.is_active == True
-    ).order_by(Session.started_at.desc()).limit(10).all()
+    
+    # Build query
+    query = db.query(Session).filter(Session.is_active == True)
+    
+    # Filter by user for regular users
+    if user_id_filter:
+        query = query.join(Stay).filter(Stay.user_id == user_id_filter)
+    
+    active = query.order_by(Session.started_at.desc()).limit(10).all()
     
     sessions = []
     for sess in active:
@@ -319,15 +431,21 @@ def get_active_sessions():
     return sessions
 
 
-def get_recent_sessions(limit=10):
-    """Get recently closed sessions from database"""
+def get_recent_sessions(limit=10, user_id_filter=None):
+    """Get recently closed sessions from database (filtered for regular users)"""
     # Import here to avoid circular dependency
     from blueprints.sessions import recording_exists
     
     db = g.db
-    recent = db.query(Session).filter(
-        Session.is_active == False
-    ).order_by(Session.ended_at.desc()).limit(limit).all()
+    
+    # Build query
+    query = db.query(Session).filter(Session.is_active == False)
+    
+    # Filter by user for regular users
+    if user_id_filter:
+        query = query.join(Stay).filter(Stay.user_id == user_id_filter)
+    
+    recent = query.order_by(Session.ended_at.desc()).limit(limit).all()
     
     sessions = []
     for sess in recent:

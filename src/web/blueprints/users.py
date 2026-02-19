@@ -4,26 +4,44 @@ Users Blueprint - User and Source IP management
 from flask import Blueprint, render_template, g, request, redirect, url_for, flash, jsonify, abort
 from flask_login import login_required
 from datetime import datetime
+from src.web.permissions import admin_required
 import sys
 import os
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from src.core.database import SessionLocal, User, UserSourceIP
+from src.core.database import SessionLocal, User, UserSourceIP, UserGroup
 
 users_bp = Blueprint('users', __name__)
 
 @users_bp.route('/')
 @login_required
+@admin_required
 def index():
     """List all users"""
     db = g.db
     users = db.query(User).order_by(User.username).all()
-    return render_template('users/index.html', users=users)
+    
+    # Get "Auto-Created Users" group ID for display
+    auto_group = db.query(UserGroup).filter(UserGroup.name == 'Auto-Created Users').first()
+    auto_group_id = auto_group.id if auto_group else None
+    
+    # Get members of auto-created group
+    auto_members = set()
+    if auto_group_id:
+        from sqlalchemy import text
+        result = db.execute(
+            text("SELECT user_id FROM user_group_members WHERE user_group_id = :gid"),
+            {"gid": auto_group_id}
+        )
+        auto_members = {row[0] for row in result}
+    
+    return render_template('users/index.html', users=users, auto_created_users=auto_members)
 
 @users_bp.route('/view/<int:user_id>')
 @login_required
+@admin_required
 def view(user_id):
     """View user details"""
     db = g.db
@@ -34,6 +52,7 @@ def view(user_id):
 
 @users_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
     """Add new user"""
     if request.method == 'POST':
@@ -56,6 +75,7 @@ def add():
 
 @users_bp.route('/edit/<int:user_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(user_id):
     """Edit user"""
     db = g.db
@@ -79,6 +99,7 @@ def edit(user_id):
 
 @users_bp.route('/delete/<int:user_id>', methods=['POST'])
 @login_required
+@admin_required
 def delete(user_id):
     """Delete user"""
     db = g.db
@@ -99,6 +120,7 @@ def delete(user_id):
 
 @users_bp.route('/<int:user_id>/ips/add', methods=['POST'])
 @login_required
+@admin_required
 def add_ip(user_id):
     """Add source IP to user"""
     db = g.db
@@ -124,6 +146,7 @@ def add_ip(user_id):
 
 @users_bp.route('/<int:user_id>/ips/<int:ip_id>/delete', methods=['POST'])
 @login_required
+@admin_required
 def delete_ip(user_id, ip_id):
     """Delete source IP from user"""
     db = g.db
@@ -147,6 +170,7 @@ def delete_ip(user_id, ip_id):
 
 @users_bp.route('/<int:user_id>/ips/<int:ip_id>/toggle', methods=['POST'])
 @login_required
+@admin_required
 def toggle_ip(user_id, ip_id):
     """Toggle source IP active status"""
     db = g.db

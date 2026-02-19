@@ -11,6 +11,7 @@ gates_bp = Blueprint('gates', __name__, url_prefix='/gates')
 
 @gates_bp.route('/')
 @login_required
+@admin_required
 def list():
     """List all gates with their IP pool configurations."""
     db = g.db
@@ -53,6 +54,7 @@ def list():
 
 @gates_bp.route('/data')
 @login_required
+@admin_required
 def data():
     """Return gates data as JSON for AJAX refresh."""
     from flask import jsonify
@@ -112,6 +114,7 @@ def data():
 
 @gates_bp.route('/view/<int:gate_id>')
 @login_required
+@admin_required
 def view(gate_id):
     """View gate details with IP allocations."""
     db = g.db

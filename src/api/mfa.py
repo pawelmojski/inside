@@ -5,6 +5,7 @@ Gate communication endpoints for MFA challenges
 
 from flask import Blueprint, request, jsonify, g
 import secrets
+import logging
 from datetime import datetime, timedelta
 import sys
 import os
@@ -17,6 +18,7 @@ from src.core.database import SessionLocal, MFAChallenge, User, Stay, AccessPoli
 from config.saml_config import MFA_CHALLENGE_TIMEOUT_MINUTES, MFA_TOKEN_LENGTH, TOWER_BASE_URL
 
 mfa_bp = Blueprint('mfa', __name__, url_prefix='/api/v1/mfa')
+logger = logging.getLogger(__name__)
 
 
 @mfa_bp.route('/challenge', methods=['POST'])

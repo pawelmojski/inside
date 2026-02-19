@@ -4,23 +4,43 @@ Servers Blueprint - Server management
 from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort, jsonify
 from flask_login import login_required
 import requests
+from datetime import datetime
 
-from src.core.database import Server, IPAllocation, ServerGroupMember, User
+from src.core.database import Server, IPAllocation, ServerGroupMember, User, AccessPolicy, AccessGrant, SessionRecording, Stay, Session
+from sqlalchemy import text
 from src.core.ip_pool import IPPoolManager
+from src.web.permissions import admin_required
 
 servers_bp = Blueprint('servers', __name__)
 
 @servers_bp.route('/')
 @login_required
+@admin_required
 def index():
-    """List all servers"""
+    """List all servers (active + deleted)"""
     db = g.db
-    servers = db.query(Server).order_by(Server.name).all()
+    
+    # Separate active and deleted servers
+    active_servers = db.query(Server).filter(
+        Server.deleted == False
+    ).order_by(Server.name).all()
+    
+    deleted_servers = db.query(Server).filter(
+        Server.deleted == True
+    ).order_by(Server.deleted_at.desc()).all()
+    
     users = db.query(User).filter(User.is_active == True).order_by(User.full_name).all()
-    return render_template('servers/index.html', servers=servers, users=users)
+    
+    return render_template(
+        'servers/index.html', 
+        active_servers=active_servers, 
+        deleted_servers=deleted_servers,
+        users=users
+    )
 
 @servers_bp.route('/view/<int:server_id>')
 @login_required
+@admin_required
 def view(server_id):
     """View server details"""
     db = g.db
@@ -39,8 +59,9 @@ def view(server_id):
 
 @servers_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
-    """Add new server"""
+    """Add new server (Admin only)"""
     if request.method == 'POST':
         db = g.db
         try:
@@ -87,8 +108,9 @@ def add():
 
 @servers_bp.route('/edit/<int:server_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(server_id):
-    """Edit server"""
+    """Edit server (Admin only)"""
     db = g.db
     server = db.query(Server).filter(Server.id == server_id).first()
     if not server:
@@ -124,8 +146,10 @@ def edit(server_id):
 
 @servers_bp.route('/delete/<int:server_id>', methods=['POST'])
 @login_required
+@admin_required
 def delete(server_id):
-    """Delete server"""
+    """Delete server - Hybrid: soft-delete if has history, hard-delete if clean (Admin only)"""
+    from flask_login import current_user
     db = g.db
     server = db.query(Server).filter(Server.id == server_id).first()
     if not server:
@@ -133,9 +157,76 @@ def delete(server_id):
     
     try:
         name = server.name
-        db.delete(server)
-        db.commit()
-        flash(f'Server {name} deleted successfully!', 'success')
+        
+        # Check if server has history (stays, sessions, recordings)
+        has_stays = db.query(Stay).filter(Stay.server_id == server_id).count() > 0
+        has_sessions = db.query(Session).filter(Session.server_id == server_id).count() > 0
+        has_recordings = db.query(SessionRecording).filter(
+            SessionRecording.server_id == server_id
+        ).count() > 0
+        
+        if has_stays or has_sessions or has_recordings:
+            # SOFT DELETE - server has history, preserve it
+            server.deleted = True
+            server.deleted_at = datetime.utcnow()
+            server.deleted_by_user_id = current_user.id
+            server.is_active = False
+            
+            # Release IP allocations (allow reuse)
+            ips_released = db.query(IPAllocation).filter(
+                IPAllocation.server_id == server_id
+            ).delete(synchronize_session=False)
+            
+            # Deactivate policies (don't delete - preserve history)
+            policies_deactivated = db.query(AccessPolicy).filter(
+                AccessPolicy.target_server_id == server_id,
+                AccessPolicy.is_active == True
+            ).update({'is_active': False}, synchronize_session=False)
+            
+            # Deactivate grants (don't delete - preserve history)
+            grants_deactivated = db.query(AccessGrant).filter(
+                AccessGrant.server_id == server_id,
+                AccessGrant.is_active == True
+            ).update({'is_active': False}, synchronize_session=False)
+            
+            db.commit()
+            
+            flash(
+                f'Server "{name}" archived (soft-deleted). '
+                f'History preserved: {has_stays} stays, {has_sessions} sessions, {has_recordings} recordings. '
+                f'Released {ips_released} IPs, deactivated {policies_deactivated} policies, {grants_deactivated} grants.',
+                'warning'
+            )
+        else:
+            # HARD DELETE - clean server without history
+            # Delete dependencies that block deletion
+            
+            # 1. Delete access policies
+            policies_deleted = db.query(AccessPolicy).filter(
+                AccessPolicy.target_server_id == server_id
+            ).delete(synchronize_session=False)
+            
+            # 2. Delete access grants
+            grants_deleted = db.query(AccessGrant).filter(
+                AccessGrant.server_id == server_id
+            ).delete(synchronize_session=False)
+            
+            # 3. Delete IP allocations
+            ips_deleted = db.query(IPAllocation).filter(
+                IPAllocation.server_id == server_id
+            ).delete(synchronize_session=False)
+            
+            # 4. server_group_members cascade automatically
+            
+            # 5. Delete the server
+            db.delete(server)
+            db.commit()
+            
+            flash(
+                f'Server "{name}" deleted completely (no history). '
+                f'Cleaned up: {policies_deleted} policies, {grants_deleted} grants, {ips_deleted} IPs.',
+                'success'
+            )
     except Exception as e:
         db.rollback()
         flash(f'Error deleting server: {str(e)}', 'danger')
@@ -144,8 +235,9 @@ def delete(server_id):
 
 @servers_bp.route('/<int:server_id>/maintenance', methods=['POST'])
 @login_required
+@admin_required
 def enter_maintenance(server_id):
-    """Schedule server maintenance via Tower API"""
+    """Schedule server maintenance via Tower API (Admin only)"""
     db = g.db
     server = db.query(Server).filter(Server.id == server_id).first()
     if not server:
@@ -198,8 +290,9 @@ def enter_maintenance(server_id):
 
 @servers_bp.route('/<int:server_id>/maintenance', methods=['DELETE'])
 @login_required
+@admin_required
 def exit_maintenance(server_id):
-    """Exit server maintenance via Tower API"""
+    """Exit server maintenance via Tower API (Admin only)"""
     db = g.db
     server = db.query(Server).filter(Server.id == server_id).first()
     if not server:

@@ -2,13 +2,14 @@
 Access Policies Blueprint - Policy management
 """
 from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort
-from flask_login import login_required
+from flask_login import login_required, current_user
 from datetime import datetime, timedelta, time
 import json
 
-from src.core.database import AccessPolicy, User, UserSourceIP, Server, ServerGroup, PolicySSHLogin, UserGroup, PolicySchedule
+from src.core.database import AccessPolicy, User, UserSourceIP, Server, ServerGroup, PolicySSHLogin, UserGroup, PolicySchedule, get_all_user_groups
 from src.core.duration_parser import parse_duration, format_duration
 from src.core.schedule_checker import format_schedule_description
+from src.web.permissions import admin_required
 
 policies_bp = Blueprint('policies', __name__)
 
@@ -75,42 +76,80 @@ def format_policy_schedules_summary(policy):
 @policies_bp.route('/')
 @login_required
 def index():
-    """List all policies"""
+    """List all policies (filtered for regular users)"""
     db = g.db
     
-    # Filter parameters
-    show_expired = request.args.get('show_expired', 'false') == 'true'
+    # Check permission level for filtering
+    is_regular_user = current_user.permission_level >= 900
+    
+    # Filter parameters (no more show_expired checkbox - always show expired grayed out)
     user_filter = request.args.get('user')
     group_filter = request.args.get('group')
     
-    query = db.query(AccessPolicy).filter(AccessPolicy.is_active == True)
+    now = datetime.utcnow()
     
-    if not show_expired:
-        now = datetime.utcnow()
-        # Show policies that haven't expired yet (end_time > now OR end_time IS NULL)
-        # This includes future grants (start_time > now) - they will be shown as "scheduled"
-        query = query.filter(
-            (AccessPolicy.end_time == None) | (AccessPolicy.end_time > now)
+    # Get active policies (not expired: end_time > now OR end_time IS NULL)
+    active_query = db.query(AccessPolicy).filter(AccessPolicy.is_active == True)
+    active_query = active_query.filter(
+        (AccessPolicy.end_time == None) | (AccessPolicy.end_time > now)
+    )
+    
+    # For regular users - filter to own grants + group grants
+    if is_regular_user:
+        user_group_ids = get_all_user_groups(current_user.id, db)
+        active_query = active_query.filter(
+            (AccessPolicy.user_id == current_user.id) |
+            (AccessPolicy.user_group_id.in_(user_group_ids))
         )
+    else:
+        # For admins - apply optional filters
+        if user_filter:
+            active_query = active_query.filter(AccessPolicy.user_id == int(user_filter))
+        if group_filter:
+            active_query = active_query.filter(AccessPolicy.user_group_id == int(group_filter))
     
-    if user_filter:
-        query = query.filter(AccessPolicy.user_id == int(user_filter))
+    active_policies = active_query.order_by(AccessPolicy.created_at.desc()).all()
     
-    if group_filter:
-        query = query.filter(AccessPolicy.user_group_id == int(group_filter))
+    # Get expired policies (is_active=True but end_time <= now)
+    expired_query = db.query(AccessPolicy).filter(
+        AccessPolicy.is_active == True,
+        AccessPolicy.end_time != None,
+        AccessPolicy.end_time <= now
+    )
     
-    policies = query.order_by(AccessPolicy.created_at.desc()).all()
+    # For regular users - filter to own grants + group grants
+    if is_regular_user:
+        user_group_ids = get_all_user_groups(current_user.id, db)
+        expired_query = expired_query.filter(
+            (AccessPolicy.user_id == current_user.id) |
+            (AccessPolicy.user_group_id.in_(user_group_ids))
+        )
+    else:
+        # For admins - apply optional filters
+        if user_filter:
+            expired_query = expired_query.filter(AccessPolicy.user_id == int(user_filter))
+        if group_filter:
+            expired_query = expired_query.filter(AccessPolicy.user_group_id == int(group_filter))
+    
+    expired_policies = expired_query.order_by(AccessPolicy.end_time.desc()).all()
+    
     users = db.query(User).order_by(User.username).all()
     user_groups = db.query(UserGroup).order_by(UserGroup.name).all()
     
-    return render_template('policies/index.html', policies=policies, users=users,
-                         user_groups=user_groups, show_expired=show_expired, 
-                         user_filter=user_filter, group_filter=group_filter,
+    return render_template('policies/index.html', 
+                         active_policies=active_policies,
+                         expired_policies=expired_policies,
+                         users=users,
+                         user_groups=user_groups,
+                         user_filter=user_filter, 
+                         group_filter=group_filter,
                          now=datetime.utcnow(), 
-                         format_schedules=format_policy_schedules_summary)
+                         format_schedules=format_policy_schedules_summary,
+                         is_regular_user=is_regular_user)
 
 @policies_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
     """Add new policy (grant wizard)"""
     db = g.db
@@ -266,7 +305,7 @@ def add():
     # GET request - show form
     users = db.query(User).order_by(User.username).all()
     user_groups = db.query(UserGroup).order_by(UserGroup.name).all()
-    servers = db.query(Server).order_by(Server.name).all()
+    servers = db.query(Server).filter(Server.deleted == False).order_by(Server.name).all()
     groups = db.query(ServerGroup).order_by(ServerGroup.name).all()
     
     return render_template('policies/add.html', users=users, user_groups=user_groups, 
@@ -274,6 +313,7 @@ def add():
 
 @policies_bp.route('/edit/<int:policy_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(policy_id):
     """Edit existing policy with full audit trail"""
     from flask_login import current_user
@@ -473,7 +513,7 @@ def edit(policy_id):
     # GET request - show edit form
     users = db.query(User).order_by(User.username).all()
     user_groups = db.query(UserGroup).order_by(UserGroup.name).all()
-    servers = db.query(Server).order_by(Server.name).all()
+    servers = db.query(Server).filter(Server.deleted == False).order_by(Server.name).all()
     groups = db.query(ServerGroup).order_by(ServerGroup.name).all()
     
     # Prepare schedules JSON for JavaScript
@@ -499,6 +539,7 @@ def edit(policy_id):
 
 @policies_bp.route('/revoke/<int:policy_id>', methods=['POST'])
 @login_required
+@admin_required
 def revoke(policy_id):
     """Revoke policy - set end_time to now (immediate expiry)"""
     db = g.db
@@ -521,6 +562,7 @@ def revoke(policy_id):
 
 @policies_bp.route('/renew/<int:policy_id>', methods=['POST'])
 @login_required
+@admin_required
 def renew(policy_id):
     """Renew policy - extend end_time by 1 hour"""
     db = g.db

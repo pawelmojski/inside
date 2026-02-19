@@ -52,3 +52,11 @@ def logout():
     logout_user()
     flash('Logged out successfully!', 'info')
     return redirect(url_for('auth.login'))
+
+
+@auth_bp.route('/saml-gui-login')
+def saml_gui_login():
+    """Redirect to SAML login flow for GUI access"""
+    # This redirects to SAML IdP (Azure AD) with RelayState='gui'
+    # After successful auth, user returns to /auth/saml/acs which handles GUI login
+    return redirect(url_for('saml.saml_login_gui'))

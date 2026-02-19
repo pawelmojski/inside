@@ -3,6 +3,7 @@ Server Groups Blueprint - Group management
 """
 from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort
 from flask_login import login_required
+from src.web.permissions import admin_required
 
 from src.core.database import ServerGroup, ServerGroupMember, Server
 
@@ -10,6 +11,7 @@ groups_bp = Blueprint('groups', __name__)
 
 @groups_bp.route('/')
 @login_required
+@admin_required
 def index():
     """List all server groups"""
     db = g.db
@@ -18,6 +20,7 @@ def index():
 
 @groups_bp.route('/view/<int:group_id>')
 @login_required
+@admin_required
 def view(group_id):
     """View group details"""
     db = g.db
@@ -25,9 +28,10 @@ def view(group_id):
     if not group:
         abort(404)
     
-    # Get all servers not in this group
+    # Get all servers not in this group (exclude deleted servers)
     member_server_ids = [m.server_id for m in group.members]
     available_servers = db.query(Server).filter(
+        Server.deleted == False,
         ~Server.id.in_(member_server_ids) if member_server_ids else True
     ).order_by(Server.name).all()
     
@@ -35,6 +39,7 @@ def view(group_id):
 
 @groups_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
     """Add new group"""
     if request.method == 'POST':
@@ -56,6 +61,7 @@ def add():
 
 @groups_bp.route('/edit/<int:group_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(group_id):
     """Edit group"""
     db = g.db
@@ -78,6 +84,7 @@ def edit(group_id):
 
 @groups_bp.route('/delete/<int:group_id>', methods=['POST'])
 @login_required
+@admin_required
 def delete(group_id):
     """Delete group"""
     db = g.db
@@ -98,6 +105,7 @@ def delete(group_id):
 
 @groups_bp.route('/<int:group_id>/members/add', methods=['POST'])
 @login_required
+@admin_required
 def add_member(group_id):
     """Add server to group"""
     db = g.db
@@ -124,6 +132,7 @@ def add_member(group_id):
 
 @groups_bp.route('/<int:group_id>/members/<int:member_id>/delete', methods=['POST'])
 @login_required
+@admin_required
 def delete_member(group_id, member_id):
     """Remove server from group"""
     db = g.db

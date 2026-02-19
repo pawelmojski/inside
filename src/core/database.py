@@ -83,11 +83,17 @@ class Server(Base):
     maintenance_reason = Column(Text)
     maintenance_grace_minutes = Column(Integer, default=15)
     
+    # Soft delete (preserve history)
+    deleted = Column(Boolean, default=False, nullable=False, index=True)
+    deleted_at = Column(DateTime)
+    deleted_by_user_id = Column(Integer, ForeignKey("users.id"))
+    
     # Relationships
     access_grants = relationship("AccessGrant", back_populates="server")
     ip_allocations = relationship("IPAllocation", back_populates="server")
     group_memberships = relationship("ServerGroupMember", back_populates="server", cascade="all, delete-orphan")
     access_policies = relationship("AccessPolicy", back_populates="target_server")
+    deleted_by = relationship("User", foreign_keys=[deleted_by_user_id])
 
 
 class AccessGrant(Base):

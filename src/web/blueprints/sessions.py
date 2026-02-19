@@ -2,8 +2,10 @@
 Sessions Blueprint - Session History and Log Viewer
 """
 
-from flask import Blueprint, render_template, request, jsonify, send_file, abort
-from src.core.database import SessionLocal, Session, User, Server
+from flask import Blueprint, render_template, request, jsonify, send_file, abort, g
+from flask_login import login_required, current_user
+from src.web.permissions import admin_required
+from src.core.database import SessionLocal, Session, User, Server, Stay
 from datetime import datetime, timedelta
 import json
 import os
@@ -53,6 +55,31 @@ def get_cached_recording(file_path):
             del _recording_cache[key]
     
     return parsed_data
+
+
+def check_session_access(session, db):
+    """
+    Check if current user has access to view this session.
+    - Admin/Operator (level < 900): Full access to all sessions
+    - Regular user (level >= 900): Only access to own sessions (via stay)
+    
+    Returns True if access granted, False otherwise.
+    """
+    # Admin/Operator - full access
+    if current_user.permission_level < 900:
+        return True
+    
+    # Regular user - check if session belongs to their stay
+    if session.stay_id:
+        stay = db.query(Stay).filter(Stay.id == session.stay_id).first()
+        if stay and stay.user_id == current_user.id:
+            return True
+    
+    # Fallback: check direct user_id (older sessions without stay_id)
+    if session.user_id == current_user.id:
+        return True
+    
+    return False
 
 
 def get_full_recording_path(session):
@@ -381,6 +408,13 @@ def parse_ssh_recording_internal(file_path):
                         elapsed_seconds = 0
                     
                     event_type = event.get('type', 'unknown')
+                    
+                    # Normalize event types (handle both old and new formats)
+                    if event_type == 'server_to_client':
+                        event_type = 'server'
+                    elif event_type == 'client_to_server':
+                        event_type = 'client'
+                    
                     content = event.get('data', '')
                     
                     # Skip single keystrokes
@@ -696,6 +730,8 @@ def format_duration(seconds):
 
 
 @sessions_bp.route('/')
+@login_required
+@admin_required
 def index():
     """List all sessions with filtering and pagination"""
     db = SessionLocal()
@@ -753,8 +789,9 @@ def index():
 
 
 @sessions_bp.route('/<session_id>')
+@login_required
 def view(session_id):
-    """View session details and log"""
+    """View session details and log (permission-checked)"""
     db = SessionLocal()
     try:
         from src.core.database import SessionTransfer
@@ -763,6 +800,10 @@ def view(session_id):
         
         if not session:
             abort(404)
+        
+        # Check access permission
+        if not check_session_access(session, db):
+            abort(403)  # Forbidden
         
         # Get transfer details (SCP/SFTP/port forwarding/SOCKS)
         transfers = db.query(SessionTransfer).filter(
@@ -797,9 +838,10 @@ def view(session_id):
 
 
 @sessions_bp.route('/<session_id>/live')
+@login_required
 def live_events(session_id):
     """
-    Get live session events for active SSH sessions.
+    Get live session events for active SSH sessions (permission-checked).
     Returns events after a given timestamp (for polling).
     """
     db = SessionLocal()
@@ -808,6 +850,10 @@ def live_events(session_id):
         
         if not session:
             return jsonify({'error': 'Session not found'}), 404
+        
+        # Check access permission
+        if not check_session_access(session, db):
+            return jsonify({'error': 'Access denied'}), 403
         
         if not session.is_active:
             return jsonify({'error': 'Session is not active', 'is_active': False}), 200
@@ -846,14 +892,19 @@ def live_events(session_id):
 
 
 @sessions_bp.route('/<session_id>/download')
+@login_required
 def download(session_id):
-    """Download session recording file"""
+    """Download session recording file (permission-checked)"""
     db = SessionLocal()
     try:
         session = db.query(Session).filter(Session.session_id == session_id).first()
         
         if not session:
             abort(404)
+        
+        # Check access permission
+        if not check_session_access(session, db):
+            abort(403)
         
         if not recording_exists(session):
             abort(404)
@@ -877,14 +928,19 @@ def download(session_id):
 
 
 @sessions_bp.route('/<session_id>/rdp-events')
+@login_required
 def rdp_events(session_id):
-    """Get RDP session events as JSON (converted from .pyrdp)"""
+    """Get RDP session events as JSON (converted from .pyrdp) (permission-checked)"""
     db = SessionLocal()
     try:
         session = db.query(Session).filter(Session.session_id == session_id).first()
         
         if not session or session.protocol != 'rdp':
             abort(404)
+        
+        # Check access permission
+        if not check_session_access(session, db):
+            abort(403)
         
         if not recording_exists(session):
             return jsonify({'error': 'Recording not found'}), 404
@@ -901,14 +957,19 @@ def rdp_events(session_id):
 
 
 @sessions_bp.route('/<session_id>/log')
+@login_required
 def log_json(session_id):
-    """Get session log as JSON (for AJAX requests)"""
+    """Get session log as JSON (for AJAX requests) (permission-checked)"""
     db = SessionLocal()
     try:
         session = db.query(Session).filter(Session.session_id == session_id).first()
         
         if not session:
             return jsonify({'error': 'Session not found'}), 404
+        
+        # Check access permission
+        if not check_session_access(session, db):
+            return jsonify({'error': 'Access denied'}), 403
         
         if not recording_exists(session):
             return jsonify({'error': 'Recording file not found'}), 404
@@ -928,6 +989,8 @@ def log_json(session_id):
 
 
 @sessions_bp.route('/<session_id>/convert', methods=['POST'])
+@login_required
+@admin_required
 def convert_to_mp4(session_id):
     """Queue RDP session for MP4 conversion"""
     from src.core.database import MP4ConversionQueue
@@ -990,6 +1053,8 @@ def convert_to_mp4(session_id):
 
 
 @sessions_bp.route('/<session_id>/convert/priority', methods=['POST'])
+@login_required
+@admin_required
 def prioritize_conversion(session_id):
     """Move conversion to front of queue (admin only - TODO: add permission check)"""
     from src.core.database import MP4ConversionQueue
@@ -1024,6 +1089,8 @@ def prioritize_conversion(session_id):
 
 
 @sessions_bp.route('/<session_id>/convert-status')
+@login_required
+@admin_required
 def conversion_status(session_id):
     """Get MP4 conversion status"""
     from src.core.database import MP4ConversionQueue
@@ -1068,6 +1135,8 @@ def conversion_status(session_id):
 
 
 @sessions_bp.route('/<session_id>/mp4/stream')
+@login_required
+@admin_required
 def stream_mp4(session_id):
     """Stream MP4 file with range support (for HTML5 video player)"""
     from src.core.database import MP4ConversionQueue
@@ -1095,6 +1164,8 @@ def stream_mp4(session_id):
 
 
 @sessions_bp.route('/<session_id>/mp4', methods=['DELETE'])
+@login_required
+@admin_required
 def delete_mp4(session_id):
     """Delete MP4 file and reset conversion status"""
     from src.core.database import MP4ConversionQueue

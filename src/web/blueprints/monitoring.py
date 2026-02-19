@@ -3,6 +3,7 @@ Monitoring Blueprint - Logs and session monitoring
 """
 from flask import Blueprint, render_template, g, request, jsonify
 from flask_login import login_required
+from src.web.permissions import admin_required
 from datetime import datetime, timedelta
 
 from src.core.database import AuditLog, User, Server
@@ -11,12 +12,14 @@ monitoring_bp = Blueprint('monitoring', __name__)
 
 @monitoring_bp.route('/')
 @login_required
+@admin_required
 def index():
     """Main monitoring page"""
     return render_template('monitoring/index.html')
 
 @monitoring_bp.route('/audit')
 @login_required
+@admin_required
 def audit():
     """Audit log viewer"""
     db = g.db
@@ -74,6 +77,7 @@ def audit():
 
 @monitoring_bp.route('/api/stats/hourly')
 @login_required
+@admin_required
 def api_stats_hourly():
     """API endpoint for hourly connection statistics"""
     db = g.db
@@ -113,6 +117,7 @@ def api_stats_hourly():
 
 @monitoring_bp.route('/api/stats/by_user')
 @login_required
+@admin_required
 def api_stats_by_user():
     """API endpoint for statistics by user"""
     db = g.db

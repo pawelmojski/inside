@@ -32,10 +32,13 @@
                             <i class="bi bi-speedometer2"></i> Dashboard
                         </a>
                     </li>
+                    
+                    <!-- Admin-only menu items -->
+                    {% if current_user.permission_level < 900 %}
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint and 'users' in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('users.index') }}">
-                            <i class="bi bi-people-fill"></i> Users
+                            <i class="bi bi-people-fill"></i> Persons
                         </a>
                     </li>
                     <li class="nav-item">
@@ -63,38 +66,32 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint and 'policies' in request.endpoint %}active{% endif %}" 
-                           href="{{ url_for('policies.index') }}">
-                            <i class="bi bi-key-fill"></i> Policies
+                        <a class="nav-link {% if request.endpoint and 'search' in request.endpoint %}active{% endif %}" 
+                           href="{{ url_for('search.search') }}">
+                            <i class="bi bi-search"></i> Search
                         </a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint and 'sessions' in request.endpoint %}active{% endif %}" 
-                           href="{{ url_for('sessions.index') }}">
-                            <i class="bi bi-clock-history"></i> Sessions
-                        </a>
-                    </li>
+                    {% endif %}
+                    
+                    <!-- Stays - visible to all users (filtered per permission level) -->
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint and 'stays' in request.endpoint and 'stays_api' not in request.endpoint %}active{% endif %}" 
                            href="{{ url_for('stays.list') }}">
                             <i class="bi bi-door-open"></i> Stays
                         </a>
                     </li>
+                    
+                    <!-- Grants - visible to all users -->
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint and 'search' in request.endpoint %}active{% endif %}" 
-                           href="{{ url_for('search.search') }}">
-                            <i class="bi bi-search"></i> Search
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint and 'monitoring' in request.endpoint %}active{% endif %}" 
-                           href="{{ url_for('monitoring.index') }}">
-                            <i class="bi bi-activity"></i> Monitoring
+                        <a class="nav-link {% if request.endpoint and 'policies' in request.endpoint %}active{% endif %}" 
+                           href="{{ url_for('policies.index') }}">
+                            <i class="bi bi-key-fill"></i> Grants
                         </a>
                     </li>
                 </ul>
                 
-                <!-- Global Search -->
+                <!-- Global Search (admin only) -->
+                {% if current_user.permission_level < 900 %}
                 <form class="d-flex me-3" method="GET" action="{{ url_for('search.search') }}">
                     <input class="form-control me-2" type="search" name="q" placeholder="Szukaj..." 
                            aria-label="Search" style="width: 250px;">
@@ -102,6 +99,7 @@
                         <i class="bi bi-search"></i>
                     </button>
                 </form>
+                {% endif %}
                 
                 <ul class="navbar-nav">
                     {% if current_user.is_authenticated %}

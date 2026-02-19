@@ -422,10 +422,10 @@ def search():
         # Calculate pagination
         total_pages = (total_count + per_page - 1) // per_page
         
-        # Get dropdown data
+        # Get dropdown data (exclude deleted servers)
         all_users = db.query(User).filter_by(is_active=True).order_by(User.username).all()
         all_user_groups = db.query(UserGroup).order_by(UserGroup.name).all()
-        all_servers = db.query(Server).order_by(Server.name).all()
+        all_servers = db.query(Server).filter(Server.deleted == False).order_by(Server.name).all()
         all_server_groups = db.query(ServerGroup).order_by(ServerGroup.name).all()
         all_policies = db.query(AccessPolicy).order_by(AccessPolicy.id.desc()).limit(100).all()
         

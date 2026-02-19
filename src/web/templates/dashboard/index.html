@@ -53,7 +53,8 @@
     </div>
 </div>
 
-<!-- Service Status -->
+<!-- Service Status (Admin/Operator only) -->
+{% if current_user.permission_level <= 500 %}
 <div class="row mb-4">
     <div class="col-12">
         <div class="card">
@@ -79,16 +80,18 @@
         </div>
     </div>
 </div>
+{% endif %}
 
-<!-- Statistics Cards -->
+<!-- Statistics Cards (Admin only) -->
+{% if current_user.permission_level <= 500 %}
 <div class="row mb-4" id="dashboardStats">
     <div class="col-md-2 mb-3">
         <div class="card stats-card bg-primary text-white">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <p class="stat-value">{{ stats.total_users }}</p>
-                        <p class="stat-label mb-0">Total Users</p>
+                        <p class="stat-value text-white">{{ stats.total_users }}</p>
+                        <p class="stat-label mb-0 text-white">Total Persons</p>
                     </div>
                     <i class="bi bi-people stat-icon"></i>
                 </div>
@@ -101,8 +104,8 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <p class="stat-value">{{ stats.total_servers }}</p>
-                        <p class="stat-label mb-0">Total Servers</p>
+                        <p class="stat-value text-white">{{ stats.total_servers }}</p>
+                        <p class="stat-label mb-0 text-white">Total Servers</p>
                     </div>
                     <i class="bi bi-hdd-network stat-icon"></i>
                 </div>
@@ -115,8 +118,8 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <p class="stat-value">{{ stats.active_policies }}</p>
-                        <p class="stat-label mb-0">Active Policies</p>
+                        <p class="stat-value text-white">{{ stats.active_grants }}</p>
+                        <p class="stat-label mb-0 text-white">Active Grants</p>
                     </div>
                     <i class="bi bi-key stat-icon"></i>
                 </div>
@@ -129,8 +132,8 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <p class="stat-value">{{ active_stays|length if active_stays else 0 }}</p>
-                        <p class="stat-label mb-0"><i class="bi bi-door-open"></i> People Inside</p>
+                        <p class="stat-value text-white">{{ stats.people_inside }}</p>
+                        <p class="stat-label mb-0 text-white"><i class="bi bi-door-open"></i> Persons Inside</p>
                     </div>
                     <i class="bi bi-person-badge stat-icon"></i>
                 </div>
@@ -143,8 +146,8 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <p class="stat-value" id="todayConnections">{{ stats.today_connections }}</p>
-                        <p class="stat-label mb-0">Today's Connections</p>
+                        <p class="stat-value text-dark">{{ stats.today_connections }}</p>
+                        <p class="stat-label mb-0 text-dark">Today's Connections</p>
                     </div>
                     <i class="bi bi-arrow-right-circle stat-icon"></i>
                 </div>
@@ -152,6 +155,48 @@
         </div>
     </div>
 </div>
+{% endif %}
+
+<!-- Active Sessions Chart (Admin only) -->
+{% if current_user.permission_level <= 500 %}
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5 class="mb-0"><i class="bi bi-pie-chart"></i> Active Sessions by Stay</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="sessionsChart" style="max-height: 300px;"></canvas>
+                <div id="chartLegend" class="mt-3"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0"><i class="bi bi-graph-up"></i> Real-time Statistics</h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6 mb-3">
+                        <h3 class="text-primary mb-0" id="liveActiveStays">0</h3>
+                        <small class="text-muted">Active Stays</small>
+                    </div>
+                    <div class="col-6 mb-3">
+                        <h3 class="text-success mb-0" id="liveActiveSessions">0</h3>
+                        <small class="text-muted">Active Sessions</small>
+                    </div>
+                    <div class="col-12">
+                        <small class="text-muted">
+                            <i class="bi bi-arrow-clockwise"></i> Updates every 5 seconds
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
 
 <!-- Active Stays Timeline - Unified Daily View -->
 <div class="row mb-4">
@@ -159,7 +204,7 @@
         <div class="card">
             <div class="card-header bg-success text-white">
                 <h5 class="mb-0">
-                    <i class="bi bi-calendar-day"></i> Today's Timeline: Who Was/Is Inside 
+                    <i class="bi bi-calendar-day"></i> {% if current_user.permission_level >= 900 %}Your today's timeline{% else %}Today's Timeline: Who Was/Is Inside{% endif %}
                     <span class="badge bg-light text-dark ms-2" id="staysCount">{{ active_stays|length }} active</span>
                 </h5>
             </div>
@@ -344,34 +389,10 @@
     </div>
 </div>
 
-<!-- Today's Activity -->
-<div class="row mb-4">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-activity"></i> Today's Activity</h5>
-            </div>
-            <div class="card-body">
-                <div class="row text-center">
-                    <div class="col-6">
-                        <h3 class="text-success" id="todayConnections">{{ stats.today_connections }}</h3>
-                        <p class="text-muted mb-0">Granted</p>
-                    </div>
-                    <div class="col-6">
-                        <h3 class="text-danger" id="todayDenied">{{ stats.today_denied }}</h3>
-                        <p class="text-muted mb-0">Denied</p>
-                    </div>
-                </div>
-                <hr>
-                <div class="text-center">
-                    <p class="mb-0">Success Rate: <strong id="successRate">{{ stats.success_rate }}%</strong></p>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+<!-- Recent Activity section REMOVED - replaced with stays timeline above -->
+<!-- Servers with IP Pool Allocations section REMOVED -->
 
-<!-- Servers with IP Pool Allocations -->
+<!--
 <div class="row mb-4">
     <div class="col-12">
         <div class="card">
@@ -440,7 +461,11 @@
 {% endblock %}
 
 {% block extra_js %}
+<!-- Chart.js CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
+let sessionsChart = null;
+
 function copyToClipboard(text, element) {
     // Try modern clipboard API first
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -494,8 +519,21 @@ function refreshDashboard() {
     fetch('/api/stats')
         .then(response => response.json())
         .then(data => {
-            // Update stats cards
-            document.querySelector('#todayConnections').textContent = data.today_connections || '0';
+            // Update all stats cards
+            const totalUsersEl = document.querySelector('.stat-value:has(+ .stat-label:contains("Total Persons"))');
+            if (totalUsersEl) totalUsersEl.textContent = data.total_users || '0';
+            
+            const totalServersEl = document.querySelector('.card.bg-success .stat-value');
+            if (totalServersEl) totalServersEl.textContent = data.total_servers || '0';
+            
+            const activeGrantsEl = document.querySelector('.card.bg-info .stat-value');
+            if (activeGrantsEl) activeGrantsEl.textContent = data.active_grants || '0';
+            
+            const peopleInsideEl = document.querySelectorAll('.card.bg-success .stat-value')[1];
+            if (peopleInsideEl) peopleInsideEl.textContent = data.people_inside || '0';
+            
+            const todayConnectionsEl = document.querySelector('#todayConnections');
+            if (todayConnectionsEl) todayConnectionsEl.textContent = data.today_connections || '0';
             
             const deniedEl = document.querySelector('#todayDenied');
             if (deniedEl) deniedEl.textContent = data.today_denied || '0';
@@ -510,9 +548,114 @@ function refreshDashboard() {
         .then(response => response.json())
         .then(data => {
             refreshStaysTimeline(data);
-            document.getElementById('staysCount').textContent = data.stays.filter(s => s.is_active).length + ' people';
+            const activeStays = data.stays.filter(s => s.is_active);
+            document.getElementById('staysCount').textContent = activeStays.length + ' active';
+            
+            // Update live stats
+            const liveActiveStaysEl = document.getElementById('liveActiveStays');
+            if (liveActiveStaysEl) liveActiveStaysEl.textContent = activeStays.length;
+            
+            // Count total active sessions
+            const activeSessions = activeStays.reduce((sum, stay) => {
+                return sum + stay.sessions.filter(s => s.is_active).length;
+            }, 0);
+            const liveActiveSessionsEl = document.getElementById('liveActiveSessions');
+            if (liveActiveSessionsEl) liveActiveSessionsEl.textContent = activeSessions;
         })
         .catch(err => console.error('Failed to refresh stays:', err));
+    
+    // Refresh chart
+    refreshChart();
+}
+
+// Refresh sessions chart
+function refreshChart() {
+    fetch('/api/stays-chart')
+        .then(response => response.json())
+        .then(data => {
+            updateChart(data.stays);
+        })
+        .catch(err => console.error('Failed to refresh chart:', err));
+}
+
+// Update or create chart
+function updateChart(stays) {
+    const canvas = document.getElementById('sessionsChart');
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    
+    // Prepare data
+    const labels = stays.map(s => s.user_name);
+    const sessionCounts = stays.map(s => s.sessions_count);
+    const colors = [
+        '#0d6efd', '#6610f2', '#6f42c1', '#d63384', '#dc3545',
+        '#fd7e14', '#ffc107', '#198754', '#20c997', '#0dcaf0'
+    ];
+    
+    // If chart exists, update data without animation
+    if (sessionsChart) {
+        sessionsChart.data.labels = labels;
+        sessionsChart.data.datasets[0].data = sessionCounts;
+        sessionsChart.data.datasets[0].backgroundColor = colors.slice(0, stays.length);
+        sessionsChart.update('none');  // Update without animation
+    } else {
+        // Create new chart with animation (first time only)
+        sessionsChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Active Sessions',
+                    data: sessionCounts,
+                    backgroundColor: colors.slice(0, stays.length),
+                    borderWidth: 2,
+                    borderColor: '#fff'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                animation: {
+                    duration: 750  // Animation only on first render
+                },
+                plugins: {
+                    legend: {
+                        display: false  // We'll use custom legend
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const stay = stays[context.dataIndex];
+                                return `${context.label}: ${context.parsed} active session(s) (${stay.total_sessions} total)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    // Update custom legend
+    const legendEl = document.getElementById('chartLegend');
+    if (legendEl) {
+        let legendHTML = '<div class="row">';
+        stays.forEach((stay, index) => {
+            const color = colors[index % colors.length];
+            legendHTML += `
+                <div class="col-6 mb-2">
+                    <span style="display: inline-block; width: 12px; height: 12px; background: ${color}; border-radius: 50%; margin-right: 5px;"></span>
+                    <small><strong>${stay.user_name}</strong>: ${stay.sessions_count} active (${stay.total_sessions} total)</small>
+                </div>
+            `;
+        });
+        legendHTML += '</div>';
+        legendEl.innerHTML = legendHTML;
+        
+        if (stays.length === 0) {
+            legendEl.innerHTML = '<p class="text-muted text-center mb-0">No active sessions</p>';
+        }
+    }
 }
 
 // Simple timeAgo function
@@ -814,10 +957,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Start auto-refresh every 5 seconds
     setInterval(refreshDashboard, 5000);
     
-    // Initial refresh immediately to populate timeline
+    // Initial refresh immediately to populate timeline and chart
     refreshDashboard();
     
-    console.log('Dashboard auto-refresh initialized (every 5 seconds)');
+    console.log('Dashboard auto-refresh initialized (every 5 seconds with live chart updates)');
 });
 
 

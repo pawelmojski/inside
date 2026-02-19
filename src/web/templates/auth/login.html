@@ -68,9 +68,24 @@
                         </div>
                     </form>
                     
+                    <div class="text-center my-3">
+                        <div class="d-flex align-items-center">
+                            <hr class="flex-grow-1">
+                            <span class="px-3 text-muted">or</span>
+                            <hr class="flex-grow-1">
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid">
+                        <a href="{{ url_for('auth.saml_gui_login') }}" class="btn btn-outline-primary btn-lg">
+                            <i class="bi bi-microsoft"></i> Login with Microsoft 365
+                        </a>
+                    </div>
+                    
                     <div class="text-center mt-4">
                         <small class="text-muted">
-                            <i class="bi bi-info-circle"></i> Use admin/admin for testing
+                            <i class="bi bi-info-circle"></i> Admins: use username/password<br>
+                            Users: use Microsoft 365 MFA
                         </small>
                     </div>
                 </div>

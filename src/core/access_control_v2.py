@@ -63,7 +63,8 @@ class AccessControlEngineV2:
                 # Found in IP pool - NAT mode
                 server = db.query(Server).filter(
                     Server.id == allocation.server_id,
-                    Server.is_active == True
+                    Server.is_active == True,
+                    Server.deleted == False
                 ).first()
                 
                 if not server:
@@ -79,7 +80,8 @@ class AccessControlEngineV2:
             # Not found in pool - try TPROXY mode: direct server IP lookup
             server = db.query(Server).filter(
                 Server.ip_address == proxy_ip,
-                Server.is_active == True
+                Server.is_active == True,
+                Server.deleted == False
             ).first()
             
             if server:
@@ -268,6 +270,113 @@ class AccessControlEngineV2:
         )
         
         return auto_grant
+    
+    def _auto_create_server(
+        self,
+        db: Session,
+        dest_ip: str,
+        source_ip: str,
+        gate_id: int,
+        user: 'User'
+    ) -> Optional['Server']:
+        """
+        Auto-create server when connecting to unknown or deleted backend.
+        
+        This is called when:
+        - User connects to an IP that doesn't exist in servers table
+        - OR server exists but is soft-deleted (deleted=True)
+        
+        The new server is created with:
+        - ip_address = dest_ip (TPROXY mode - direct IP)
+        - name = auto-generated from IP
+        - Default ports: SSH:22, RDP:3389
+        - is_active = True
+        - No IP pool allocation (TPROXY doesn't need it)
+        
+        Args:
+            db: Database session
+            dest_ip: Destination IP to create server for
+            source_ip: Client IP (for audit log)
+            gate_id: Gate ID (for audit log)
+            user: User requesting access (for audit log)
+        
+        Returns:
+            Created Server object or None if creation failed
+        """
+        from .database import Server, Gate
+        
+        # Get gate info for logging
+        gate = db.query(Gate).filter(Gate.id == gate_id).first()
+        gate_name = gate.name if gate else f"gate-{gate_id}"
+        
+        # Generate server name from IP
+        server_name = f"auto-{dest_ip.replace('.', '-')}"
+        
+        logger.info(
+            f"Auto-creating server: {server_name} ({dest_ip}) "
+            f"triggered by {user.username} via {gate_name}"
+        )
+        
+        try:
+            # Check if server with this IP exists but is deleted
+            existing = db.query(Server).filter(
+                Server.ip_address == dest_ip
+            ).first()
+            
+            if existing and existing.deleted:
+                logger.info(
+                    f"Server {existing.name} ({dest_ip}) exists but is deleted. "
+                    f"Creating NEW server (history preserved in old entity ID: {existing.id})"
+                )
+            
+            # Create new server
+            new_server = Server(
+                name=server_name,
+                ip_address=dest_ip,
+                ssh_port=22,  # Default SSH port
+                rdp_port=3389,  # Default RDP port
+                description=f"Auto-created on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} by {user.username}",
+                is_active=True,
+                deleted=False,
+                deleted_at=None,
+                deleted_by_user_id=None
+            )
+            
+            db.add(new_server)
+            db.flush()  # Get ID without committing
+            
+            # Commit
+            db.commit()
+            
+            # Audit log
+            try:
+                audit = AuditLog(
+                    user_id=user.id,
+                    action='auto_create_server',
+                    details=(
+                        f'Server auto-created: {server_name} ({dest_ip}) '
+                        f'[SSH:{new_server.ssh_port}, RDP:{new_server.rdp_port}] '
+                        f'via {gate_name}'
+                    ),
+                    source_ip=source_ip,
+                    success=True
+                )
+                db.add(audit)
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to create audit log for auto-created server: {e}")
+            
+            logger.info(
+                f"Server auto-created successfully: ID={new_server.id}, "
+                f"name={server_name}, ip={dest_ip}"
+            )
+            
+            return new_server
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to auto-create server {server_name} ({dest_ip}): {e}", exc_info=True)
+            return None
     
     def check_access_v2(
         self,
@@ -470,19 +579,50 @@ class AccessControlEngineV2:
             # Step 2: Find backend server by dest_ip on this gate
             backend_info = self.find_backend_by_proxy_ip(db, dest_ip, gate_id)
             if not backend_info:
-                logger.warning(f"Access denied: No backend found for destination IP {dest_ip} on gate {gate_id}")
-                return {
-                    'has_access': False,
-                    'user': user,
-                    'user_ip': user_ip,
-                    'server': None,
-                    'policies': [],
-                    'selected_policy': None,
-                    'denial_reason': 'server_not_found',
-                    'reason': f'No backend server for destination IP {dest_ip}'
+                # Server not found (doesn't exist or is deleted)
+                # Try auto-create server
+                logger.info(
+                    f"No backend found for {dest_ip}, attempting auto-create "
+                    f"(user: {user.username})"
+                )
+                
+                auto_server = self._auto_create_server(
+                    db=db,
+                    dest_ip=dest_ip,
+                    source_ip=source_ip,
+                    gate_id=gate_id,
+                    user=user
+                )
+                
+                if not auto_server:
+                    # Auto-create failed
+                    logger.warning(
+                        f"Access denied: No backend found for destination IP {dest_ip} "
+                        f"on gate {gate_id} and auto-create failed"
+                    )
+                    return {
+                        'has_access': False,
+                        'user': user,
+                        'user_ip': user_ip,
+                        'server': None,
+                        'policies': [],
+                        'selected_policy': None,
+                        'denial_reason': 'server_not_found',
+                        'reason': f'No backend server for destination IP {dest_ip}'
+                    }
+                
+                # Auto-create succeeded - use the new server
+                logger.info(
+                    f"Server auto-created successfully: {auto_server.name} (ID: {auto_server.id}), "
+                    f"continuing access check"
+                )
+                server = auto_server
+                backend_info = {
+                    'server': auto_server,
+                    'allocation': None  # TPROXY mode - no IP allocation
                 }
-            
-            server = backend_info['server']
+            else:
+                server = backend_info['server']
             
             # Step 2b: Check backend server maintenance mode
             if server.in_maintenance and server.maintenance_scheduled_at:
@@ -604,43 +744,37 @@ class AccessControlEngineV2:
                 user_group_ids = get_all_user_groups(user.id, db)
                 
                 if not user_group_ids:
-                    logger.warning(
-                        f"Access denied: No direct policies and no groups for {user.username}"
+                    # No groups - will check auto-grant later
+                    logger.debug(
+                        f"No direct policies and no groups for {user.username}, "
+                        f"will check auto-grant eligibility"
                     )
-                    return {
-                        'has_access': False,
-                        'user': user,
-                        'user_ip': user_ip,
-                        'server': server,
-                        'policies': [],
-                        'selected_policy': None,
-                        'denial_reason': 'no_matching_policy',
-                        'reason': 'No matching policy (user or group)'
-                    }
-                
-                group_policies_query = db.query(AccessPolicy).filter(
-                    AccessPolicy.user_group_id.in_(user_group_ids),
-                    AccessPolicy.is_active == True,
-                    AccessPolicy.start_time <= now,
-                    or_(AccessPolicy.end_time == None, AccessPolicy.end_time >= now)
-                ).filter(
-                    # Protocol match: NULL (all protocols) or specific
-                    or_(
-                        AccessPolicy.protocol == None,
-                        AccessPolicy.protocol == protocol
+                    matching_policies = []
+                else:
+                    # Has groups - check group policies
+                    group_policies_query = db.query(AccessPolicy).filter(
+                        AccessPolicy.user_group_id.in_(user_group_ids),
+                        AccessPolicy.is_active == True,
+                        AccessPolicy.start_time <= now,
+                        or_(AccessPolicy.end_time == None, AccessPolicy.end_time >= now)
+                    ).filter(
+                        # Protocol match: NULL (all protocols) or specific
+                        or_(
+                            AccessPolicy.protocol == None,
+                            AccessPolicy.protocol == protocol
+                        )
                     )
-                )
-                
-                matching_policies = []
-                for policy in group_policies_query:
-                    if policy.scope_type == 'group':
-                        if policy.target_group_id in server_group_ids:
-                            matching_policies.append(policy)
-                    elif policy.scope_type in ('server', 'service'):
-                        if policy.target_server_id == server.id:
-                            matching_policies.append(policy)
-                
-                logger.debug(f"Using {len(matching_policies)} group policies (no direct user policies)")
+                    
+                    matching_policies = []
+                    for policy in group_policies_query:
+                        if policy.scope_type == 'group':
+                            if policy.target_group_id in server_group_ids:
+                                matching_policies.append(policy)
+                        elif policy.scope_type in ('server', 'service'):
+                            if policy.target_server_id == server.id:
+                                matching_policies.append(policy)
+                    
+                    logger.debug(f"Using {len(matching_policies)} group policies (no direct user policies)")
             
             if not matching_policies:
                 # NO MATCHING POLICY FOUND (neither user nor group)

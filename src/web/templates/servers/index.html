@@ -29,7 +29,8 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for server in servers %}
+                    <!-- ACTIVE SERVERS -->
+                    {% for server in active_servers %}
                     <tr>
                         <td>{{ server.id }}</td>
                         <td>
@@ -102,16 +103,59 @@
                                 <i class="bi bi-tools"></i>
                             </button>
                             {% endif %}
+                            <form action="{{ url_for('servers.delete', server_id=server.id) }}" method="POST" 
+                                  style="display: inline;" onsubmit="return confirmDelete('server', '{{ server.name }}');">
+                                <button type="submit" class="btn btn-sm btn-outline-danger" title="Delete/Archive Server">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </form>
                         </td>
                     </tr>
                     {% else %}
                     <tr>
                         <td colspan="10" class="text-center text-muted py-4">
                             <i class="bi bi-inbox" style="font-size: 2rem;"></i>
-                            <p class="mt-2">No servers found. Add your first server!</p>
+                            <p class="mt-2">No active servers found. Add your first server!</p>
                         </td>
                     </tr>
                     {% endfor %}
+                    
+                    <!-- DELETED/ARCHIVED SERVERS (greyed out) -->
+                    {% if deleted_servers %}
+                    <tr class="table-secondary">
+                        <td colspan="10" class="text-center fw-bold">
+                            <i class="bi bi-archive"></i> Archived Servers (History Preserved)
+                        </td>
+                    </tr>
+                    {% for server in deleted_servers %}
+                    <tr class="table-light text-muted" style="opacity: 0.6;">
+                        <td>{{ server.id }}</td>
+                        <td>
+                            <strong>{{ server.name }}</strong>
+                            <br><small class="text-danger">Deleted: {{ server.deleted_at.strftime('%Y-%m-%d %H:%M') if server.deleted_at else 'Unknown' }}</small>
+                            {% if server.deleted_by %}
+                            <br><small>By: {{ server.deleted_by.username }}</small>
+                            {% endif %}
+                        </td>
+                        <td><code>{{ server.ip_address }}</code></td>
+                        <td><span class="badge bg-secondary">Archived</span></td>
+                        <td>
+                            <span class="badge bg-secondary">SSH:{{ server.ssh_port }}</span>
+                            <span class="badge bg-secondary">RDP:{{ server.rdp_port }}</span>
+                        </td>
+                        <td><span class="text-muted">-</span></td>
+                        <td><span class="badge bg-secondary">Archived</span></td>
+                        <td><span class="badge bg-secondary">-</span></td>
+                        <td>{{ server.created_at.strftime('%Y-%m-%d') }}</td>
+                        <td>
+                            <a href="{{ url_for('servers.view', server_id=server.id) }}" 
+                               class="btn btn-sm btn-outline-secondary" title="View History">
+                                <i class="bi bi-eye"></i>
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% endif %}
                 </tbody>
             </table>
         </div>

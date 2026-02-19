@@ -1,6 +1,6 @@
 """
 SAML Authentication Blueprint
-Handles Azure AD SAML SSO for MFA
+Handles Azure AD SAML SSO for MFA and GUI login
 """
 
 from flask import Blueprint, request, redirect, Response, render_template_string, url_for
@@ -8,15 +8,50 @@ from onelogin.saml2.auth import OneLogin_Saml2_Auth
 from onelogin.saml2.utils import OneLogin_Saml2_Utils
 import sys
 import os
+import logging
 from datetime import datetime
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from config.saml_config import SAML_SETTINGS, INSIDE_ACCESS_GROUP_ID
-from src.core.database import SessionLocal, MFAChallenge, User, Stay
+from src.core.database import SessionLocal, MFAChallenge, User, Stay, AuditLog, UserGroup
+from sqlalchemy import text
 
 saml_bp = Blueprint('saml', __name__, url_prefix='/auth/saml')
+logger = logging.getLogger(__name__)
+
+AUTO_CREATED_GROUP_NAME = 'Auto-Created Users'
+
+def ensure_auto_created_group(db):
+    """Ensure 'Auto-Created Users' group exists, create if missing."""
+    group = db.query(UserGroup).filter(UserGroup.name == AUTO_CREATED_GROUP_NAME).first()
+    if not group:
+        group = UserGroup(
+            name=AUTO_CREATED_GROUP_NAME,
+            description='Users automatically created via SAML authentication',
+            is_active=True
+        )
+        db.add(group)
+        db.flush()
+        logger.info(f"Created auto-created user group: {AUTO_CREATED_GROUP_NAME} (ID: {group.id})")
+    return group
+
+def add_user_to_group(db, user_id, group_id):
+    """Add user to group if not already a member."""
+    # Check if already member
+    existing = db.execute(
+        text("SELECT 1 FROM user_group_members WHERE user_id = :uid AND user_group_id = :gid"),
+        {"uid": user_id, "gid": group_id}
+    ).first()
+    
+    if not existing:
+        db.execute(
+            text("INSERT INTO user_group_members (user_id, user_group_id) VALUES (:uid, :gid)"),
+            {"uid": user_id, "gid": group_id}
+        )
+        logger.info(f"Added user {user_id} to group {group_id}")
+
 
 
 def prepare_flask_request():
@@ -137,20 +172,168 @@ def saml_acs():
     attributes = auth.get_attributes()
     nameid = auth.get_nameid()  # Email address
     
-    # Get MFA token from RelayState
-    mfa_token = request.form.get('RelayState', '')
-    
-    if not mfa_token:
+    if not nameid:
         return render_template_string("""
         <!DOCTYPE html>
         <html>
-        <head><title>MFA Error</title></head>
+        <head><title>SAML Error</title></head>
         <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
-            <h1>❌ MFA Error</h1>
-            <p>Missing MFA token in SAML response. Please try again.</p>
+            <h1>❌ SAML Error</h1>
+            <p>Missing email (NameID) in SAML response.</p>
         </body>
         </html>
         """), 400
+    
+    # Get RelayState (either 'gui' or MFA token)
+    relay_state = request.form.get('RelayState', '')
+    
+    if not relay_state:
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head><title>SAML Error</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+            <h1>❌ SAML Error</h1>
+            <p>Missing RelayState in SAML response.</p>
+        </body>
+        </html>
+        """), 400
+    
+    # ============ ROUTE TO APPROPRIATE FLOW ============
+    if relay_state == 'gui':
+        # GUI LOGIN FLOW
+        return _handle_gui_saml_login(nameid, attributes)
+    else:
+        # MFA SESSION FLOW (relay_state is MFA token)
+        return _handle_mfa_saml_auth(nameid, attributes, relay_state)
+
+
+def _handle_gui_saml_login(nameid, attributes):
+    """Handle GUI login after SAML authentication"""
+    from flask_login import login_user
+    
+    saml_email = nameid.lower()
+    saml_full_name = attributes.get('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name', [saml_email])[0] if attributes else None
+    
+    db = SessionLocal()
+    try:
+        # Find or create user
+        user = db.query(User).filter(User.email == saml_email).first()
+        
+        # Check if disabled
+        if user and not user.is_active:
+            logger.warning(f"Disabled user attempted GUI login: {saml_email}")
+            return render_template_string("""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Account Disabled</title></head>
+            <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+                <h1>❌ Account Disabled</h1>
+                <p>Your account has been disabled. Contact administrator.</p>
+            </body>
+            </html>
+            """), 403
+        
+        if not user:
+            # Auto-create user
+            try:
+                username = saml_email.split('@')[0]
+                existing = db.query(User).filter(User.username == username).first()
+                if existing:
+                    username = saml_email.replace('@', '_').replace('.', '_')
+                
+                user = User(
+                    username=username,
+                    email=saml_email,
+                    full_name=saml_full_name or saml_email,
+                    is_active=True,
+                    port_forwarding_allowed=False,
+                    permission_level=900  # Regular user (GUI access)
+                )
+                db.add(user)
+                db.flush()
+                
+                # Add to Auto-Created Users group
+                auto_group = ensure_auto_created_group(db)
+                add_user_to_group(db, user.id, auto_group.id)
+                
+                audit = AuditLog(
+                    user_id=user.id,
+                    action='auto_user_create_gui',
+                    details=f'Auto-created from GUI SAML: {saml_email}',
+                    source_ip=request.remote_addr,
+                    success=True
+                )
+                db.add(audit)
+                db.commit()
+                
+                logger.info(f"Auto-created user for GUI: {username} ({saml_email})")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to auto-create user: {e}", exc_info=True)
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head><title>Error</title></head>
+                <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+                    <h1>❌ Failed to Create Account</h1>
+                    <p>{{ error }}</p>
+                </body>
+                </html>
+                """, error=str(e)), 500
+        
+        # Check permission (must be < 1000 for GUI)
+        if user.permission_level >= 1000:
+            logger.warning(f"User {user.username} (level={user.permission_level}) denied GUI access")
+            return render_template_string("""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Access Denied</title></head>
+            <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+                <h1>❌ GUI Access Denied</h1>
+                <p>Your permission level does not allow GUI access.</p>
+            </body>
+            </html>
+            """), 403
+        
+        # Login to Flask session
+        login_user(user, remember=True)
+        
+        # Audit log
+        audit = AuditLog(
+            user_id=user.id,
+            action='gui_login_saml',
+            details=f'GUI login via SAML: {user.username}',
+            source_ip=request.remote_addr,
+            success=True
+        )
+        db.add(audit)
+        db.commit()
+        
+        logger.info(f"User logged into GUI via SAML: {user.username} (level={user.permission_level})")
+        
+        # Redirect to dashboard
+        return redirect(url_for('dashboard.index'))
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"GUI SAML login error: {e}", exc_info=True)
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Login Error</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 50px; text-align: center;">
+            <h1>❌ Login Error</h1>
+            <p>{{ error }}</p>
+        </body>
+        </html>
+        """, error=str(e)), 500
+    finally:
+        db.close()
+
+
+def _handle_mfa_saml_auth(nameid, attributes, mfa_token):
+    """Handle MFA session authentication (original flow for SSH/RDP)"""
     
     # Database operations
     db = SessionLocal()
@@ -189,7 +372,7 @@ def saml_acs():
         saml_email = nameid.lower()
         
         # Extract additional SAML attributes (optional)
-        saml_attributes = auth.get_attributes()
+        saml_attributes = attributes
         saml_full_name = saml_attributes.get('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name', [saml_email])[0] if saml_attributes else None
         
         # Find user by email (Phase 2 - user identified via SAML)
@@ -216,7 +399,7 @@ def saml_acs():
                         full_name=saml_full_name or saml_email,
                         is_active=True,
                         port_forwarding_allowed=False,
-                        permission_level=1000  # Regular user (no GUI access)
+                        permission_level=900  # Regular user (can access GUI to view own data)
                     )
                     db.add(user)
                     db.flush()  # Get user ID
@@ -335,6 +518,25 @@ def saml_acs():
         """, error=str(e)), 500
     finally:
         db.close()
+
+
+@saml_bp.route('/login-gui')
+def saml_login_gui():
+    """Initiate SAML login flow for GUI access (not MFA session)
+    
+    This is used when user clicks "Login with Microsoft 365" on login page.
+    RelayState is set to 'gui' to distinguish from MFA session flow.
+    """
+    # Check if already logged in
+    from flask_login import current_user
+    if current_user.is_authenticated:
+        return redirect(url_for('dashboard.index'))
+    
+    # Initiate SAML SSO with RelayState='gui'
+    req = prepare_flask_request()
+    auth = OneLogin_Saml2_Auth(req, SAML_SETTINGS)
+    
+    return redirect(auth.login(return_to='gui'))
 
 
 @saml_bp.route('/metadata')

@@ -3,6 +3,7 @@ User Groups Blueprint - Hierarchical user group management
 """
 from flask import Blueprint, render_template, g, request, redirect, url_for, flash, abort, jsonify
 from flask_login import login_required
+from src.web.permissions import admin_required
 
 from src.core.database import (
     UserGroup, UserGroupMember, User, 
@@ -13,6 +14,7 @@ user_groups_bp = Blueprint('user_groups', __name__)
 
 @user_groups_bp.route('/')
 @login_required
+@admin_required
 def index():
     """List all user groups with hierarchy"""
     db = g.db
@@ -27,6 +29,7 @@ def index():
 
 @user_groups_bp.route('/view/<int:group_id>')
 @login_required
+@admin_required
 def view(group_id):
     """View group details with members"""
     db = g.db
@@ -60,6 +63,7 @@ def view(group_id):
 
 @user_groups_bp.route('/add', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def add():
     """Add new user group"""
     db = g.db
@@ -98,6 +102,7 @@ def add():
 
 @user_groups_bp.route('/edit/<int:group_id>', methods=['GET', 'POST'])
 @login_required
+@admin_required
 def edit(group_id):
     """Edit user group"""
     db = g.db
@@ -136,6 +141,7 @@ def edit(group_id):
 
 @user_groups_bp.route('/delete/<int:group_id>', methods=['POST'])
 @login_required
+@admin_required
 def delete(group_id):
     """Delete user group"""
     db = g.db
@@ -161,6 +167,7 @@ def delete(group_id):
 
 @user_groups_bp.route('/<int:group_id>/add_member', methods=['POST'])
 @login_required
+@admin_required
 def add_member(group_id):
     """Add user to group"""
     db = g.db
@@ -203,6 +210,7 @@ def add_member(group_id):
 
 @user_groups_bp.route('/<int:group_id>/remove_member/<int:user_id>', methods=['POST'])
 @login_required
+@admin_required
 def remove_member(group_id, user_id):
     """Remove user from group"""
     db = g.db
@@ -230,6 +238,7 @@ def remove_member(group_id, user_id):
 
 @user_groups_bp.route('/api/hierarchy')
 @login_required
+@admin_required
 def api_hierarchy():
     """Return group hierarchy as JSON for tree visualization"""
     db = g.db
