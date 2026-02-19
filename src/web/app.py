@@ -10,7 +10,6 @@ import logging
 from datetime import datetime
 from flask import Flask, render_template, redirect, url_for, flash, request
 from flask_login import LoginManager, login_required, current_user
-from flask_socketio import SocketIO
 from werkzeug.middleware.proxy_fix import ProxyFix
 import pytz
 
@@ -36,11 +35,13 @@ app.config['PREFERRED_URL_SCHEME'] = 'https'
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 # Initialize Flask-SocketIO for real-time session streaming
-socketio = SocketIO(app, 
-                    cors_allowed_origins="*",  # TODO: Restrict in production
-                    async_mode='threading',
-                    logger=True,
-                    engineio_logger=False)
+# Import shared instance to avoid circular imports
+from socketio_instance import socketio
+socketio.init_app(app,
+                  cors_allowed_origins="*",  # TODO: Restrict in production
+                  async_mode='threading',
+                  logger=True,
+                  engineio_logger=False)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -260,4 +261,5 @@ def internal_error(error):
 
 if __name__ == '__main__':
     # Development server with SocketIO support
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    # allow_unsafe_werkzeug=True is required for Flask-SocketIO 5.3.6+ in development
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

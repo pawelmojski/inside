@@ -92,9 +92,14 @@ function initLiveSessionViewer() {
         terminal.writeln('');
         
         // Initialize Socket.IO
+        // Use polling first (WebSocket upgrade may fail behind reverse proxy)
         socket = io({
-            transports: ['websocket', 'polling'],
-            upgrade: true
+            transports: ['polling', 'websocket'],
+            upgrade: true,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5
         });
         
         // Connection events

@@ -3,7 +3,7 @@
 Gates use these endpoints to check authorization and fetch active grants.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from sqlalchemy import and_, or_
 import pytz
@@ -351,7 +351,6 @@ def check_grant():
         if active_session and active_session.termination_reason:
             # Session marked for termination - calculate disconnect_at
             # Default: disconnect in 5 seconds (grace period)
-            from datetime import timedelta
             disconnect_at = datetime.utcnow() + timedelta(seconds=5)
             denial_response['disconnect_at'] = disconnect_at.isoformat()
         
@@ -366,7 +365,6 @@ def check_grant():
     logger.info(f"DEBUG Stay creation: gate.mfa_enabled={gate.mfa_enabled}, ssh_key_fingerprint={ssh_key_fingerprint[:20] if ssh_key_fingerprint else None}")
     if gate.mfa_enabled and ssh_key_fingerprint:
         from src.core.database import Stay, MFAChallenge
-        from datetime import datetime, timedelta
         
         logger.info(f"DEBUG: Querying for recent verified MFA challenge for user {user.id}, gate {gate.id}")
         # Check if user just completed MFA verification (within last 60 seconds)

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from src.core.database import SessionLocal, Session as DBSession
 from src.proxy.session_multiplexer import SessionMultiplexerRegistry
 from src.web.websocket_adapter import WebSocketChannelAdapter
-from src.web.app import socketio
+from src.web.socketio_instance import socketio
 
 logger = logging.getLogger(__name__)
 
