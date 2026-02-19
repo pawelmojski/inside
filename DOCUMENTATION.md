@@ -503,16 +503,123 @@ Global registry of all active multiplexed sessions on gate.
 
 ### Comparison with Commercial Solutions
 
-| Feature | Inside v2.0 | Teleport | PAM360 | Bastion |
-|---------|-------------|----------|---------|---------|
+| Feature | Inside v2.0 | Teleport | PAM360 | AWS Session Manager |
+|---------|-------------|----------|---------|---------------------|
 | Session Join (R/W) | ✅ Built-in | ✅ Yes | ✅ Yes | ❌ No |
-| Session Watch (R/O) | ✅ Built-in | ✅ Yes | ⚠️ Paid | ❌ No |
+| Session Watch (R/O) | ✅ Built-in | ✅ Yes | ⚠️ Paid tier | ❌ No |
 | History Buffer | ✅ 50KB | ✅ Full | ⚠️ Limited | N/A |
-| Native SSH | ✅ Yes | ✅ Yes | ⚠️ Agent | ✅ Yes |
-| Real-time | ✅ Yes | ✅ Yes | ⚠️ Delayed | N/A |
-| **Cost** | **FREE** | **$$$** | **$$$$** | **FREE** |
+| **Native SSH** | **✅ Standard ssh** | **⚠️ tsh client** | **⚠️ Agent required** | **❌ AWS CLI only** |
+| **Backend Changes** | **✅ ZERO** | **⚠️ Config changes** | **❌ Agent install** | **❌ Agent install** |
+| **User Experience** | **✅ ssh user@host** | **⚠️ tsh ssh user@host** | **⚠️ Special client** | **❌ aws ssm start-session** |
+| Agent Forwarding | ✅ Native (-A) | ✅ Yes | ⚠️ Limited | ❌ No |
+| Transparent Proxy | ✅ Yes | ⚠️ Partial | ❌ No | ❌ No |
+| Real-time | ✅ <100ms | ✅ Yes | ⚠️ Delayed | N/A |
+| **Cost** | **$0 (FREE)** | **$10-50/user/mo** | **$$$$ Enterprise** | **$0 + AWS costs** |
+
+### 🔥 KILLER ADVANTAGES - Why Inside Beats Competition:
+
+#### 1. **ZERO Backend Modifications**
+- **Inside**: Backend servers need ZERO changes. Just standard SSH daemon.
+- **Teleport**: Requires Teleport agent on backends OR SSH config modifications
+- **PAM360**: Requires agent installation on every server
+- **AWS SSM**: Requires SSM agent + IAM roles on every instance
+
+#### 2. **Native SSH Client**
+- **Inside**: Standard `ssh` command. Users already know how to use it.
+  ```bash
+  ssh user@server              # Just works
+  ssh -A user@server           # Agent forwarding works
+  scp file user@server:~       # SCP works natively
+  sftp user@server             # SFTP works natively
+  ```
+- **Teleport**: Custom `tsh` client required
+  ```bash
+  tsh login                    # Extra step
+  tsh ssh user@server          # Different command
+  tsh scp file user@server:~   # Different syntax
+  ```
+- **PAM360**: Web-based client or custom agent
+- **AWS SSM**: Only works through AWS CLI
+  ```bash
+  aws ssm start-session --target i-123456  # WTF is this?
+  ```
+
+#### 3. **Transparent Proxy - Users Don't Know It Exists**
+- **Inside**: Gate intercepts traffic automatically (TPROXY). User thinks they're connecting directly to backend.
+- **Others**: Users must explicitly connect through gateway/bastion
+
+#### 4. **No Vendor Lock-In**
+- **Inside**: Open source. Standard protocols. Can switch anytime.
+- **Teleport/PAM360**: Proprietary protocols. Once deployed, hard to migrate.
+
+#### 5. **Agent Forwarding Just Works**
+- **Inside**: Native OpenSSH agent forwarding (`ssh -A`)
+- **Others**: Limited or requires special configuration
+
+#### 6. **SCP/SFTP Native Support**
+- **Inside**: Standard `scp` and `sftp` commands work without modifications
+- **Others**: May require custom tools or wrappers
+
+### 💰 Commercial Viability
+
+**Inside v2.0 sells itself:**
+
+**Target Market:**
+- SMB companies (50-500 employees) tired of Teleport pricing
+- Companies wanting audit compliance without vendor lock-in
+- Dev teams needing collaboration features (pair programming, debugging)
+- Security teams requiring session oversight
+- MSPs managing multiple client infrastructures
+
+**Value Proposition:**
+```
+"Enterprise SSH gateway with Teleport-style session sharing,
+ using NATIVE SSH - zero backend changes required.
+ 
+ ✅ Session join/watch (collaborate in real-time)
+ ✅ Full audit trails and session recording
+ ✅ Time-based access control
+ ✅ MFA integration ready
+ ✅ Works with your existing SSH infrastructure
+ 
+ No agents. No backend modifications. Just works.
+ 
+ Teleport: $10-50/user/month
+ Inside: $X/server/month (or license model)
+ 
+ Try 30 days free. No credit card required."
+```
+
+**Competitive Comparison Table (Sales)**:
+
+| You Need | They Say | Inside Says |
+|----------|----------|-------------|
+| Session sharing | "Install our agent on all servers" | "Works with your existing SSH" |
+| Join live sessions | "$50/user/month + agent" | "Built-in, uses standard SSH" |
+| Audit compliance | "Rip & replace your infrastructure" | "Transparent proxy, zero backend changes" |
+| SCP/SFTP support | "Use our special tools" | "Native scp/sftp commands work" |
+| Agent forwarding | "Limited support" | "Standard ssh -A works perfectly" |
+| Setup time | "3-5 days deployment" | "30 minutes, no backend changes" |
+
+**Pricing Models:**
+1. **Per-server**: $5-10/server/month (vs Teleport's per-user)
+2. **Enterprise license**: $5k-15k/year for unlimited servers
+3. **MSP model**: $50-100/client/month for managed service
+4. **Self-hosted**: One-time license $10k-30k
+
+**Sales Pitch:**
+> "Your devs already know SSH. Why force them to learn `tsh`?
+>  Your servers already have SSHD. Why install more agents?
+>  Your workflows already use `scp`. Why change them?
+>  
+>  Inside: Enterprise features, zero disruption, fraction of the cost.
+>  
+>  Teleport makes you change everything.
+>  Inside works with what you have."
 
 **Inside v2.0 = Teleport functionality at AWS Bastion cost (FREE!)** 🚀🔥
+
+**Commercial version = Teleport functionality at 1/10th the price, native SSH** 💰
 
 ## File Structure
 

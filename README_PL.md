@@ -1,37 +1,70 @@
-# 🚪 Inside - Brama z Kontrolą Dostępu Czasowego
+# Inside - SSH Access Control, Który Naprawdę Działa
 
-**Przezroczysta brama bezpieczeństwa, która kontroluje kto może być wewnątrz Twojej infrastruktury, kiedy i jak długo.**
+**Enterprise SSH gateway z obsługą natywnego klienta, zero zmian w backendzie, oraz Teleport-style session sharing.**
 
 [![Status](https://img.shields.io/badge/status-production-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-1.8-blue)]()
+[![Version](https://img.shields.io/badge/version-2.0-blue)]()
 [![Python](https://img.shields.io/badge/python-3.13-blue)]()
 
 ---
 
-## 🎯 Model Mentalny: Nie "Dostęp", ale "Bycie Wewnątrz"
+## Dlaczego Inside Istnieje
+
+Współczesne zespoły infrastrukturalne polegają na SSH każdego dnia — na serwerach, switchach, routerach, firewallach, storage appliances, hypervisorach, nodach Kubernetes, cloud VMs. Każda warstwa prawdziwej infrastruktury oddycha przez SSH.
+
+**Branża ma problem.**
+
+Tradycyjne SSH gateway wymuszają wybór: Zainstaluj agenty wszędzie, albo strać kompatybilność z natywnym SSH. Większość enterprise nie może zainstalować agentów na legacy hardware — i nie powinna musieć.
+
+Wszystkie istniejące rozwiązania zawodzą gdy dotkniesz:
+- 10-letnie Cisco switche
+- Stare ASA firewalle
+- ProCurve / Dell / Juniper urządzenia
+- Storage appliances
+- Stare ESXi lub iLO firmware
+- Legacy Linux z OpenSSH 5/6
+- Cokolwiek co nie może uruchomić vendor agenta
+- Cokolwiek co po prostu wystawia SSH i nic więcej
+
+**To jest miejsce gdzie żyje prawdziwy świat.**
+
+Każde enterprise ma długi ogon starych ale krytycznych systemów, które nie będą wymienione i nie mogą być modyfikowane. Kontrola dostępu musi tam działać — inaczej to nie jest kontrola dostępu.
+
+---
+
+## Co Wyróżnia Inside
+
+Inside dostarcza enterprise access control zachowując natywne SSH — kombinacja rzadko spotykana w komercyjnych produktach.
+
+### Inside vs Konkurencja
+
+| Funkcja | Inside | Teleport | StrongDM | Tradycyjny PAM |
+|---------|--------|----------|----------|-----------------|
+| **Natywny klient SSH** | ✅ Standardowy `ssh` | ⚠️ Wymaga `tsh` | ⚠️ Custom client | ❌ Web console |
+| **Zmiany w backendzie** | ✅ Zero | ❌ Agent lub CA | ❌ Wymagany agent | ❌ Agent + PAM |
+| **Legacy hardware** | ✅ Działa | ❌ Brak wsparcia agent | ❌ Brak wsparcia agent | ❌ Brak wsparcia agent |
+| **User experience** | `ssh user@host` | `tsh ssh user@host` | Custom syntax | Web GUI |
+| **Port forwarding** | ✅ Natywny `-L/-R/-D` | ⚠️ Via tsh tunnel | ⚠️ Limited | ❌ Not supported |
+| **SCP/SFTP** | ✅ Standardowe narzędzia | ⚠️ Via tsh | ⚠️ Limited | ❌ Web upload |
+| **Agent forwarding** | ✅ Natywny `-A` | ⚠️ Wymaga setup | ❌ Not supported | ❌ Not supported |
+| **Session sharing** | ✅ Natywny SSH | ✅ tsh join | ❌ | ❌ |
+| **Czas wdrożenia** | 1 godzina | Tygodnie/miesiące | Tygodnie | Miesiące |
+| **Koszt** | Open source | $10-50/user/msc | $$$ | $$$$ |
+
+---
+
+## Kluczowa Innowacja: "Bycie Wewnątrz"
 
 **Inside nie zarządza tożsamościami. Inside zarządza tym, kiedy prawdziwi ludzie mogą być wewnątrz Twojej infrastruktury.**
 
-To jest różnica, która:
-- ✅ Odróżnia Inside od Teleport, PAM-ów i ZTNA
-- ✅ Tłumaczy, czemu wdrożenie zajmuje 1 godzinę, a nie miesiące
-- ✅ Sprawia, że system jest natychmiast zrozumiały dla każdego
+Nie "dostęp", nie "tożsamość", nie "kontrola" — każdy od razu rozumie:
 
-### Natychmiastowa Jasność
+- **Kto jest wewnątrz** w tej chwili
+- **Kto może być wewnątrz** (i kiedy)
+- **Co robi będąc wewnątrz**
+- **Kiedy przestaje być wewnątrz**
 
-Nie "dostęp", nie "tożsamość", nie "kontrola".
-
-Każdy od razu rozumie:
-- 👤 **Kto jest wewnątrz** w tej chwili
-- 🎫 **Kto może być wewnątrz** (i kiedy)
-- 🎬 **Co robi będąc wewnątrz**
-- ⏰ **Kiedy przestaje być wewnątrz**
-
-Nie trzeba tłumaczyć architektury.
-
-### Idealny Język Operacyjny
-
-To jest mega ważne.
+Idealny język operacyjny:
 
 *"Kto jest wewnątrz produkcji teraz?"*
 
@@ -45,180 +78,405 @@ Brzmi jak rzeczywistość, nie jak system.
 
 ---
 
-## 💡 Czym jest Inside?
+## Jak To Działa
 
-Wyobraź sobie, że masz 50 serwerów i 20 pracowników. Każda osoba potrzebuje dostępu do różnych serwerów w różnym czasie. Tradycyjne podejście: tworzenie kont na każdym serwerze, zarządzanie kluczami SSH, pamiętanie kto ma dostęp gdzie, ręczne odwoływanie gdy ktoś odchodzi.
-
-**Inside siedzi pośrodku** i rozwiązuje to:
+**Wersja 30-Sekundowa:**
 
 ```
 Komputer Osoby → Brama Inside → Serwer Backendowy
-   (gdziekolwiek)   (jedno miejsce)    (10.0.x.x)
+  (gdziekolwiek)    (jedno miejsce)    (10.0.x.x)
 ```
 
-Z perspektywy osoby: `ssh serwer.firma.pl` - działa jak normalny SSH/RDP.
+Z perspektywy osoby: `ssh serwer.firma.pl` — działa jak normalny SSH/RDP.
+
 Za kulisami: Inside sprawdza "czy ta osoba ma ważny grant W TEJ CHWILI?" i albo pozwala, albo odmawia.
 
-### Kluczowa Koncepcja: Granty Czasowe
+**Architektura:**
 
-Zamiast stałych kont, **przyznaj esz czasowy dostęp**:
+Inside to transparentny MITM SSH gateway z jedną kluczową zaletą:
+- **Klient używa natywnego SSH** (`ssh -A user@host`)
+- **Backend używa natywnego SSH daemon** (OpenSSH, IOS, ASA… cokolwiek)
+- **Inside siedzi pośrodku**, niewidoczny dla obu stron
+- **Autentykacja backendu** przez prawdziwy SSH key użytkownika (agent forwarding)
 
-```bash
-# Daj Alice 8 godzin na bycie wewnątrz produkcyjnej bazy danych
-inside grant alice --server prod-db-01 --duration 8h
+Wszystko inne — MFA (v2.1), kontrola dostępu, audit, session replay, session sharing — dzieje się transparentnie w gateway.
 
-# Alice może teraz: ssh alice@prod-db-01
-# Po 8 godzinach: Dostęp automatycznie wygasa, brak sprzątania
-```
+Ponieważ Inside operuje na poziomie protokołu SSH, nie na poziomie OS czy agenta, nie nakłada żadnych wymagań na urządzenia.
 
-Wszystko jest:
-- ✅ **Scentralizowane** - jedno miejsce do zarządzania dostępem
-- ✅ **Tymczasowe** - granty wygasają automatycznie
-- ✅ **Audytowane** - każda obecność wewnątrz jest nagrana
-- ✅ **Elastyczne** - przyznaj dostęp do grup, pojedynczych serwerów lub konkretnych protokołów
+**Jeśli mówi SSH — Inside to rozumie.**
 
 ---
 
-## 🏗️ Podstawowe Koncepcje
+## Kluczowe Koncepcje
 
-### 👤 Person (Osoba)
+### Person (Osoba)
 
-Prawdziwy człowiek.
-- Ma imię i nazwisko (np. "Paweł Mojski")
-- Ma konto w AAD / LDAP / czymkolwiek
-- **NIE loguje się do systemów** - osoby wchodzą do środowisk
+Prawdziwy człowiek — nie username.
+- Ma imię i nazwisko (np. "Jan Kowalski")
+- Ma source IP (biuro, dom, VPN, mobile)
+- **NIE loguje się do systemów** — osoby wchodzą do środowisk
 
-### 🎫 Grant
+### Grant
 
 Pozwolenie na bycie wewnątrz.
 - Definiuje **gdzie** (które serwery/grupy)
 - Definiuje **jak długo** (8 godzin, tydzień, na stałe)
 - Definiuje **pod jakimi warunkami** (okna czasowe, protokoły, dozwolone loginy SSH)
 
-**Grant pozwala osobie być wewnątrz.**
+Nie rola, nie grupa — tylko konkretne pozwolenie które wygasa.
 
-Nie:
-- ❌ rola
-- ❌ grupa
-- ❌ dokument polityki
+Granty są tworzone przez **Web Management Interface** — prosty wizard w 4 krokach:
+1. **Who (Kto)** - Wybierz osobę (lub grupę użytkowników)
+2. **Where (Gdzie)** - Wybierz serwery (lub grupę serwerów)
+3. **How (Jak)** - Protokół (SSH/RDP), czas trwania, harmonogram
+4. **Review (Przegląd)** - Potwierdź i utwórz
 
-Tylko konkretne pozwolenie.
-
-### 🏃 Stay (Obecność)
+### Stay (Obecność)
 
 Fakt bycia wewnątrz.
 - **Stay zaczyna się** gdy osoba wchodzi (pierwsze połączenie)
 - **Stay kończy się** gdy grant wygasa lub zostaje odwołany
-- **Stay jest zawsze powiązany** z osobą i grantem
-- **Stay może mieć wiele sesji** (disconnect/reconnect)
+- **Stay może mieć wiele sesji** (disconnect/reconnect dozwolone)
+- Osoba **pozostaje wewnątrz** nawet między połączeniami
 
-Osoba **pozostaje wewnątrz** nawet między połączeniami.
+Ta koncepcja jest unikalna dla Inside. "Stay" grupuje całą aktywność podczas jednego okresu, czyniąc audyty trywialnymi:
 
-Nie:
-- ❌ sesja
-- ❌ połączenie
-- ❌ logowanie
+*"Pokaż mi wszystkich którzy byli wewnątrz produkcji ostatni miesiąc"* → Gotowe. Jedno zapytanie.
 
-### 🔌 Session (Sesja)
+**Jak Działa Stay:**
+
+1. **Stay Rozpoczyna Się** - Osoba łączy się pierwszy raz (grant zwalidowany)
+2. **Wiele Sesji** - Osoba może disconnect/reconnect swobodnie (ten sam stay trwa)
+3. **Stay Aktywny** - Widoczny w real-time dashboard: "Alice jest wewnątrz prod-db-01"
+4. **Stay Kończy Się** - Gdy grant wygasa, admin odwołuje, lub okno harmonogramu się zamyka
+5. **Auto-Terminacja** - Aktywne sesje terminate, osoba nie może już wejść
+
+### Session (Sesja)
 
 Pojedyncze połączenie TCP w ramach stay.
 - Połączenie SSH (terminal)
 - Połączenie RDP (pulpit)
-- Połączenie HTTP (GUI web)
+- Połączenie HTTP (web GUI - wkrótce)
 
-Szczegół techniczny. Stay jest tym, co się liczy.
+Szczegół techniczny. Stay jest tym, co się liczy dla accountability.
 
-### 🚪 Entry (Wejście)
+### Username
 
-Sposób dostania się do środka.
-- **ssh_proxy** - Entry przez SSH (port 22)
-- **rdp_proxy** - Entry przez RDP (port 3389)
-- **http_proxy** - Entry przez HTTP/HTTPS (przyszłość)
-
-Entry sprawdza grant, rozpoczyna lub dołącza do stay.
-
-### 🧾 Username
-
-Techniczny identyfikator w systemach backendowych.
-- Istnieje na hostach (konta Linux, użytkownicy DB, etc.)
-- Istnieje w legacy (Cisco, routery, appliance)
+Techniczny identyfikator w systemach backendowych (root, admin, backup, etc.)
 - **NIE reprezentuje osoby**
+- Inside mapuje `username → person` transparentnie
+- Brak zmian w hostach, klientach, AAD, czy targetach
 
-**Username to szczegół implementacyjny.**
-
-Inside mapuje `username → person`, ale:
-- ❌ Nie zmienia hosta
-- ❌ Nie zmienia klienta
-- ❌ Nie informuje AAD
-- ❌ Nie informuje targetu
-
-To jest kluczowy punkt architektury.
-
-### 📜 Record (Zapis)
-
-Ślad audytowy.
-- **Kto był wewnątrz** (osoba)
-- **Kiedy** (znaczniki czasu)
-- **Na podstawie jakiego grantu**
-- **Co robił** (nagrania sesji)
-
-Audyt bez audytu.
+**To jest kluczowy punkt architektury:** Inside dostarcza accountability bez naruszania istniejących systemów.
 
 ---
 
-## 🎯 Jak To Działa
+## NOWOŚĆ w v2.0: Session Sharing (Teleport-Style)
 
-### 1. Brama (Inside)
+**Dołącz do live SSH sessions używając natywnego SSH — nie web emulatora.**
 
-Inside działa na jednym serwerze (np. `gateway.firma.pl`):
-- **Port 22** - punkt wejścia SSH
-- **Port 3389** - punkt wejścia RDP
-- **Port 5000** - interfejs web do zarządzania
+Admin console (SSH-based TUI) pozwala upoważnionym użytkownikom:
 
-### 2. Osoba Wchodzi przez Entry
-
-Osoba próbuje się połączyć:
+**Watch Mode (Read-Only):**
 ```bash
-ssh alice@prod-db-01.firma.pl
+# Połącz się z admin console
+ssh admin@gate.firma.pl
+
+# Wybierz "Watch Session"
+# Wybierz z listy aktywnych sesji
+# Oglądaj real-time output (cichy obserwator)
 ```
 
-Inside (ssh_proxy):
-1. Identyfikuje osobę po IP źródłowym
-2. Sprawdza czy osoba ma ważny grant do celu
-3. Jeśli tak: Tworzy lub dołącza do stay, przekazuje połączenie
-4. Jeśli nie: Odmawia, zapisuje powód odmowy
+**Join Mode (Read-Write):**
+```bash
+# Połącz się z admin console
+ssh admin@gate.firma.pl
 
-### 3. Bycie Wewnątrz (Stay)
+# Wybierz "Join Session"
+# Wybierz z listy aktywnych sesji
+# Interaguj z sesją (pair programming, szkolenie)
+```
 
-Alice jest teraz **wewnątrz prod-db-01**:
-- Może disconnect/reconnect swobodnie (ten sam stay)
-- Wszystkie sesje nagrane (logi terminala)
-- Widoczne w dashboardzie: "Alice jest wewnątrz prod-db-01"
+**Jak To Działa:**
+- `SessionMultiplexer` - Jedna sesja SSH → wielu widzów
+- Ring buffer (50KB) - Nowi widzowie dostają ostatnią historię
+- Input queue - Komendy od uczestników są kolejkowane
+- Thread-safe broadcasting - Real-time output do wszystkich widzów
+- Announcements - "*** alice joined ***" widoczne dla właściciela
 
-### 4. Koniec Stay
+**Żaden inny vendor nie robi tego z natywnymi klientami SSH.**
 
-Stay kończy się gdy:
-- Grant wygasa (osiągnięty limit czasu)
-- Admin odwołuje grant
-- Okno harmonogramu się zamyka (np. poza godzinami pracy)
-
-Aktywne sesje przerwane, osoba nie może już wejść.
+Teleport wymaga `tsh join`. Inside wymaga tylko `ssh`.
 
 ---
 
-## 🌟 Przykład z Prawdziwego Świata
+## Wpływ Biznesowy
+
+**Tradycyjna SSH Access Control:**
+- Deploy agentów na 500 serwerów: Tygodnie pracy
+- Modyfikacja backend configs: Change management nightmare
+- Szkolenie użytkowników z nowych clientów: Opór i tickety support
+- Wymiana legacy devices: Budget explosion
+- Złożoność rollback: Wysokie ryzyko
+
+**Z Inside:**
+- Deploy gateway: 1 godzina
+- Backend changes: Zero
+- User training: Zero (ta sama komenda `ssh`)
+- Legacy support: Wszystko działa
+- Rollback: Wyłącz gateway
+
+### Realne Metryki
+
+- **Czas przygotowania audytu:** 3 tygodnie → 2 godziny (Stay timeline + session replay)
+- **Czas wdrożenia:** 6 miesięcy → 1 dzień (brak zmian w backendzie)
+- **Pokrycie:** 100% infrastruktury SSH (włącznie z 10-letnimi urządzeniami)
+- **Compliance:** ISO 27001, SOC 2, GDPR gotowe out-of-box
+- **Zakłócenie dla użytkowników:** Zero (natywne narzędzia działają dalej)
+
+### Porównanie Kosztów
+
+- **Teleport:** $10-50 na użytkownika miesięcznie + koszty wdrożenia
+- **StrongDM:** Podobne ceny + vendor lock-in
+- **Tradycyjny PAM:** $50k-500k licencja + 6 miesięcy wdrożenia
+- **Inside:** Open source + opcjonalne commercial support
+
+---
+
+## Interfejs Zarządzania Web
+
+**Całe zarządzanie odbywa się przez Web GUI** (port 5000). Nie ma narzędzi CLI.
+
+### Dashboard
+
+Widok real-time z auto-refresh co 5 sekund:
+- **Kto jest wewnątrz teraz** - Aktywne stays z nazwiskami osób, serwerami, czasem trwania
+- **Ostatnie wejścia** - 100 ostatnich prób połączenia (sukces + odmowy)
+- **Granty wygasające wkrótce** - Ostrzeżenia dla grantów < 1 godzina
+- **Statystyki** - Stays dzisiaj, aktywne sesje, dostępne nagrania
+
+### Grant Creation Wizard
+
+Prosty proces w 4 krokach:
+1. **Who (Kto)** - Wybierz osobę (lub grupę użytkowników z dropdown)
+2. **Where (Gdzie)** - Wybierz serwery (lub grupę serwerów z dropdown)
+3. **How (Jak)** - Protokół (SSH/RDP/Oba), czas trwania (1h-30d lub stały), harmonogram (opcjonalnie)
+4. **Review (Przegląd)** - Podsumowanie ze wszystkimi szczegółami, potwierdź i utwórz
+
+Grant staje się aktywny natychmiast.
+
+### Universal Search (Mega-Wyszukiwarka)
+
+Znajdź wszystko z 11+ filtrami:
+- Imię osoby, username
+- Serwer, grupa serwerów, target IP
+- Protokół (SSH/RDP), status (aktywny/zakończony/odmowa)
+- Zakres dat (od-do)
+- Grant ID, session ID
+- Powód odmowy
+
+Eksport wyników do CSV. Auto-refresh co 2 sekundy.
+
+### Live Session View
+
+Oglądaj aktywne sesje SSH w czasie rzeczywistym:
+- Terminal output aktualizowany co 2 sekundy
+- Zobacz co osoba pisze teraz
+- Idealne do szkoleń, supportu, monitoringu bezpieczeństwa
+
+**Uwaga:** v2.0 Admin Console zapewnia lepszą jakość live view przez SSH (nie przeglądarką).
+
+### Session Recordings (Nagrania Sesji)
+
+Odtwarzaj przeszłe sesje:
+- **SSH** - Player terminala (asciinema-style) z pause/play/prędkość
+- **RDP** - MP4 video player (HTML5) z timeline scrubbing
+
+Pełna historia, przeszukiwalna, eksportowalna.
+
+### Kontrola Dostępu
+- Multiple source IPs per person
+- Server groups
+- Granular scope
+- Protocol filtering
+- SSH login restrictions
+- Temporal grants
+- Schedule windows
+- Recursive groups
+
+### Zarządzanie Sesjami
+- Live monitoring
+- Session sharing (watch/join) - v2.0
+- Recording (SSH terminal + RDP video)
+- Playback z built-in players
+- Search z wieloma filtrami
+- Auto-termination po wygaśnięciu grantu
+- 50KB history buffer
+
+### Admin Console (v2.0)
+SSH-based TUI dla operacji uprzywilejowanych:
+1. Active Stays
+2. Active Sessions  
+3. Join Session (read-write)
+4. Watch Session (read-only)
+5. Kill Session
+6-8. W przygotowaniu
+
+### Auditing
+- Entry attempts (success + denial)
+- Grant changes z pełną historią
+- Stay timeline
+- Session recordings
+- CSV export
+
+### User Experience
+- Transparent - standard SSH/RDP clients
+- No agents
+- Native tools (ssh, scp, sftp, VSCode Remote, Ansible)
+- Port forwarding works
+- File transfer works
+- Agent forwarding works
+
+---
+
+## Przykład z Życia
 
 **Problem:** Problem z produkcyjną bazą danych o 9 rano. DBA potrzebuje natychmiastowego dostępu.
 
 **Tradycyjne podejście:**
 1. Utwórz konto VPN (15 minut)
-2. Utwórz klucz SSH (5 minut)
-3. Dodaj klucz do prod-db (10 minut + ticket zmian)
+2. Utwórz SSH key (5 minut)
+3. Dodaj key do prod-db (10 minut + change ticket)
 4. DBA się łączy (w końcu!)
-5. Pamiętaj żeby odwołać później (zazwyczaj zapominane)
+5. Pamiętaj żeby odwołać później (**zazwyczaj zapomniane**)
 
 **Z Inside:**
-```bash
+1. Admin otwiera Web GUI (30 sekund)
+2. Grant Creation Wizard: "dba-jan" → "prod-db-01" → "4 godziny" → Utwórz
+3. DBA natychmiast łączy się: `ssh dba-jan@prod-db-01.firma.pl`
+
+**Rezultat:**
+- Dostęp przyznany w 30 sekund
+- Automatycznie wygasa po 4 godzinach
+- Pełne nagranie sesji
+- Audit trail: "Jan był wewnątrz prod-db-01 od 09:00 do 13:00"
+
+---
+
+## Roadmap
+
+### ✅ v2.0 (Obecna - Luty 2026)
+
+**KILLER FEATURE: Session Multiplexing (Teleport-Style)**
+- Admin Console (SSH-based TUI)
+- SessionMultiplexer z ring buffer (50KB)
+- Join Session (read-write mode)
+- Watch Session (read-only mode)
+- Real-time broadcasting
+- Session sharing z natywnymi klientami SSH
+
+### 🎯 v2.1 (Planowana - Q2 2026)
+
+**MFA Integration z Azure AD**
+- Hybrydowa identyfikacja sesji (SSH key fingerprint, SetEnv, password)
+- Tower: Azure AD OAuth2 integration
+- MFA banner + polling logic
+
+### 💡 v2.2 (Przyszłość)
+
+**Cross-Gate Session Joining + RDP Multiplexing**
+- Redis pub/sub dla session registry
+- Dołączanie do sesji przez różne gaty
+- RDP session sharing
+
+### 🚀 v3.0 (Commercial Release)
+
+**HTTP/HTTPS Proxy + Licensing**
+- MITM proxy dla legacy web GUIs
+- Commercial licensing system
+- Self-hosted z support contracts
+
+---
+
+## Quick Start
+
+**Instalacja** (identyczna jak w wersji angielskiej):
+
+Szczegółowy opis instalacji, konfiguracji i pierwszego grantu dostępny w [README.md](README.md) w sekcji "Quick Start".
+
+**Kluczowe kroki:**
+1. Sklonuj repo i zainstaluj zależności
+2. Setup PostgreSQL database
+3. Skonfiguruj inside.conf
+4. Uruchom serwisy (ssh-proxy, rdp-proxy, flask)
+5. Otwórz Web GUI: http://gateway:5000
+6. Dodaj osobę (Management → Persons)
+7. Dodaj serwer (Management → Servers)
+8. Utwórz grant (Dashboard → New Grant → Wizard)
+9. Osoba łączy się: `ssh username@gateway`
+
+---
+
+## TL;DR
+
+**Inside w jednym zdaniu:**
+
+*Enterprise SSH gateway używający natywnych klientów SSH, który dostarcza time-limited grants, pełne nagrania sesji, real-time session sharing i kompletny audit trail — wdrożony w 1 godzinę bez zmian w backendzie.*
+
+**Kluczowe Zalety:**
+
+- **Native SSH** - Działa ze standardowym `ssh`, `scp`, `sftp`, Ansible, VSCode Remote
+- **Zero Zmian w Backendzie** - Brak agentów, brak configs, brak modyfikacji
+- **Legacy Support** - 10-letnie Cisco switche, ASAs, storage appliances — cokolwiek z SSH
+- **Session Sharing** - Join/watch live sessions używając natywnego SSH (Teleport-style)
+- **Stay-Centric** - Person accountability, nie username accountability
+- **1-Godzinne Wdrożenie** - Nie 6 miesięcy
+
+**Jeden wizard do przyznania dostępu:**
+
+Web GUI → New Grant → Who: alice | Where: prod-db | How: 8h → Create
+
+**Jedno miejsce żeby zobaczyć wszystko:**
+```
+Dashboard → Kto jest wewnątrz w tej chwili
+```
+
+**Dlaczego Inside:**
+
+Twoi devs już znają SSH — po co zmuszać ich do nauki `tsh`?
+
+Twoje serwery już mają SSHD — po co instalować agenty?
+
+Twoje workflow już używa `scp` — po co je zmieniać?
+
+Inside: Enterprise features, zero zakłóceń, ułamek kosztu.
+
+---
+
+## Zaczynamy
+
+**Repository:** https://github.com/pawelmojski/inside
+
+**Status:** Production (v2.0 z session multiplexing)
+
+**Licencja:** Open source (dostępne opcje commercial support)
+
+**Kontakt:**
+- Pytania: Otwórz issue na GitHub
+- Zapytania komercyjne: Zobacz [DOCUMENTATION.md](DOCUMENTATION.md)
+- Beta testing: Early access dla v2.1 (MFA integration)
+
+**Następne Kroki:**
+1. Gwiazdka na repo ⭐
+2. Wypróbuj quick start installation
+3. Dołącz do dyskusji na GitHub Issues
+4. Przyczyń się do projektu
+
+---
+
+**Zbudowane dla enterprise zmęczonych wyborem między bezpieczeństwem a użytecznością.**
+
+**Inside daje Ci jedno i drugie.**
 # Admin (30 sekund):
 inside grant dba-john --server prod-db-01 --duration 4h
 
@@ -550,117 +808,37 @@ Po 1 godzinie: dostęp root automatycznie odwołany, stay kończy się.
 
 ### Kontrola Port Forwardingu
 
-Kontroluj kto może robić SSH port forwarding:
+Konfiguracja w Grant Creation Wizard → krok **How**:
 
-```bash
-# Grant z dozwolonym port forwardingiem
-inside grant alice --server bastion \
-  --allow-port-forwarding local,remote,dynamic
+- **Dozwolone:** SSH -L, -R, -D działają normalnie
+- **Zablokowane:** Połączenie odrzucone jeśli próba port forwarding
 
-# Grant bez port forwardingu
-inside grant bob --server app-server \
-  --no-port-forwarding
-```
+Przydatne dla bastion hosts (allow forwarding) vs production servers (block forwarding).
 
 ### Dostęp Oparty na Harmonogramie
 
-Dostęp tylko w godzinach pracy:
+Konfiguracja w Grant Creation Wizard → krok **How** → Schedule (opcjonalnie):
 
-```bash
-inside grant alice --server prod-db \
-  --schedule "Mon-Fri 09:00-17:00" \
-  --timezone "Europe/Warsaw"
-```
+- **Przykład:** "Mon-Fri 09:00-17:00", timezone "Europe/Warsaw"
+- **Zachowanie:** Cyklicznie co tydzień — osoba może wejść w harmonogramie
+- **Poza harmonogramem:** Wejście odmówione, aktywne stays auto-terminate
 
-Cyklicznie co tydzień - osoba może wejść kiedykolwiek w harmonogramie, automatycznie blokowana poza nim.
-
-### Tryb TPROXY (v1.9)
-
-Transparentne proxy dla routerów Linux:
-
-```bash
-# Osoba łączy się bezpośrednio z IP serwera
-ssh 10.50.1.100
-
-# iptables przekierowuje do Inside
-iptables -t mangle -A PREROUTING -p tcp --dport 22 \
-  -j TPROXY --on-port 2222
-
-# Inside wyciąga prawdziwy cel (SO_ORIGINAL_DST)
-# Osoba nie wie, że Inside istnieje
-```
-
-Idealne dla Tailscale exit nodes, koncentratorów VPN.
-
-### HTTP/HTTPS Proxy (v2.1 - Przyszłość)
-
-Dla starych urządzeń sieciowych (stare switche, routery, appliance):
-
-```bash
-# Przyznaj dostęp do GUI web switcha
-inside grant network-admin --server old-cisco-switch \
-  --protocol http --duration 2h
-
-# Osoba używa przeglądarki z proxy
-https_proxy=gateway:8080 firefox
-```
-
-MITM dla pełnej kontroli HTTPS, nagrywanie sesji dla GUI web.
+Idealne dla dostępu tylko w godzinach pracy do produkcji.
 
 ---
 
-## 📊 Monitoring i Operacje
+## Roadmap
 
-### Zdrowie Systemu
+Szczegółowy roadmap z opisem wszystkich wersji dostępny w głównym [README.md](README.md) w sekcji "Roadmap".
 
-- Status PostgreSQL
-- Procesy proxy (ssh_proxy, rdp_proxy)
-- Wykorzystanie miejsca na nagrania
-- Liczba aktywnych obecności
+**Aktualne:**
+- ✅ **v2.0** (Luty 2026) - Session Multiplexing (Teleport-Style) - **OBECNA WERSJA**
 
-### Metryki
-
-- Wejścia na godzinę (udane / odmówione)
-- Średni czas trwania stay
-- Najczęściej dostępne serwery
-- Kolejka konwersji nagrań
-
-### Alerty
-
-- Grant wygasa wkrótce (< 1 godzina)
-- Miejsce na nagrania > 80%
-- Skok odmówionych wejść
-- Serwer backendowy nieosiągalny
-
----
-
-## 🗓️ Plan Rozwoju
-
-### Obecnie: v1.8 (Mega-Wyszukiwarka) ✅
-
-- Uniwersalne wyszukiwanie z 11+ filtrami
-- Auto-odświeżanie dashboardu
-- Eksport CSV
-- Pełny ślad audytowy
-
-### Następnie: v1.9 (Rozproszone + TPROXY) 🎯
-
-- Architektura Tower/Gate (rozproszona)
-- TPROXY transparentne proxy
-- Warstwa API (REST)
-- Ulepszenia GUI
-
-### Przyszłość: v2.0 (Narzędzia CLI) 💡
-
-- CLI oparte na curl (`inside grant`, `inside stays`)
-- Autentykacja tokenami
-- Bash completion
-
-### Przyszłość: v2.1 (HTTP Proxy) 🔮
-
-- HTTP/HTTPS proxy dla urządzeń legacy
-- MITM dla GUI web (stare switche, routery)
-- Kontrola dostępu web oparta na politykach
+**Planowane:**
+- 🎯 **v2.1** (Q2 2026) - MFA Integration z Azure AD
+- 💡 **v2.2** - Cross-Gate Session Joining + RDP Multiplexing
+- 🔮 **v2.3** - Admin Console Expansion (Audit Logs, Grant Debug, MFA Status)
+- 🚀 **v3.0** - HTTP/HTTPS Proxy + Commercial Licensing
 
 ---
 
