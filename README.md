@@ -99,7 +99,7 @@ Inside is a transparent MITM SSH gateway with one critical advantage:
 - **Inside sits in the middle**, invisible to both sides
 - **Backend authentication** via user's real SSH key (agent forwarding)
 
-Everything else — MFA (v2.1), access control, audit, session replay, session sharing — happens transparently in the gateway.
+Everything else — MFA, access control, audit, session replay, session sharing — happens transparently in the gateway.
 
 Because Inside operates at the SSH protocol level, not at the OS or agent level, it imposes no requirements on devices.
 
@@ -253,6 +253,8 @@ Teleport requires `tsh join`. Inside just requires `ssh`.
 - **Temporal grants** - Time-limited with automatic expiration
 - **Schedule windows** - Access only Mon-Fri 9-17, recurring weekly
 - **Recursive groups** - User groups with inheritance
+- **MFA enforcement** - Per-grant MFA requirement via Azure AD SAML
+- **MFA per stay** - First session requires MFA, subsequent sessions skip (persistent auth)
 
 ### Session Management
 - **Live monitoring** - See who is inside in real-time
@@ -274,7 +276,7 @@ SSH-based TUI for privileged operations:
 
 Access requires:
 - Permission level ≤100 (admin)
-- MFA authentication (planned v2.1)
+- MFA authentication via Azure AD (if enabled on gate)
 - SSH connection: `ssh admin@gate.company.com`
 
 ### Auditing
@@ -506,29 +508,34 @@ Benefits: Horizontal scaling, geographic distribution, offline mode, reduced bla
 
 ### ✅ v2.0 (Current - February 2026)
 
-**KILLER FEATURE: Session Multiplexing (Teleport-Style)**
+**KILLER FEATURES:**
 
+**Session Multiplexing (Teleport-Style)**
 - Admin Console (SSH-based TUI)
 - SessionMultiplexer with ring buffer (50KB)
 - Join Session (read-write mode)
 - Watch Session (read-only mode)
-- 50KB history buffer for new watchers
 - Real-time output broadcasting
 - Session sharing with native SSH clients
+
+**MFA Integration with Azure AD**
+- Azure AD SAML authentication
+- MFA per stay (first session requires MFA, subsequent skip)
+- Per-grant MFA enforcement (grant.mfa_required flag)
+- MFA challenge with browser-based authentication
+- Automatic session persistence via SSH key fingerprint
 
 **"Holy shit, this actually works!"**
 
 ### 🎯 v2.1 (Planned - Q2 2026)
 
-**MFA Integration with Azure AD**
+**Admin Console Enhancements**
 
-- Hybrid session identification:
-  - Priority 1: SSH key fingerprint (automatic)
-  - Priority 2: SetEnv INSIDE_SESSION_ID (user config)
-  - Priority 3: Password fallback (always MFA)
-- Tower: Azure AD OAuth2 integration
-- MFA banner + polling logic
-- Admin console requires MFA
+- Option 6: Audit Logs viewer (searchable, filterable)
+- Option 7: Grant Debug interface (troubleshoot access denials)
+- Option 8: MFA Status checker (view active MFA sessions)
+- Session recording playback in admin console
+- Cross-gate session info (when multi-gate deployed)
 
 ### 💡 v2.2 (Future)
 
@@ -714,7 +721,7 @@ Inside: Enterprise features, zero disruption, fraction of the cost.
 **Contact:**
 - Questions: Open an issue on GitHub
 - Commercial inquiries: See [DOCUMENTATION.md](DOCUMENTATION.md) for commercial positioning
-- Beta testing: Early access program available for v2.1 (MFA integration)
+- Beta testing: Early access program available for v2.1 (admin console enhancements)
 
 **Next Steps:**
 1. Star the repository ⭐

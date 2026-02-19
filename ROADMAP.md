@@ -2,9 +2,15 @@
 
 ## ✅ v2.0 COMPLETED (February 19, 2026) 🚀🔥
 
-### KILLER FEATURE: Admin Console with Session Multiplexing (Teleport-Style)
+### KILLER FEATURES:
+
+**1. Admin Console with Session Multiplexing (Teleport-Style)**
 
 **Holy shit, this actually works!** Native SSH session sharing built into the gate. No external tools required.
+
+**2. MFA Integration with Azure AD**
+
+**Full SAML authentication flow with per-stay MFA and per-grant enforcement.** First production-ready SSH gateway with native MFA via Azure AD.
 
 #### What Was Delivered:
 
@@ -146,7 +152,179 @@ SessionMultiplexer
 > "kurwa, jaram się jak dziecko... To jest kill-feature. to jest coś czego chyba nie ma nikt w natywnym ssh!"
 > — p.mojski, February 19, 2026
 
+---
+
+### MFA INTEGRATION WITH AZURE AD
+
+#### What Was Delivered:
+
+**1. Azure AD SAML Integration** (`config/saml_config.py`)
+- Full SAML 2.0 configuration
+- Azure AD tenant: `0d9653a4-4c3f-4752-9098-724fad471fa5`
+- Azure AD app: `05275222-1909-4d40-a0d0-2c41df7b512a`
+- SAML endpoints configured (login, logout, metadata)
+- Certificate embedded (x509cert for signature validation)
+- Attribute mappings: email, name, groups
+
+**2. MFA API Endpoints** (`src/api/mfa.py`)
+- `POST /api/v1/mfa/challenge` - Create MFA challenge for gate
+- `GET /api/v1/mfa/status/<token>` - Poll MFA verification status
+- Phase 1: Known user (user_id provided)
+- Phase 2: Unknown user (identified via SAML after auth)
+- Token-based challenge flow
+- Configurable timeout (default 5 minutes)
+
+**3. MFA Challenge Flow:**
+```
+1. User connects via SSH (unknown source IP or password auth)
+2. Gate detects no active stay → requires MFA
+3. Gate calls Tower: POST /api/v1/mfa/challenge
+4. Tower creates MFAChallenge, returns:
+   - mfa_token (secret)
+   - mfa_url (https://inside.ideo.pl/auth/saml/login?token=...)
+   - mfa_qr (ASCII art QR code for mobile)
+   - timeout_minutes
+5. Gate displays banner with URL + QR
+6. User opens URL in browser → Azure AD SAML login
+7. Tower validates SAML response → marks challenge as verified
+8. Gate polls Tower: GET /api/v1/mfa/status/<token>
+9. Challenge verified → Gate creates stay → connection proceeds
+10. User disconnects/reconnects → same stay → MFA skipped
+```
+
+**4. MFA Per Stay (Persistent Authentication)**
+- First session in stay requires MFA
+- Subsequent sessions within same stay skip MFA
+- Stay identified by:
+  - SSH key fingerprint (automatic, preferred)
+  - Source IP + username (fallback)
+  - Password auth → always per-session MFA
+- Stay expiration ends MFA session
+
+**5. MFA Per Grant (Enforcement)**
+- Database: `AccessPolicy.mfa_required` (Boolean, default False)
+- Grant creator can enforce MFA for specific grants
+- Use cases:
+  - Production servers → MFA required
+  - Staging/dev → MFA optional
+  - Contractor access → MFA always
+- Web GUI: Grant Creation Wizard → "Require MFA" checkbox
+
+**6. Database Schema** (`src/core/database.py`)
+- `MFAChallenge` table:
+  - `token` (unique, urlsafe secret)
+  - `gate_id` (which gate initiated)
+  - `user_id` (NULL for unknown users)
+  - `destination_ip` (target server)
+  - `source_ip` (client IP)
+  - `ssh_username` (backend username)
+  - `verified` (Boolean, False until SAML success)
+  - `verified_at` (timestamp of authentication)
+  - `user_email` (extracted from SAML)
+  - `user_name` (extracted from SAML)
+  - `expires_at` (5 min timeout)
+- `AccessPolicy.mfa_required` (Boolean)
+- `Gate.mfa_enabled` (Boolean, per-gate control)
+
+**7. SSH Proxy Integration** (`src/proxy/ssh_proxy.py`)
+- Password authentication flow modified
+- Checks for unknown source IP → triggers MFA
+- Polling loop for MFA status (2s interval, 5min timeout)
+- Banner display with URL and QR code
+- Automatic stay creation after MFA success
+- Connection proceeds transparently
+
+**8. Web GUI Integration** (Grant Creation Wizard)
+- Step 3 (How): "Require MFA" checkbox
+- sets `AccessPolicy.mfa_required = True`
+- Visible in grant details
+- Editable after creation
+
+**9. Configuration:**
+- `config/saml_config.py`:
+  - `AZURE_TENANT_ID` = "0d9653a4-4c3f-4752-9098-724fad471fa5"
+  - `AZURE_APP_ID` = "05275222-1909-4d40-a0d0-2c41df7b512a"
+  - `TOWER_BASE_URL` = "https://inside.ideo.pl"
+  - `MFA_CHALLENGE_TIMEOUT_MINUTES` = 5
+  - `MFA_TOKEN_LENGTH` = 32 bytes
+
+**10. Security Features:**
+- Token-based challenge (urlsafe, 32 bytes)
+- Time-limited (5 minutes default)
+- Source IP validation
+- SAML signature verification via Azure AD certificate
+- Automatic cleanup of expired challenges
+- MFA session bound to stay (not user globally)
+
+**Files Created:**
+- `src/api/mfa.py` (226 lines)
+- `src/api/mfa_pending.py` (helper functions)
+- `config/saml_config.py` (80 lines)
+
+**Files Modified:**
+- `src/proxy/ssh_proxy.py`:
+  - Added MFA challenge flow in password auth
+  - MFA banner display
+  - MFA status polling
+  - Stay creation with MFA verification
+- `src/core/database.py`:
+  - Added `MFAChallenge` model
+  - Added `AccessPolicy.mfa_required` column
+  - Added `Gate.mfa_enabled` column
+- Web GUI:
+  - Grant wizard "Require MFA" checkbox
+  - Grant details display MFA status
+
+**Deployment:**
+- Azure AD app configured (Paweł's Azure tenant)
+- SAML endpoints tested
+- MFA flow tested end-to-end
+- Both gates support MFA (10.30.0.76, 10.210.0.76)
+- Tower SAML metadata published
+
+#### Use Cases:
+
+**1. Production Access with MFA:**
+```
+Grant: production-servers
+MFA Required: Yes
+User connects → MFA challenge → Azure AD → Success → Stay created
+User reconnects within 4h → No MFA (same stay)
+```
+
+**2. Contractor with Always-MFA:**
+```
+Grant: contractor-bob, staging-servers
+MFA Required: Yes
+Duration: 14 days
+Every connection requires MFA (password auth, no SSH key)
+```
+
+**3. Internal Dev without MFA:**
+```
+Grant: dev-team, development-servers
+MFA Required: No
+SSH key authentication → Direct access
+```
+
+#### Known Limitations:
+- SAML only (no OAuth2 yet)
+- Azure AD only (no generic IdP support yet)
+- ASCII QR code in banner (not clickable in all terminals)
+- 5-minute timeout (not configurable per grant)
+- MFA per stay, not per session (future enhancement)
+
 #### Future Enhancements (v2.1+):
+- Admin console option 8: MFA Status checker
+- MFA dashboard in Web GUI
+- Configurable timeout per grant
+- MFA audit logs
+- Generic SAML IdP support (Okta, Google, etc.)
+- OAuth2 flow for modern apps
+
+---
+
+#### Future Enhancements (Session Multiplexing - v2.1+):
 - RDP session sharing (via PyRDP multiplexer)
 - Cross-gate session joining (via Redis/WebSocket)
 - Stealth mode (silent watch without announcements)
@@ -157,119 +335,70 @@ SessionMultiplexer
 
 ---
 
-## Next Planned: v2.1 (MFA Integration with Azure AD) 🎯 PLANNED
+## Next Planned: v2.1 (Admin Console Enhancements) 🎯 PLANNED
 
-**Waiting for:** Azure AD admin rights
+**Features:**
 
-**Architecture - Hybrid Session Identifier:**
+**1. Admin Console Options 6-8:**
+- **Option 6: Audit Logs Viewer**
+  - Search and filter audit logs via SSH console
+  - Date range, user/person, action type filters
+  - Export to CSV for compliance reports
+  - Real-time tail mode (follow live events)
 
-MFA challenge required only for FIRST session in Stay. Subsequent sessions within same Stay skip MFA (persistent authentication).
+- **Option 7: Grant Debug Interface**
+  - Troubleshoot access denials interactively
+  - Input: person name/IP, target server, protocol
+  - Output: Detailed decision tree (why denied)
+  - Show active grants, missing permissions, schedule windows
+  - Test grant creation with what-if scenarios
 
-**Problem:** Multiple users from shared source IP (e.g., Windows jump host) - cannot identify person by IP alone.
+- **Option 8: MFA Status Checker**
+  - View active MFA sessions (per stay)
+  - Show MFA challenges in-flight (waiting for auth)
+  - Revoke MFA session (force re-auth)
+  - Display user's MFA history (last 30 days)
 
-**Solution:** Session identifier to group connections from same user:
+**2. Session Recording Playback in Admin Console:**
+- Navigate to session via Admin Console
+- Play SSH session recording in terminal (asciinema-style)
+- Pause, resume, speed control (1x, 2x, 5x)
+- Jump to timestamp
+- Search output for keywords
 
-**Priority 1 - SSH Key Fingerprint (Automatic, Zero Config):**
-```python
-if auth_method == 'publickey':
-    session_id = sha256(key.get_base64())
-    # User's public key fingerprint = unique identifier
-    # Works automatically, no user action needed
-```
+**3. Cross-Gate Session Information:**
+- When multi-gate deployed, show sessions from all gates
+- Filter by gate: "Show only sessions on gate-dmz"
+- Join/watch sessions on remote gates (via gate-to-gate protocol)
+- Unified session registry (Redis pub/sub)
 
-**Priority 2 - SetEnv INSIDE_SESSION_ID (One-Time Config):**
-```python
-# Gate paramiko config (server-side):
-AcceptEnv INSIDE_SESSION_ID
+**4. Grant Management via Admin Console:**
+- Create grant interactively (wizard-style prompts)
+- Edit existing grant (duration, schedule, MFA requirement)
+- Revoke grant immediately
+- View grant history for person
 
-# User ~/.ssh/config (client-side):
-Host gate.company.com
-    SendEnv INSIDE_SESSION_ID
-    SetEnv INSIDE_SESSION_ID=mojski-laptop-work
+**5. Stay Management:**
+- View stay timeline (all sessions within stay)
+- Terminate stay (kills all sessions)
+- Extend stay duration (if grant allows)
+- Force stay closure with grace period
 
-# Gate code:
-if 'INSIDE_SESSION_ID' in channel.get_environment():
-    session_id = channel.get_environment()['INSIDE_SESSION_ID']
-```
+**Implementation Priority:**
+1. Options 6-8 (highest demand from ops teams)
+2. Session playback (audit requirement)
+3. Grant management (convenience)
+4. Cross-gate info (when distributed architecture ready)
+5. Stay management (advanced admin feature)
 
-**Priority 3 - Fallback (Secure Default):**
-```python
-else:
-    # Password auth without custom ID = always MFA
-    session_id = f"password_{uuid4()}"
-    # Stay lifetime = single session only
-```
+**Timeline:** Q2 2026 (estimated 4-6 weeks)
 
-**Database Changes:**
-```sql
-ALTER TABLE stays ADD COLUMN session_identifier VARCHAR(128);
-CREATE INDEX idx_stays_session_id ON stays(session_identifier);
+**Dependencies:**
+- None - all features build on existing v2.0 foundation
 
--- Stay lookup:
-SELECT * FROM stays 
-WHERE gate_id = ? 
-  AND session_identifier = ? 
-  AND is_active = true;
-```
+---
 
-**MFA Flow:**
-1. User opens first SSH session
-2. Grant requires MFA → Gate sends banner: "MFA required: https://tower/mfa/<token>"
-3. User clicks link → Azure AD authentication in browser
-4. Tower creates Stay with session_identifier
-5. Gate polls Tower for MFA status → Stay verified → connection proceeds
-6. Subsequent connections with same session_id → Skip MFA (Stay active)
-7. User closes last session → Stay closes → MFA expires
-
-**User Experience Scenarios:**
-
-**Scenario A - SSH Key User (Zero Config):**
-- ✅ Persistent session via key fingerprint
-- ✅ MFA only on first Stay creation
-- ✅ No user action required
-
-**Scenario B - Password + Custom ID (Power User):**
-- ✅ One-time SSH config setup
-- ✅ Persistent session via custom identifier
-- ✅ MFA only on first Stay creation
-
-**Scenario C - Password Only (Lazy User):**
-- ⚠️ MFA required for EVERY connection
-- ⚠️ Secure by default but inconvenient
-- 💡 User can add custom ID to improve experience
-
-**Security:**
-- Session ID validation: `^[a-zA-Z0-9_-]{1,64}$` (alphanumeric, dash, underscore only)
-- Session ID does NOT determine person, only groups sessions
-- Person identified by grant check + MFA verification
-- Shared keys = shared session (user responsibility)
-
-**Implementation Phases:**
-1. **Phase 1 - Basic MFA (PRIORITY):**
-   - Tower: Azure AD OAuth2 integration
-   - Tower: MFA challenge/verify endpoints + auto-registry from AAD group
-   - Gate: MFA banner + polling logic
-   - Database: `mfa_challenges` table
-   - **NO session persistence yet** - every connection = MFA
-
-2. **Phase 2 - Session Persistence (AFTER Phase 1 works):**
-   - Database: Add `session_identifier` to Stay model
-   - Gate: Implement hybrid identifier extraction (key FP → env → fallback)
-   - Gate: AcceptEnv for INSIDE_SESSION_ID
-   - Stay matching: Skip MFA if session_identifier + person match
-   - Documentation: User guide for custom session IDs
-
-**Benefits:**
-- ✅ Solves shared source IP problem
-- ✅ Zero config for SSH key users (majority)
-- ✅ Flexible for password users (custom ID option)
-- ✅ Secure by default (fallback = always MFA)
-- ✅ No backend configuration needed (Gate-side only)
-- ✅ Audit trail via session_identifier in Stay
-
-**Status:** ✅ **Phase 1 COMPLETED** (January 2026), ✅ **Phase 2 COMPLETED** (January 28, 2026)
-
-**Phase 1 Implementation (January 2026):**
+## v2.2 PLANNED (Cross-Gate Architecture + RDP Multiplexing)
 - ✅ Tower: Azure AD SAML integration with SSO login
 - ✅ Tower: MFA challenge/verify endpoints (/api/v1/mfa/challenge, /api/v1/mfa/status)
 - ✅ Tower: Auto-registry from Azure AD group membership

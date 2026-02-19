@@ -103,6 +103,8 @@ Wszystko inne — MFA (v2.1), kontrola dostępu, audit, session replay, session 
 
 Ponieważ Inside operuje na poziomie protokołu SSH, nie na poziomie OS czy agenta, nie nakłada żadnych wymagań na urządzenia.
 
+Wszystko inne — MFA, kontrola dostępu, audit, session replay, session sharing — dzieje się transparentnie w gateway.
+
 **Jeśli mówi SSH — Inside to rozumie.**
 
 ---
@@ -303,6 +305,8 @@ Pełna historia, przeszukiwalna, eksportowalna.
 - Temporal grants
 - Schedule windows
 - Recursive groups
+- **MFA enforcement** - Wymuszanie MFA per grant via Azure AD SAML
+- **MFA per stay** - Pierwsza sesja wymaga MFA, kolejne pomijają (persistent auth)
 
 ### Zarządzanie Sesjami
 - Live monitoring
@@ -367,7 +371,9 @@ SSH-based TUI dla operacji uprzywilejowanych:
 
 ### ✅ v2.0 (Obecna - Luty 2026)
 
-**KILLER FEATURE: Session Multiplexing (Teleport-Style)**
+**KILLER FEATURES:**
+
+**Session Multiplexing (Teleport-Style)**
 - Admin Console (SSH-based TUI)
 - SessionMultiplexer z ring buffer (50KB)
 - Join Session (read-write mode)
@@ -375,12 +381,21 @@ SSH-based TUI dla operacji uprzywilejowanych:
 - Real-time broadcasting
 - Session sharing z natywnymi klientami SSH
 
+**Integracja MFA z Azure AD**
+- Autentykacja Azure AD SAML
+- MFA per stay (pierwsza sesja wymaga MFA, kolejne pomijają)
+- Wymuszanie MFA per grant (flaga grant.mfa_required)
+- MFA challenge z autentykacją w przeglądarce
+- Automatyczna persistence sesji via SSH key fingerprint
+
 ### 🎯 v2.1 (Planowana - Q2 2026)
 
-**MFA Integration z Azure AD**
-- Hybrydowa identyfikacja sesji (SSH key fingerprint, SetEnv, password)
-- Tower: Azure AD OAuth2 integration
-- MFA banner + polling logic
+**Rozszerzenia Admin Console**
+- Opcja 6: Przeglądarka Audit Logs (przeszukiwalna, filtrowalna)
+- Opcja 7: Grant Debug interface (diagnostyka odmów dostępu)
+- Opcja 8: MFA Status checker (widok aktywnych sesji MFA)
+- Odtwarzanie nagrań sesji w admin console
+- Info o sesjach cross-gate (gdy multi-gate wdrożone)
 
 ### 💡 v2.2 (Przyszłość)
 
