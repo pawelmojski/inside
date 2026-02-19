@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 from flask import Flask, render_template, redirect, url_for, flash, request
 from flask_login import LoginManager, login_required, current_user
+from flask_socketio import SocketIO
 from werkzeug.middleware.proxy_fix import ProxyFix
 import pytz
 
@@ -33,6 +34,13 @@ app.config['PREFERRED_URL_SCHEME'] = 'https'
 
 # Apply ProxyFix middleware - Flask is behind nginx reverse proxy
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# Initialize Flask-SocketIO for real-time session streaming
+socketio = SocketIO(app, 
+                    cors_allowed_origins="*",  # TODO: Restrict in production
+                    async_mode='threading',
+                    logger=True,
+                    engineio_logger=False)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -232,6 +240,9 @@ app.register_blueprint(recordings_bp)
 from src.api.policies import policies_api_bp
 app.register_blueprint(policies_api_bp)
 
+# Import WebSocket events (for live session viewing with xterm.js)
+import websocket_events  # Registers @socketio.on() handlers
+
 # Favicon route (prevent 404 errors)
 @app.route('/favicon.ico')
 def favicon():
@@ -248,5 +259,5 @@ def internal_error(error):
     return render_template('errors/500.html'), 500
 
 if __name__ == '__main__':
-    # Development server
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Development server with SocketIO support
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)

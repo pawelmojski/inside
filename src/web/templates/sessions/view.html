@@ -2,6 +2,29 @@
 
 {% block title %}Session Details{% endblock %}
 
+{% block extra_css %}
+<!-- xterm.js CSS for terminal emulation -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+    #xterm-container {
+        display: none; /* Hidden by default, shown when live view starts */
+        background: #000;
+        padding: 10px;
+        border-radius: 5px;
+    }
+    #xterm-terminal {
+        height: 600px;
+        width: 100%;
+    }
+    .terminal-controls {
+        margin-top: 10px;
+        padding: 10px;
+        background: #f8f9fa;
+        border-radius: 5px;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid">
     <div class="d-flex justify-content-between align-items-center mb-4">
@@ -483,7 +506,10 @@
             </h5>
             <div>
                 {% if is_active and session.protocol == 'ssh' %}
-                <button id="toggle-live" class="btn btn-sm btn-success me-2">
+                <button id="toggle-live" 
+                        class="btn btn-sm btn-success me-2"
+                        data-session-id="{{ session.session_id }}"
+                        data-is-active="{{ is_active|lower }}">
                     <i class="bi bi-play-circle"></i> Start Live View
                 </button>
                 {% endif %}
@@ -501,6 +527,25 @@
                         <strong>Error parsing recording:</strong> {{ recording_data.error }}
                     </div>
                 {% else %}
+                    <!-- xterm.js Live Terminal (hidden by default, shown when live view active) -->
+                    <div id="xterm-container" class="mb-4">
+                        <div class="alert alert-success">
+                            <i class="bi bi-broadcast"></i> 
+                            <strong>Live Session View (xterm.js)</strong> - 
+                            Real-time terminal streaming via WebSocket
+                        </div>
+                        <div id="xterm-terminal"></div>
+                        <div class="terminal-controls">
+                            <span class="badge bg-success" id="watch-status">
+                                <i class="bi bi-eye"></i> Watching (Read-Only)
+                            </span>
+                            <span class="text-muted ms-3">
+                                <i class="bi bi-info-circle"></i>
+                                Join mode (read-write) will be available in v2.1
+                            </span>
+                        </div>
+                    </div>
+
                     <div class="mb-3">
                         <span class="badge bg-info me-2">User: {{ recording_data.username }}</span>
                         <span class="badge bg-info me-2">Server: {{ recording_data.server_ip }}</span>
@@ -508,7 +553,7 @@
                         <span class="badge bg-info me-2">Duration: {{ recording_data.total_duration }}</span>
                     </div>
 
-                    <!-- SSH Log Viewer with Terminal Style -->
+                    <!-- SSH Log Viewer with Terminal Style (Legacy JSON viewer)-->
                     <div class="terminal-container">
                         <div class="terminal-header">
                             <span class="terminal-title">SSH Session Transcript - {{ recording_data.username }}@{{ recording_data.server_ip }}</span>
@@ -1319,4 +1364,16 @@ function revokeGrant(policyId) {
     border-left-color: #ffc107;
 }
 </style>
+
+{% endblock %}
+
+{% block extra_js %}
+<!-- Socket.IO for WebSocket communication -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+<!-- xterm.js for terminal emulation -->
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+
+<!-- Live session viewer with xterm.js + WebSocket -->
+<script src="{{ url_for('static', filename='js/xterm_live_viewer.js') }}"></script>
 {% endblock %}
