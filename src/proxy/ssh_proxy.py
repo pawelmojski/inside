@@ -1163,7 +1163,7 @@ class SSHProxyServer:
         self.host_key_path = host_key_path
         self.host_key = self._load_or_generate_host_key()
         self.tower_client = TowerClient(GateConfig())
-        self.heartbeat_interval = 30  # seconds
+        self.heartbeat_interval = 5  # seconds (for fast relay activation)
         self.heartbeat_thread = None
         self.running = False
         # Registry of active connections: session_id -> (client_transport, backend_transport)
@@ -1180,6 +1180,41 @@ class SSHProxyServer:
         self.session_last_activity = {}
         # Session metadata for terminal title: session_id -> {grant_end_time, inactivity_timeout, server_name}
         self.session_metadata = {}
+        
+        # Initialize relay manager if configured (for Tower web live view)
+        self.relay_manager = None
+        self._init_relay_manager()
+    
+    def _init_relay_manager(self):
+        """Initialize relay manager if Tower relay is enabled"""
+        import os
+        
+        relay_enabled = os.getenv('TOWER_RELAY_ENABLED', 'false').lower() == 'true'
+        
+        if not relay_enabled:
+            logger.info("Tower relay disabled (TOWER_RELAY_ENABLED not set)")
+            return
+        
+        tower_url = os.getenv('TOWER_WEBSOCKET_URL')
+        gate_api_key = os.getenv('GATE_API_KEY')
+        gate_name = os.getenv('GATE_NAME', 'unknown')
+        
+        if not tower_url or not gate_api_key:
+            logger.warning("Tower relay enabled but TOWER_WEBSOCKET_URL or GATE_API_KEY not configured")
+            return
+        
+        try:
+            from src.proxy.lazy_relay_manager import LazyRelayManager
+            
+            self.relay_manager = LazyRelayManager(
+                tower_url=tower_url,
+                gate_api_key=gate_api_key,
+                gate_name=gate_name,
+                multiplexer_registry=self.multiplexer_registry
+            )
+            logger.info(f"✓ Tower relay manager initialized (URL: {tower_url})")
+        except Exception as e:
+            logger.error(f"Failed to initialize relay manager: {e}", exc_info=True)
         
     def _load_or_generate_host_key(self):
         """Load or generate SSH host key"""
@@ -3557,11 +3592,23 @@ class SSHProxyServer:
             try:
                 # Gate always uses Tower API (no direct database access)
                 # Tower will track session counts from API calls
-                self.tower_client.heartbeat(active_stays=0, active_sessions=0)
+                # Send list of active session IDs for relay management
+                active_session_ids = list(self.active_connections.keys())
+                response = self.tower_client.heartbeat(
+                    active_stays=0, 
+                    active_sessions=len(active_session_ids),
+                    active_session_ids=active_session_ids
+                )
+                
                 if len(self.active_connections) > 0:
-                    logger.info(f"Heartbeat sent, checking {len(self.active_connections)} active sessions")
+                    logger.debug(f"Heartbeat sent, checking {len(self.active_connections)} active sessions")
                 else:
                     logger.debug(f"Heartbeat sent, no active sessions")
+                
+                # Process relay commands from Tower (if relay manager enabled)
+                relay_sessions = response.get('relay_sessions', [])
+                if relay_sessions and hasattr(self, 'relay_manager') and self.relay_manager:
+                    self.relay_manager.process_relay_commands(relay_sessions)
                 
                 # Check for sessions that should be terminated
                 # 1. Grant expired/cancelled

@@ -41,7 +41,8 @@ socketio.init_app(app,
                   cors_allowed_origins="*",  # TODO: Restrict in production
                   async_mode='threading',
                   logger=True,
-                  engineio_logger=False)
+                  engineio_logger=False,
+                  manage_session=False)  # Use Flask session for authentication
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -242,7 +243,11 @@ from src.api.policies import policies_api_bp
 app.register_blueprint(policies_api_bp)
 
 # Import WebSocket events (for live session viewing with xterm.js)
-import websocket_events  # Registers @socketio.on() handlers
+# Must be imported AFTER socketio.init_app() to register handlers
+from src.web import websocket_events
+
+# Register Socket.IO event handlers (MUST be after init_app)
+websocket_events.register_handlers(socketio)
 
 # Favicon route (prevent 404 errors)
 @app.route('/favicon.ico')

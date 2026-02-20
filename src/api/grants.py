@@ -398,7 +398,6 @@ def check_grant():
         # Check if user has verified MFA challenge (not expired)
         # Challenge must be recent (last 60 seconds) to prevent reuse
         from src.core.database import MFAChallenge
-        from datetime import datetime, timedelta
         
         # Phase 2: challenge.grant_id may be NULL, so check by user_id and gate_id only
         recent_verified_challenge = db.query(MFAChallenge).filter(

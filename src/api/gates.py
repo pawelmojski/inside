@@ -16,18 +16,19 @@ gates_bp = Blueprint('gates', __name__, url_prefix='/api/v1/gates')
 def heartbeat():
     """Gate sends heartbeat to report it's alive.
     
-    Gate should call this every 30 seconds.
-    Tower marks gate as offline if no heartbeat for 2 minutes.
+    Gate should call this every 5 seconds.
+    Tower marks gate as offline if no heartbeat for 30 seconds.
     
     Note: Gates in maintenance mode (in_maintenance=True) can still send heartbeats.
           Only is_active=False (compromised/disabled) gates are blocked.
     
     Request JSON:
         {
-            "version": "1.9.0",           # Gate software version
-            "hostname": "jumphost-01",    # Optional: update hostname
-            "active_stays": 5,            # Optional: number of active stays
-            "active_sessions": 8          # Optional: number of active sessions
+            "version": "1.9.0",              # Gate software version
+            "hostname": "jumphost-01",       # Optional: update hostname
+            "active_stays": 5,               # Optional: number of active stays
+            "active_sessions": 8,            # Optional: number of active sessions
+            "active_session_ids": ["abc123", "def456"]  # NEW: List of active session IDs
         }
     
     Response:
@@ -36,7 +37,14 @@ def heartbeat():
             "gate_name": "gate-localhost",
             "status": "online",
             "last_heartbeat": "2026-01-07T14:30:00",
-            "message": "Heartbeat received"
+            "message": "Heartbeat received",
+            "relay_sessions": [              # NEW: Sessions to relay to Tower
+                {
+                    "session_id": "abc123",
+                    "action": "start",       # or "stop"
+                    "watchers_count": 2
+                }
+            ]
         }
     """
     gate = get_current_gate()
@@ -48,6 +56,7 @@ def heartbeat():
     hostname = data.get('hostname')
     active_stays = data.get('active_stays')
     active_sessions = data.get('active_sessions')
+    active_session_ids = data.get('active_session_ids', [])
     
     # Update gate
     now = datetime.utcnow()
@@ -63,6 +72,16 @@ def heartbeat():
     db.commit()
     db.refresh(gate)
     
+    # NEW: Check which sessions from this gate need relay (browser watchers)
+    relay_sessions = []
+    try:
+        # Import here to avoid circular dependency
+        from src.web.relay_tracking import get_relay_requests_for_gate
+        relay_sessions = get_relay_requests_for_gate(gate.name, active_session_ids)
+    except Exception as e:
+        # If relay tracking not available (e.g., Flask not running), just skip
+        pass
+    
     return jsonify({
         'gate_id': gate.id,
         'gate_name': gate.name,
@@ -71,7 +90,8 @@ def heartbeat():
         'version': gate.version,
         'message': 'Heartbeat received',
         'active_stays': active_stays,
-        'active_sessions': active_sessions
+        'active_sessions': active_sessions,
+        'relay_sessions': relay_sessions  # NEW
     }), 200
 
 

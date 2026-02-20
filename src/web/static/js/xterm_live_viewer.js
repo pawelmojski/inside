@@ -118,9 +118,28 @@ function initLiveSessionViewer() {
         socket.on('watch_started', function(data) {
             console.log('[WebSocket] Watch started:', data);
             terminal.writeln('\x1b[1;36m' + data.message + '\x1b[0m');
-            terminal.writeln('\x1b[2mOwner: ' + data.owner + ' | Server: ' + data.server + '\x1b[0m');
+            if (data.gate) {
+                terminal.writeln('\x1b[2mGate: ' + data.gate + ' | Owner: ' + data.owner + ' | Server: ' + data.server + '\x1b[0m');
+            } else {
+                terminal.writeln('\x1b[2mOwner: ' + data.owner + ' | Server: ' + data.server + '\x1b[0m');
+            }
             terminal.writeln('');
             terminal.writeln('\x1b[2m--- Session History (50KB buffer) ---\x1b[0m');
+            terminal.writeln('');
+        });
+        
+        socket.on('relay_pending', function(data) {
+            // Session is on gate - waiting for relay activation (~5s)
+            console.log('[WebSocket] Relay pending:', data);
+            terminal.writeln('\x1b[1;33m⏳ ' + data.message + '\x1b[0m');
+            terminal.writeln('\x1b[2mGate: ' + data.gate_name + '\x1b[0m');
+            terminal.writeln('');
+        });
+        
+        socket.on('relay_activated', function(data) {
+            // Gate relay now active - connection imminent
+            console.log('[WebSocket] Relay activated:', data);
+            terminal.writeln('\x1b[1;32m✓ ' + data.message + '\x1b[0m');
             terminal.writeln('');
         });
         
@@ -153,16 +172,34 @@ function initLiveSessionViewer() {
             terminal.writeln('');
             terminal.writeln('\x1b[1;31m✗ Error: ' + data.message + '\x1b[0m');
             
-            // If fallback to JSON polling suggested (legacy sessions without multiplexer)
-            if (data.fallback === 'json_polling') {
+            // Session running on remote gate (distributed architecture)
+            if (data.reason === 'distributed_architecture') {
+                terminal.writeln('');
+                terminal.writeln('\x1b[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+                terminal.writeln('\x1b[1;36mℹ  How to watch this session:\x1b[0m');
+                terminal.writeln('');
+                terminal.writeln('\x1b[37m  This session is running on a remote gate.\x1b[0m');
+                terminal.writeln('\x1b[37m  Web live view only works for Tower sessions.\x1b[0m');
+                terminal.writeln('');
+                terminal.writeln('\x1b[1;32m  Use SSH admin console to watch:\x1b[0m');
+                terminal.writeln('\x1b[37m    $ ssh admin@jumphost\x1b[0m');
+                terminal.writeln('');
+                terminal.writeln('\x1b[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+                setTimeout(function() {
+                    stopLiveView();
+                }, 8000);  // 8s to read message
+            }
+            // Legacy session (no multiplexer support)
+            else if (data.fallback === 'json_polling') {
                 terminal.writeln('');
                 terminal.writeln('\x1b[33mThis is a legacy session without multiplexer support.\x1b[0m');
                 terminal.writeln('\x1b[33mPlease refresh the page to view the recording.\x1b[0m');
                 setTimeout(function() {
                     stopLiveView();
                 }, 3000);
-            } else {
-                // Stop live view on error
+            }
+            // Other errors
+            else {
                 setTimeout(function() {
                     stopLiveView();
                 }, 3000);
