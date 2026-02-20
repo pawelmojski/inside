@@ -78,10 +78,19 @@ function initLiveSessionViewer() {
                 brightWhite: '#ffffff'
             },
             // Watch-only mode: disable input
-            disableStdin: true
+            disableStdin: true,
+            rows: 40,
+            cols: 120
         });
         
+        // Create FitAddon to auto-resize terminal to container
+        const fitAddon = new FitAddon.FitAddon();
+        terminal.loadAddon(fitAddon);
+        
         terminal.open(document.getElementById('xterm-terminal'));
+        
+        // Fit terminal to container
+        fitAddon.fit();
         
         // Show banner
         terminal.writeln('\x1b[1;32m========================================\x1b[0m');
