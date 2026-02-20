@@ -1130,7 +1130,12 @@ policy.port_forwarding_allowed = True
 ### SSH Proxy ✓
 - [x] Password authentication
 - [x] Public key authentication
-- [x] SSH agent forwarding (-A flag, tracked in session metadata) ⭐
+- [x] **SSH Agent Forwarding (-A flag)** ⭐ NEW (v2.1+) 🔥
+  - [x] Multi-hop agent forwarding: laptop → gate → backend → remote
+  - [x] Protocol-level relay via custom Paramiko handlers
+  - [x] Full support for authentication, git operations, nested SSH
+  - [x] Transparent channel cleanup on session end
+  - [x] Tracked in session metadata (agent_forwarding: true)
 - [x] PTY forwarding (term type, dimensions)
 - [x] Shell sessions
 - [x] Exec requests (SCP, tracked in session metadata) ⭐

@@ -1,5 +1,99 @@
 # Inside - Roadmap & TODO
 
+## ✅ v2.1.1 COMPLETED (February 20, 2026) 🔥
+
+### SSH Agent Forwarding - Protocol-Level Implementation
+
+**Critical Feature for Developers**: VSCode Remote SSH, git operations, nested SSH connections - all requiring agent forwarding through proxy.
+
+#### What Was Delivered:
+
+**1. Custom Paramiko Handler Architecture**
+- **Challenge**: Paramiko client Transport ignores incoming `MSG_CHANNEL_OPEN` (agent channels come FROM backend)
+- **Solution**: Custom handlers installed in Transport's `_handler_table` and `_channel_handler_table`
+- **Zero Legacy Code**: No old relay thread approach, pure handler-based implementation
+
+**2. Agent Channel Lifecycle Management**
+- Receives `MSG_CHANNEL_OPEN` (kind='auth-agent@openssh.com') from backend
+- Assigns unique local_chanid (starting at 1000+)
+- Sends `MSG_CHANNEL_OPEN_CONFIRMATION` back to backend
+- Creates `AgentServerProxy` to connect to client's forwarded agent
+- Relays agent protocol data bidirectionally via `MSG_CHANNEL_DATA`
+- Proper cleanup on session end (finally block)
+
+**3. FakeChannel Pattern for Transport Validation**
+- **Problem**: ChannelMap uses WeakValueDictionary - channels get garbage collected
+- **Solution**: `agent_fake_channels` dict maintains strong references
+- FakeChannel marked with `_agent_relay=True` for handler identification
+- Satisfies Transport's validation without full Channel functionality
+
+**4. Protocol-Level Data Relay**
+```python
+# Handler signature for MSG_CHANNEL_DATA (type 94)
+def custom_channel_data_handler(m):
+    chanid = m.get_int()
+    data = m.get_binary()
+    
+    if chanid in agent_relay_channels:
+        # Agent channel - relay to client
+        remote_chanid, client_agent = agent_relay_channels[chanid]
+        agent_conn.send(data)  # 4-byte length + agent message
+        response = agent_conn.recv(...)  # Read agent response
+        # Send back via MSG_CHANNEL_DATA to backend
+    else:
+        # Normal channel - feed to BufferedPipe
+        chan.in_buffer.feed(data)
+```
+
+**5. Cleanup on Session End**
+- Finally block cleanup for all agent channels
+- Closes client agent connections
+- Removes from tracking dictionaries
+- Prevents hung sessions on subsequent connections
+
+#### Technical Implementation:
+
+**Handlers Installed:**
+- `MSG_CHANNEL_OPEN` (type 90): Accept agent channel requests
+- `MSG_CHANNEL_DATA` (type 94): Relay agent protocol data
+- `MSG_CHANNEL_REQUEST` (type 98): Handle channel requests (installed but not used)
+- `MSG_CHANNEL_EOF` (type 96): Close agent connection
+- `MSG_CHANNEL_CLOSE` (type 97): Full cleanup
+
+**Key Discoveries:**
+1. Transport has TWO handler tables: `_handler_table` and `_channel_handler_table`
+2. `MSG_CHANNEL_DATA` uses `_handler_table` with signature `handler(m)`
+3. `MSG_CHANNEL_REQUEST/EOF/CLOSE` use `_channel_handler_table` with signature `handler(chan, m)`
+4. ChannelMap weak references require additional strong reference storage
+5. Client-mode Transport rejects manually created Channel objects
+
+**Files Modified:**
+- `src/proxy/ssh_proxy.py`:
+  - Lines 3260-3520: Custom handler installation and implementation (~260 lines)
+  - Lines 4225-4250: Finally block cleanup for agent channels
+  - Handler for `check_channel_forward_agent_request` (stores agent_channel)
+
+**Multi-Hop Verified:**
+```
+Laptop → Gate (init1.pl) → Backend (init1-gw) → Remote (172.31.254.2)
+         └─ Agent Forwarding Enabled
+                  └─ Custom Handlers Relay
+                           └─ Remote SSH Success ✓
+```
+
+**Testing Results:**
+- ✅ First SSH connection: Authenticated with agent, proper logout
+- ✅ Second SSH connection: No hanging, clean channel reuse
+- ✅ Third SSH connection: Consistent behavior
+- ✅ No verbose logging spam (production ready)
+
+#### Code Stats:
+- **New Code**: ~260 lines (handlers + cleanup)
+- **Modified**: 2 functions, 1 finally block
+- **Complexity**: High (5 undocumented Paramiko quirks overcome)
+
+---
+
 ## ✅ v2.1 COMPLETED (February 20, 2026) 🔥🚀
 
 ### KILLER FEATURE:

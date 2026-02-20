@@ -1082,7 +1082,7 @@ class SSHProxyHandler(paramiko.ServerInterface):
     
     def check_channel_forward_agent_request(self, channel):
         """Allow agent forwarding and setup handler"""
-        logger.debug("Client requested agent forwarding")
+        logger.debug(f"Client requested agent forwarding on channel {channel.get_id()}")
         # Store the channel for later use
         self.agent_channel = channel
         return True
@@ -1224,13 +1224,26 @@ class SSHProxyHandler(paramiko.ServerInterface):
         # Forward signal to backend if connected
         if self.backend_channel and not self.backend_channel.closed:
             try:
-                # Paramiko doesn't have direct signal support, but we can send break
-                # For now, just log it - signals are typically handled at protocol level
-                logger.info(f"Signal {sig_name} forwarded to backend session")
+                # Use Paramiko's internal request() method to send signal
+                # SSH protocol: RFC 4254 Section 6.9 (signal request)
+                from paramiko.common import MSG_CHANNEL_REQUEST
+                from paramiko import Message
+                
+                # Build signal request message
+                m = Message()
+                m.add_string('signal')
+                m.add_boolean(False)  # want_reply=False
+                m.add_string(sig_name)
+                
+                # Send via low-level transport request
+                self.backend_channel.transport._send_user_message(self.backend_channel, MSG_CHANNEL_REQUEST, m)
+                
+                logger.info(f"Signal {sig_name} sent to backend")
                 return True
             except Exception as e:
-                logger.error(f"Failed to forward signal {sig_name}: {e}")
-                return False
+                logger.warning(f"Failed to forward signal {sig_name}: {e}")
+                # Still return True - signal request accepted, even if forward failed
+                return True
         else:
             logger.debug(f"Backend channel not available for signal {sig_name}")
             return True
@@ -1937,6 +1950,199 @@ class SSHProxyServer:
             
         except Exception as e:
             logger.error(f"Cascaded reverse forward error: {e}", exc_info=True)
+    
+    def _relay_agent_requests(self, client_transport, backend_transport, server_handler):
+        """Relay SSH agent requests from backend to client's forwarded agent
+        
+        This enables agent forwarding chain: client → gate → backend
+        Backend can use client's SSH agent for authentication (git, ssh, etc)
+        
+        Args:
+            client_transport: SSH transport to client (has forwarded agent)
+            backend_transport: SSH transport to backend (wants to use agent)
+            server_handler: Handler with agent_channel reference
+        """
+        try:
+            logger.debug("Agent relay handler started - waiting for backend agent channels")
+            
+            # Create AgentServerProxy to access client's forwarded agent
+            from paramiko.agent import AgentServerProxy
+            client_agent = AgentServerProxy(client_transport)
+            
+            try:
+                client_agent.connect()
+                logger.info("✓ Connected to client's forwarded agent - ready to relay")
+                
+                # Test client agent
+                try:
+                    keys = client_agent.get_keys()
+                    logger.info(f"✓ Client agent has {len(keys)} keys available")
+                except Exception as e:
+                    logger.warning(f"Cannot list client agent keys: {e}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to connect to client agent: {e}")
+                return
+            
+            # Accept agent channels from backend and relay to client agent
+            logger.debug(f"Accepting channels on backend transport (active: {backend_transport.is_active()})")
+            logger.debug(f"Relay thread waiting on backend_transport.accept() - will accept ANY channel type")
+            channel_count = 0
+            accept_attempts = 0
+            
+            while backend_transport.is_active() and client_transport.is_active():
+                try:
+                    accept_attempts += 1
+                    if accept_attempts % 10 == 0:  # Log every 10 seconds
+                        logger.debug(f"Still waiting for backend agent channels (attempt #{accept_attempts})")
+                    
+                    # Accept new channel from backend with timeout
+                    backend_channel = backend_transport.accept(timeout=1.0)
+                    
+                    if backend_channel is None:
+                        continue
+                    
+                    channel_count += 1
+                    # Agent channels should be "auth-agent@openssh.com" type
+                    channel_type = getattr(backend_channel, 'origin', 'unknown')
+                    channel_kind = getattr(backend_channel, 'kind', 'unknown')
+                    logger.info(f"✓ Accepted agent channel #{channel_count} from backend (type: {channel_type}, kind: {channel_kind}, id: {backend_channel.get_id()})")
+                    
+                    # Start relay thread for this agent channel
+                    relay_thread = threading.Thread(
+                        target=self._relay_agent_channel,
+                        args=(backend_channel, client_agent),
+                        daemon=True,
+                        name=f"AgentChannelRelay-{backend_channel.get_id()}"
+                    )
+                    relay_thread.start()
+                    logger.debug(f"Started relay for agent channel #{channel_count}")
+                    
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        logger.debug(f"Agent relay accept error: {e}")
+            
+            logger.info(f"Agent relay handler exiting (relayed {channel_count} channels)")
+            
+            # Cleanup
+            try:
+                client_agent.close()
+            except:
+                pass
+                
+        except Exception as e:
+            logger.error(f"Agent relay error: {e}", exc_info=True)
+    
+    def _relay_agent_channel(self, backend_channel, client_agent):
+        """Relay a single agent channel from backend to client agent
+        
+        Args:
+            backend_channel: Channel from backend requesting agent operations
+            client_agent: AgentServerProxy connected to client's forwarded agent
+        """
+        try:
+            import struct
+            logger.debug(f"_relay_agent_channel START for channel {backend_channel.get_id()}")
+            logger.debug(f"Channel status: closed={backend_channel.closed}, eof_received={backend_channel.eof_received}, eof_sent={backend_channel.eof_sent}")
+            logger.debug(f"Channel active={backend_channel.active}, transport_active={backend_channel.transport.is_active()}")
+            
+            # Forward data bidirectionally between backend channel and client agent
+            # Backend sends SSH agent protocol messages, we relay to client agent
+            logger.debug(f"Entering relay loop, using in_buffer.read()...")
+            logger.debug(f"in_buffer type: {type(backend_channel.in_buffer)}")
+            logger.debug(f"in_buffer methods: {[m for m in dir(backend_channel.in_buffer) if not m.startswith('_')]}")
+            
+            loop_count = 0
+            while not backend_channel.closed:
+                loop_count += 1
+                if loop_count % 100 == 1:
+                    logger.debug(f"Relay loop iteration {loop_count}")
+                
+                try:
+                    # Read from BufferedPipe with timeout
+                    # BufferedPipe.read() raises PipeTimeout exception on timeout
+                    from paramiko.buffered_pipe import PipeTimeout
+                    
+                    try:
+                        length_bytes = backend_channel.in_buffer.read(4, timeout=0.1)
+                    except PipeTimeout:
+                        # Timeout waiting for data - continue
+                        continue
+                    
+                    if not length_bytes or len(length_bytes) == 0:
+                        # EOF or closed
+                        logger.debug("Channel closed (empty read)")
+                        break
+                    
+                    logger.debug(f"Read {len(length_bytes)} bytes from buffer")
+                    
+                    if len(length_bytes) < 4:
+                        logger.warning(f"Incomplete length header: {len(length_bytes)} bytes")
+                        break
+                    
+                    # Parse message length
+                    msg_length = struct.unpack('>I', length_bytes)[0]
+                    logger.debug(f"Agent message length: {msg_length} bytes")
+                    
+                    if msg_length > 1024 * 1024:  # 1MB sanity check
+                        logger.error(f"Agent message too large: {msg_length} bytes")
+                        break
+                    
+                    # Read full message
+                    message = backend_channel.in_buffer.read(msg_length, timeout=1.0)
+                    if len(message) != msg_length:
+                        logger.warning(f"Incomplete agent message: {len(message)}/{msg_length}")
+                        break
+                    
+                    # Forward to client agent
+                    full_request = length_bytes + message
+                    logger.debug(f"Relaying {len(full_request)} bytes to client agent")
+                    
+                    # Send to client agent and get response
+                    agent_conn = getattr(client_agent, '_conn', None)
+                    if agent_conn:
+                        agent_conn.send(full_request)
+                        logger.debug(f"Sent to client agent, waiting for response...")
+                        
+                        # Read response from client agent
+                        resp_length_bytes = agent_conn.recv(4)
+                        if len(resp_length_bytes) == 4:
+                            resp_length = struct.unpack('>I', resp_length_bytes)[0]
+                            
+                            response = b''
+                            while len(response) < resp_length:
+                                chunk = agent_conn.recv(resp_length - len(response))
+                                if len(chunk) == 0:
+                                    break
+                                response += chunk
+                            
+                            # Send response back to backend
+                            full_response = resp_length_bytes + response
+                            backend_channel.send(full_response)
+                            logger.debug(f"Relayed agent response: {resp_length} bytes")
+                        else:
+                            logger.error("Failed to read agent response length")
+                            break
+                    else:
+                        logger.error("Client agent connection not available")
+                        break
+                
+                except Exception as e:
+                    logger.error(f"Agent channel relay error: {e}")
+                    logger.error(f"Exception type: {type(e).__name__}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    break
+            
+            logger.debug(f"Agent channel relay ended for {backend_channel.get_id()}")
+            
+        except Exception as e:
+            logger.error(f"Agent channel relay exception: {e}", exc_info=True)
+        finally:
+            try:
+                backend_channel.close()
+            except:
+                pass
     
     def handle_reverse_forward_on_backend_ip(self, client_transport, backend_ip, address, port):
         """Open socket listener on backend's IP address from pool
@@ -3053,6 +3259,266 @@ class SSHProxyServer:
             backend_transport = paramiko.Transport(backend_socket)
             backend_transport.start_client()
             
+            # CRITICAL: Install custom handler for incoming MSG_CHANNEL_OPEN from backend
+            # Paramiko client transport normally ignores these, but we need them for agent forwarding
+            if server_handler.agent_channel:
+                logger.info("Agent forwarding enabled - installing custom handlers")
+                
+                # Save reference to client agent for handler
+                agent_handler_client_transport = transport
+                agent_handler_backend_transport = backend_transport
+                agent_handler_server_handler = server_handler
+                agent_relay_channels = {}  # Maps local_chanid -> (remote_chanid, client_agent)
+                agent_fake_channels = {}  # Strong references to FakeChannel objects (ChannelMap uses weak refs!)
+                
+                # Save original handler
+                original_handler = backend_transport._handler_table.get(90, None)  # MSG_CHANNEL_OPEN = 90
+                
+                def custom_channel_open_handler(m):
+                    """Handle incoming MSG_CHANNEL_OPEN for auth-agent channels"""
+                    from paramiko import Message, Channel
+                    
+                    # SSH protocol constants (RFC 4254)
+                    MSG_CHANNEL_OPEN_CONFIRMATION = 91
+                    MSG_CHANNEL_OPEN_FAILURE = 92
+                    
+                    kind = m.get_text()
+                    chanid = m.get_int()
+                    initial_window_size = m.get_int()
+                    max_packet_size = m.get_int()
+                    
+                    if kind == 'auth-agent@openssh.com':
+                        try:
+                            # DON'T create a Channel object - just track mapping
+                            # We'll handle all communication in MSG_CHANNEL_DATA handler
+                            
+                            # Use a simple local channel ID (just increment)
+                            if not hasattr(agent_handler_backend_transport, '_agent_local_chanid'):
+                                agent_handler_backend_transport._agent_local_chanid = 1000
+                            local_chanid = agent_handler_backend_transport._agent_local_chanid
+                            agent_handler_backend_transport._agent_local_chanid += 1
+                            
+                            # Send MSG_CHANNEL_OPEN_CONFIRMATION
+                            confirmation = Message()
+                            confirmation.add_byte(bytes([MSG_CHANNEL_OPEN_CONFIRMATION]))
+                            confirmation.add_int(chanid)  # recipient channel (backend's ID)
+                            confirmation.add_int(local_chanid)  # sender channel (our ID)
+                            confirmation.add_int(65536)  # initial window size
+                            confirmation.add_int(32768)  # maximum packet size
+                            
+                            agent_handler_backend_transport._send_message(confirmation)
+                            
+                            # Connect to client agent for MSG_CHANNEL_DATA handler
+                            from paramiko.agent import AgentServerProxy
+                            client_agent = AgentServerProxy(agent_handler_client_transport)
+                            client_agent.connect()
+                            
+                            # Store channel mapping for MSG_CHANNEL_DATA handler
+                            # MSG_CHANNEL_DATA handler will relay all data, no need for separate thread
+                            agent_relay_channels[local_chanid] = (chanid, client_agent)
+                            
+                            # CRITICAL: Register a FAKE Channel in _channels so Transport doesn't error on MSG_CHANNEL_REQUEST
+                            # Transport checks self._channels.get(chanid) before calling _channel_handler_table[98]
+                            # We create a minimal fake object that has a chanid attribute
+                            class FakeChannel:
+                                def __init__(self, chanid):
+                                    self.chanid = chanid
+                                    self._agent_relay = True  # Mark as agent relay channel
+                            
+                            fake_channel = FakeChannel(local_chanid)
+                            
+                            # CRITICAL: Keep strong reference! ChannelMap uses weak references
+                            # Without this, GC will collect fake_channel and Transport won't find it
+                            agent_fake_channels[local_chanid] = fake_channel
+                            
+                            agent_handler_backend_transport._channels.put(local_chanid, fake_channel)
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to handle agent channel: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            
+                            # Send failure (MSG_CHANNEL_OPEN_FAILURE = 92)
+                            failure = Message()
+                            failure.add_byte(bytes([92]))  # MSG_CHANNEL_OPEN_FAILURE
+                            failure.add_int(chanid)
+                            failure.add_int(1)  # SSH_OPEN_ADMINISTRATIVELY_PROHIBITED
+                            failure.add_string('Failed to setup agent channel')
+                            failure.add_string('')
+                            agent_handler_backend_transport._send_message(failure)
+                        
+                        return
+                    
+                    # For other types, use original handler if exists
+                    if original_handler:
+                        return original_handler(m)
+                
+                # Install custom handler
+                backend_transport._handler_table[90] = custom_channel_open_handler
+                
+                # Install MSG_CHANNEL_DATA handler (type 94) to intercept agent data ONLY
+                def custom_channel_data_handler(m):
+                    """Handle MSG_CHANNEL_DATA for agent channels, pass through others"""
+                    # Read chanid and data
+                    chanid = m.get_int()  # recipient channel (our local ID)
+                    data = m.get_binary()
+                    
+                    # Check if this is an agent relay channel
+                    if chanid in agent_relay_channels:
+                        # Agent channel - handle manually
+                        remote_chanid, client_agent = agent_relay_channels[chanid]
+                        logger.debug(f"Agent relay: {len(data)} bytes on channel {chanid}")
+                        
+                        try:
+                            # Forward data to client agent
+                            agent_conn = getattr(client_agent, '_conn', None)
+                            if agent_conn:
+                                agent_conn.send(data)
+                                logger.debug(f"Forwarded {len(data)} bytes to client agent")
+                                
+                                # Read response from client agent
+                                # Agent protocol: 4-byte length + response
+                                import struct
+                                resp_length_bytes = agent_conn.recv(4)
+                                if len(resp_length_bytes) == 4:
+                                    resp_length = struct.unpack('>I', resp_length_bytes)[0]
+                                    response = b''
+                                    while len(response) < resp_length:
+                                        chunk = agent_conn.recv(resp_length - len(response))
+                                        if not chunk:
+                                            break
+                                        response += chunk
+                                    
+                                    # Send response back to backend via MSG_CHANNEL_DATA
+                                    full_response = resp_length_bytes + response
+                                    from paramiko.common import MSG_CHANNEL_DATA
+                                    msg = Message()
+                                    msg.add_byte(bytes([MSG_CHANNEL_DATA]))
+                                    msg.add_int(remote_chanid)  # recipient (backend's channel ID)
+                                    msg.add_string(full_response)
+                                    agent_handler_backend_transport._send_message(msg)
+                                    logger.debug(f"Sent {len(full_response)} byte response to backend")
+                        except Exception as e:
+                            logger.error(f"Error relaying agent data: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                    else:
+                        # NOT an agent channel - feed data to channel's BufferedPipe
+                        # This is what Transport normally does in its MSG_CHANNEL_DATA handler
+                        try:
+                            chan = agent_handler_backend_transport._channels.get(chanid)
+                            if chan:
+                                chan.in_buffer.feed(data)
+                        except Exception as e:
+                            logger.error(f"Error feeding data to non-agent channel {chanid}: {e}")
+                
+                backend_transport._handler_table[94] = custom_channel_data_handler
+                
+                # MSG_CHANNEL_REQUEST (type 98) uses _channel_handler_table, NOT _handler_table!
+                # Import constant
+                from paramiko.common import MSG_CHANNEL_REQUEST
+                
+                # Save original _channel_handler_table[98] handler
+                original_channel_request_handler_func = backend_transport._channel_handler_table.get(98)
+                
+                def custom_channel_request_for_agent(chan, m):
+                    """Handle MSG_CHANNEL_REQUEST - signature (chan, m) for _channel_handler_table"""
+                    # Check if this is our fake agent relay channel
+                    if hasattr(chan, '_agent_relay') and chan._agent_relay:
+                        # Agent relay channel - read request details
+                        request_type = m.get_text()
+                        want_reply = m.get_boolean()
+                        
+                        # Always respond with success for agent channels
+                        if want_reply:
+                            from paramiko.common import MSG_CHANNEL_SUCCESS
+                            msg = Message()
+                            msg.add_byte(bytes([MSG_CHANNEL_SUCCESS]))
+                            # Get backend's remote channel ID
+                            remote_chanid, _ = agent_relay_channels[chan.chanid]
+                            msg.add_int(remote_chanid)
+                            agent_handler_backend_transport._send_message(msg)
+                        return  # Done
+                    
+                    # Normal channel - call original handler
+                    if original_channel_request_handler_func:
+                        return original_channel_request_handler_func(chan, m)
+                
+                backend_transport._channel_handler_table[98] = custom_channel_request_for_agent
+                
+                # Also need MSG_CHANNEL_EOF (96) and MSG_CHANNEL_CLOSE (97) handlers
+                from paramiko.common import MSG_CHANNEL_EOF, MSG_CHANNEL_CLOSE
+                
+                original_channel_eof_handler = backend_transport._channel_handler_table.get(96)
+                
+                def custom_channel_eof_for_agent(chan, m):
+                    """Handle MSG_CHANNEL_EOF - backend signals no more data"""
+                    if hasattr(chan, '_agent_relay') and chan._agent_relay:
+                        # Close connection to client agent
+                        if chan.chanid in agent_relay_channels:
+                            remote_chanid, client_agent = agent_relay_channels[chan.chanid]
+                            try:
+                                agent_conn = getattr(client_agent, '_conn', None)
+                                if agent_conn:
+                                    agent_conn.close()
+                            except Exception as e:
+                                logger.warning(f"Error closing client agent: {e}")
+                        
+                        # Send EOF back to backend
+                        eof_msg = Message()
+                        eof_msg.add_byte(bytes([MSG_CHANNEL_EOF]))
+                        remote_chanid, _ = agent_relay_channels.get(chan.chanid, (0, None))
+                        eof_msg.add_int(remote_chanid)
+                        agent_handler_backend_transport._send_message(eof_msg)
+                        return
+                    
+                    # Normal channel
+                    if original_channel_eof_handler:
+                        return original_channel_eof_handler(chan, m)
+                
+                original_channel_close_handler = backend_transport._channel_handler_table.get(97)
+                
+                def custom_channel_close_for_agent(chan, m):
+                    """Handle MSG_CHANNEL_CLOSE - backend closes channel"""
+                    if hasattr(chan, '_agent_relay') and chan._agent_relay:
+                        # Clean up
+                        if chan.chanid in agent_relay_channels:
+                            remote_chanid, client_agent = agent_relay_channels[chan.chanid]
+                            try:
+                                agent_conn = getattr(client_agent, '_conn', None)
+                                if agent_conn:
+                                    agent_conn.close()
+                            except:
+                                pass
+                            
+                            # Remove from tracking
+                            del agent_relay_channels[chan.chanid]
+                            del agent_fake_channels[chan.chanid]
+                            
+                            # Send CLOSE back to backend
+                            close_msg = Message()
+                            close_msg.add_byte(bytes([MSG_CHANNEL_CLOSE]))
+                            close_msg.add_int(remote_chanid)
+                            agent_handler_backend_transport._send_message(close_msg)
+                        return
+                    
+                    # Normal channel
+                    if original_channel_close_handler:
+                        return original_channel_close_handler(chan, m)
+                
+                backend_transport._channel_handler_table[96] = custom_channel_eof_for_agent
+                backend_transport._channel_handler_table[97] = custom_channel_close_for_agent
+                
+                # Solution: We need to intercept at a lower level - wrap Transport._log method
+                # to suppress the error, or we accept that backend will get an error but relay still works
+            
+            # Setup agent forwarding at transport level if client requested it
+            # This must be done BEFORE opening any channels
+            if server_handler.agent_channel:
+                logger.debug("Requesting agent forwarding from backend at transport level")
+                # We'll handle agent forwarding manually through our relay thread
+                # Backend needs to be told that agent is available
+            
             # Note: Agent will be created when needed (after channel requests are processed)
             
             # Authenticate to backend using client credentials
@@ -3212,6 +3678,37 @@ class SSHProxyServer:
             # Open backend channel
             backend_channel = backend_transport.open_session()
             
+            # CRITICAL: Request agent forwarding IMMEDIATELY after opening channel
+            # This MUST be done BEFORE get_pty() and invoke_shell()
+            # Backend SSH daemon needs this to set up SSH_AUTH_SOCK environment
+            if server_handler.agent_channel:
+                logger.debug("Requesting agent forwarding from backend (before PTY)")
+                try:
+                    # Use struct to properly encode the message
+                    import struct
+                    from paramiko.common import MSG_CHANNEL_REQUEST
+                    
+                    # Build MSG_CHANNEL_REQUEST manually with proper byte encoding
+                    # Format: byte(type) + uint32(recipient_channel) + string(request_type) + boolean(want_reply)
+                    req_type = b'auth-agent-req@openssh.com'
+                    
+                    # Pack the message according to SSH protocol
+                    packet = struct.pack('B', MSG_CHANNEL_REQUEST)  # Message type as byte
+                    packet += struct.pack('>I', backend_channel.remote_chanid)  # Channel ID as uint32
+                    packet += struct.pack('>I', len(req_type)) + req_type  # String with length prefix
+                    packet += struct.pack('B', 0)  # want_reply = False
+                    
+                    # Send raw packet
+                    from paramiko import Message
+                    msg = Message(packet)
+                    backend_channel.transport._send_message(msg)
+                    
+                    logger.debug("Sent auth-agent-req@openssh.com to backend (before PTY)")
+                except Exception as e:
+                    logger.warning(f"Failed to send agent request: {e}")
+                    import traceback
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+            
             # Store backend references in handler for window resize/signals
             server_handler.backend_channel = backend_channel
             server_handler.backend_transport = backend_transport
@@ -3319,7 +3816,46 @@ class SSHProxyServer:
                     logger.info(f"SFTP subsystem started - transfers will be logged")
             else:
                 # For interactive shell sessions
+                # First, try to request agent forwarding from backend BEFORE invoke_shell
+                if server_handler.agent_channel:
+                    try:
+                        logger.debug("Attempting to request agent forwarding from backend channel")
+                        # Try to send auth-agent-req@openssh.com as a channel request
+                        # We need to do this through the event system
+                        backend_channel.event_ready()
+                        logger.debug("Channel event ready")
+                    except Exception as e:
+                        logger.debug(f"Could not setup agent event: {e}")
+                
+                logger.info(f"🔧 About to invoke shell on backend channel")
                 backend_channel.invoke_shell()
+                logger.info(f"🔧 Shell invoked successfully on backend")
+            
+            # Setup agent forwarding chain (client → gate → backend) AFTER invoke_shell
+            # This must be done after channel is established but before any commands
+            logger.debug(f"Checking agent forwarding: server_handler.agent_channel = {server_handler.agent_channel}")
+            if server_handler.agent_channel:
+                logger.debug(f"Setting up agent forwarding chain (client → gate → backend)")
+                try:
+                    # Start agent relay thread
+                    # This will accept "auth-agent@openssh.com" channels from backend
+                    # and relay SSH agent protocol to client's forwarded agent
+                    agent_relay_thread = threading.Thread(
+                        target=self._relay_agent_requests,
+                        args=(transport, backend_transport, server_handler),
+                        daemon=True,
+                        name=f"AgentRelay-{session_id}"
+                    )
+                    agent_relay_thread.start()
+                    logger.debug("Agent forwarding relay thread started - waiting for backend to open agent channels")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to setup agent forwarding: {e}")
+                    import traceback
+                    logger.warning(f"Traceback: {traceback.format_exc()}")
+                    # Don't fail the session if agent relay fails
+            else:
+                logger.debug(f"Agent forwarding NOT requested by client (agent_channel is None)")
             
             # Determine if we should record this session
             # SCP/SFTP sessions should NOT be recorded (only tracked in SessionTransfer)
@@ -3688,6 +4224,22 @@ class SSHProxyServer:
                     tower_client.cancel_mfa_challenge(server_handler.pending_mfa_token)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup MFA challenge: {e}")
+            
+            # Clean up agent relay channels if any
+            if 'agent_relay_channels' in locals() and agent_relay_channels:
+                logger.debug(f"Cleaning up {len(agent_relay_channels)} agent relay channels")
+                for local_chanid in list(agent_relay_channels.keys()):
+                    try:
+                        remote_chanid, client_agent = agent_relay_channels[local_chanid]
+                        agent_conn = getattr(client_agent, '_conn', None)
+                        if agent_conn:
+                            agent_conn.close()
+                        del agent_relay_channels[local_chanid]
+                        if local_chanid in agent_fake_channels:
+                            del agent_fake_channels[local_chanid]
+                        logger.debug(f"Cleaned up agent channel {local_chanid}")
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up agent channel {local_chanid}: {e}")
             
             if backend_transport:
                 backend_transport.close()
