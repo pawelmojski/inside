@@ -1187,20 +1187,25 @@ class SSHProxyServer:
     
     def _init_relay_manager(self):
         """Initialize relay manager if Tower relay is enabled"""
-        import os
+        from src.gate.config import GateConfig
         
-        relay_enabled = os.getenv('TOWER_RELAY_ENABLED', 'false').lower() == 'true'
-        
-        if not relay_enabled:
-            logger.info("Tower relay disabled (TOWER_RELAY_ENABLED not set)")
+        # Get config (will use same instance as tower_client)
+        try:
+            config = GateConfig()
+        except:
+            logger.debug("Could not load gate config - relay disabled")
             return
         
-        tower_url = os.getenv('TOWER_WEBSOCKET_URL')
-        gate_api_key = os.getenv('GATE_API_KEY')
-        gate_name = os.getenv('GATE_NAME', 'unknown')
+        if not config.relay_enabled:
+            logger.info("Tower relay disabled (relay.enabled=false in config)")
+            return
+        
+        tower_url = config.relay_tower_url
+        gate_api_key = config.relay_api_key
+        gate_name = config.gate_name
         
         if not tower_url or not gate_api_key:
-            logger.warning("Tower relay enabled but TOWER_WEBSOCKET_URL or GATE_API_KEY not configured")
+            logger.warning("Tower relay enabled but relay.tower_url or relay.api_key not configured")
             return
         
         try:
