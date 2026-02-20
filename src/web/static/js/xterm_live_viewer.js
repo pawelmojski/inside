@@ -77,8 +77,8 @@ function initLiveSessionViewer() {
                 brightCyan: '#00ffff',
                 brightWhite: '#ffffff'
             },
-            // Watch-only mode: disable input
-            disableStdin: true,
+            // Enable input for read-write mode
+            disableStdin: false,
             rows: 40,
             cols: 120
         });
@@ -92,13 +92,18 @@ function initLiveSessionViewer() {
         // Fit terminal to container
         fitAddon.fit();
         
-        // Show banner
-        terminal.writeln('\x1b[1;32m========================================\x1b[0m');
-        terminal.writeln('\x1b[1;37m  Inside Live Session View (xterm.js)\x1b[0m');
-        terminal.writeln('\x1b[1;32m========================================\x1b[0m');
-        terminal.writeln('');
-        terminal.writeln('\x1b[33mConnecting to WebSocket...\x1b[0m');
-        terminal.writeln('');
+        // Auto-resize on window resize
+        window.addEventListener('resize', function() {
+            fitAddon.fit();
+            // Send new size to backend
+            if (socket && socket.connected) {
+                socket.emit('terminal_resize', {
+                    session_id: sessionId,
+                    rows: terminal.rows,
+                    cols: terminal.cols
+                });
+            }
+        });
         
         // Initialize Socket.IO
         // Use polling first (WebSocket upgrade may fail behind reverse proxy)
@@ -114,42 +119,42 @@ function initLiveSessionViewer() {
         // Connection events
         socket.on('connect', function() {
             console.log('[WebSocket] Connected, requesting session access...');
-            terminal.writeln('\x1b[32m✓ WebSocket connected\x1b[0m');
-            terminal.writeln('');
             
-            // Request to watch session
+            // Request to join session (read-write)
             socket.emit('watch_session', {
                 session_id: sessionId,
-                mode: 'watch'  // read-only (join mode in v2.1)
+                mode: 'join'  // read-write mode
             });
         });
         
         socket.on('watch_started', function(data) {
             console.log('[WebSocket] Watch started:', data);
-            terminal.writeln('\x1b[1;36m' + data.message + '\x1b[0m');
-            if (data.gate) {
-                terminal.writeln('\x1b[2mGate: ' + data.gate + ' | Owner: ' + data.owner + ' | Server: ' + data.server + '\x1b[0m');
-            } else {
-                terminal.writeln('\x1b[2mOwner: ' + data.owner + ' | Server: ' + data.server + '\x1b[0m');
-            }
-            terminal.writeln('');
-            terminal.writeln('\x1b[2m--- Session History (50KB buffer) ---\x1b[0m');
-            terminal.writeln('');
+            
+            // Send initial terminal size
+            socket.emit('terminal_resize', {
+                session_id: sessionId,
+                rows: terminal.rows,
+                cols: terminal.cols
+            });
+            
+            // Enable keyboard input
+            terminal.onData(function(input) {
+                // Send user input to backend
+                socket.emit('session_input', {
+                    session_id: sessionId,
+                    data: input
+                });
+            });
         });
         
         socket.on('relay_pending', function(data) {
             // Session is on gate - waiting for relay activation (~5s)
             console.log('[WebSocket] Relay pending:', data);
-            terminal.writeln('\x1b[1;33m⏳ ' + data.message + '\x1b[0m');
-            terminal.writeln('\x1b[2mGate: ' + data.gate_name + '\x1b[0m');
-            terminal.writeln('');
         });
         
         socket.on('relay_activated', function(data) {
             // Gate relay now active - connection imminent
             console.log('[WebSocket] Relay activated:', data);
-            terminal.writeln('\x1b[1;32m✓ ' + data.message + '\x1b[0m');
-            terminal.writeln('');
         });
         
         socket.on('session_output', function(data) {

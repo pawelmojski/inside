@@ -375,15 +375,16 @@ class TowerClient:
         logger.debug(f"Fetched {len(grants)} active grants from Tower")
         return grants
     
-    def heartbeat(self, active_stays: int = 0, active_sessions: int = 0) -> Dict[str, Any]:
+    def heartbeat(self, active_stays: int = 0, active_sessions: int = 0, active_session_ids: list = None) -> Dict[str, Any]:
         """Send heartbeat to Tower to report Gate is alive.
         
         Args:
             active_stays: Number of active stays on this Gate
             active_sessions: Number of active sessions on this Gate
+            active_session_ids: List of active session IDs (for relay management)
         
         Returns:
-            Tower response with gate status
+            Tower response with gate status and relay_sessions
         
         Raises:
             TowerUnreachableError: Tower not reachable
@@ -394,6 +395,10 @@ class TowerClient:
             'active_stays': active_stays,
             'active_sessions': active_sessions
         }
+        
+        # Add session IDs if provided (for relay management)
+        if active_session_ids:
+            data['active_session_ids'] = active_session_ids
         
         response = self._request('POST', '/api/v1/gates/heartbeat', data=data, retry=False)
         

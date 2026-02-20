@@ -529,19 +529,10 @@
                 {% else %}
                     <!-- xterm.js Live Terminal (hidden by default, shown when live view active) -->
                     <div id="xterm-container" class="mb-4">
-                        <div class="alert alert-success">
-                            <i class="bi bi-broadcast"></i> 
-                            <strong>Live Session View (xterm.js)</strong> - 
-                            Real-time terminal streaming via WebSocket
-                        </div>
                         <div id="xterm-terminal"></div>
                         <div class="terminal-controls">
                             <span class="badge bg-success" id="watch-status">
-                                <i class="bi bi-eye"></i> Watching (Read-Only)
-                            </span>
-                            <span class="text-muted ms-3">
-                                <i class="bi bi-info-circle"></i>
-                                Join mode (read-write) will be available in v2.1
+                                <i class="bi bi-keyboard"></i> Joined (Read-Write)
                             </span>
                         </div>
                     </div>

@@ -80,6 +80,11 @@ class GateConfig:
         self.log_file = self.config.get('logging', 'file', fallback='/var/log/inside/gate.log')
         self.log_max_size = self.config.getint('logging', 'max_size', fallback=10485760)
         self.log_backup_count = self.config.getint('logging', 'backup_count', fallback=5)
+        
+        # Relay settings (for Tower WebSocket relay)
+        self.relay_enabled = self.config.getboolean('relay', 'enabled', fallback=False)
+        self.relay_tower_url = self.config.get('relay', 'tower_url', fallback=None)
+        self.relay_api_key = self.config.get('relay', 'api_key', fallback=None)
     
     def __repr__(self):
         return f'<GateConfig gate_name={self.gate_name} tower_url={self.tower_url}>'

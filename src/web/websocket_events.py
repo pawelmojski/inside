@@ -40,7 +40,8 @@ def register_handlers(socketio_instance):
     # Now register all handlers using the initialized socketio instance
     _register_connect_handler()
     _register_watch_session_handler()
-    _register_send_input_handler()
+    _register_session_input_handler()
+    _register_terminal_resize_handler()
     _register_disconnect_handler()
     
     # Register gate relay handlers (for receiving output from gates)
@@ -52,8 +53,16 @@ def register_handlers(socketio_instance):
 def _register_connect_handler():
     """Register connect event handler"""
     @socketio.on('connect')
-    def handle_connect():
-        """Handle WebSocket connection"""
+    def handle_connect(auth=None):
+        """Handle WebSocket connection (browser or gate relay)"""
+        # Check if this is a gate relay connection (has gate_api_key in auth)
+        if auth and isinstance(auth, dict) and 'gate_api_key' in auth:
+            gate_name = auth.get('gate_name', 'unknown')
+            logger.info(f"[SOCKETIO] Gate relay connected: {gate_name}, sid={request.sid}")
+            emit('connected', {'message': 'Gate relay connected', 'gate_name': gate_name})
+            return
+        
+        # Browser connection - requires authentication
         logger.info(f"[SOCKETIO] WebSocket connected: sid={request.sid}, user={current_user if current_user.is_authenticated else 'anonymous'}")
         
         if not current_user or not current_user.is_authenticated:
@@ -142,7 +151,7 @@ def _register_watch_session_handler():
                     logger.info(f"Using proxy multiplexer for {session_id} from gate {proxy_multiplexer.gate_name}")
                 else:
                     # Session on gate but not yet relayed - register watch request
-                    gate_name = session.gate_name
+                    gate_name = session.gate.name if session.gate else None
                     
                     if not gate_name:
                         emit('error', {'message': 'Cannot determine session location'})
@@ -210,30 +219,70 @@ def _register_watch_session_handler():
             db.close()
 
 
-def _register_send_input_handler():
-    """Register send_input event handler"""
-    @socketio.on('send_input')
-    def handle_send_input(data):
-        """Handle input from web client (for join mode, future)
+def _register_session_input_handler():
+    """Register session_input event handler (for join mode)"""
+    @socketio.on('session_input')
+    def handle_session_input(data):
+        """Handle keyboard input from web client in join mode
         
         Client sends:
         {
-            'data': [72, 101, 108, 108, 111]  # "Hello" as byte array
+            'session_id': 'abc123',
+            'data': 'ls\n'  # User keystrokes as string
         }
         """
-        # This will be used for join mode implementation
-        # For now, we reject all input (watch-only)
-        
         if request.sid not in active_channels:
             emit('error', {'message': 'Not watching any session'})
             return
         
         channel = active_channels[request.sid]
+        session_id = channel.session_id
         
-        # TODO: Implement join mode
-        # channel.queue_input(bytes(data['data']))
+        # Convert input string to bytes
+        input_data = data.get('data', '')
+        if isinstance(input_data, str):
+            input_bytes = input_data.encode('utf-8')
+        else:
+            input_bytes = bytes(input_data)
         
-        emit('error', {'message': 'Input not allowed in watch mode. Join mode coming in v2.1!'})
+        # Queue input in channel adapter
+        channel.queue_input(input_bytes)
+        
+        # Forward to multiplexer (only for local sessions, not proxy)
+        multiplexer = multiplexer_registry.get_session(session_id)
+        if multiplexer:
+            watcher_id = f"web_{request.sid}"
+            multiplexer.handle_participant_input(watcher_id, input_bytes)
+        else:
+            # Session is on gate (proxy) - input not supported for relay
+            logger.warning(f"Input from {channel.username} for gate session {session_id} - not supported")
+
+
+def _register_terminal_resize_handler():
+    """Register terminal_resize event handler"""
+    @socketio.on('terminal_resize')
+    def handle_terminal_resize(data):
+        """Handle terminal resize from web client
+        
+        Client sends:
+        {
+            'session_id': 'abc123',
+            'rows': 40,
+            'cols': 120
+        }
+        """
+        if request.sid not in active_channels:
+            return
+        
+        channel = active_channels[request.sid]
+        session_id = data.get('session_id')
+        rows = data.get('rows', 24)
+        cols = data.get('cols', 80)
+        
+        logger.info(f"Terminal resize from {channel.username} for {session_id}: {rows}x{cols}")
+        
+        # For local sessions - resize the Paramiko channel
+        # For gate sessions - would need to send resize command to gate (TODO)
 
 
 def _register_disconnect_handler():
