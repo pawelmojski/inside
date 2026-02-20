@@ -106,7 +106,8 @@ class LazyRelayManager:
                 gate_api_key=self.gate_api_key,
                 gate_name=self.gate_name,
                 owner_username=multiplexer.owner_username,
-                server_name=multiplexer.server_name
+                server_name=multiplexer.server_name,
+                multiplexer=multiplexer  # Pass multiplexer for bidirectional relay
             )
             
             # Add as watcher to existing multiplexer
@@ -115,7 +116,7 @@ class LazyRelayManager:
                 watcher_id=watcher_id,
                 channel=relay_channel,
                 username="[Tower Relay]",
-                mode="watch"
+                mode="join"  # Join mode for bidirectional relay (input + output)
             )
             
             if success:

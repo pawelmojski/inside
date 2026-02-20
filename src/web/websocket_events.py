@@ -113,11 +113,6 @@ def _register_watch_session_handler():
             emit('error', {'message': 'Invalid mode. Use "watch" or "join"'})
             return
         
-        # Check if join mode is requested (not implemented yet)
-        if mode == 'join':
-            emit('error', {'message': 'Join mode not yet implemented. Use mode="watch" for read-only viewing.'})
-            return
-        
         # Get session from database
         db = SessionLocal()
         try:
@@ -248,14 +243,26 @@ def _register_session_input_handler():
         # Queue input in channel adapter
         channel.queue_input(input_bytes)
         
-        # Forward to multiplexer (only for local sessions, not proxy)
+        # Forward to multiplexer
         multiplexer = multiplexer_registry.get_session(session_id)
         if multiplexer:
+            # Local session on Tower - forward to local multiplexer
             watcher_id = f"web_{request.sid}"
             multiplexer.handle_participant_input(watcher_id, input_bytes)
+            logger.debug(f"Input forwarded to local session {session_id}: {len(input_bytes)} bytes")
         else:
-            # Session is on gate (proxy) - input not supported for relay
-            logger.warning(f"Input from {channel.username} for gate session {session_id} - not supported")
+            # Session is on gate (proxy) - send input via WebSocket to gate
+            proxy_multiplexer = proxy_registry.get_session(session_id)
+            if proxy_multiplexer:
+                gate_name = proxy_multiplexer.gate_name
+                # Emit to gate relay connection
+                socketio.emit('gate_session_input', {
+                    'session_id': session_id,
+                    'data': list(input_bytes)  # Convert bytes to list for JSON
+                }, room=f"gate_{gate_name}")
+                logger.debug(f"Input sent to gate {gate_name} for session {session_id}: {len(input_bytes)} bytes")
+            else:
+                logger.warning(f"Input from {channel.username} for session {session_id} - multiplexer not found")
 
 
 def _register_terminal_resize_handler():
@@ -384,6 +391,11 @@ def _register_gate_relay_handlers():
                 server_name=server_name
             )
             logger.info(f"[GateRelay:{session_id}] Created proxy multiplexer")
+        
+        # Join gate to room for bidirectional communication
+        gate_room = f"gate_{gate_name}"
+        join_room(gate_room)
+        logger.info(f"[GateRelay:{session_id}] Gate {gate_name} joined room {gate_room}")
         
         # Send acknowledgment
         emit('relay_ack', {
