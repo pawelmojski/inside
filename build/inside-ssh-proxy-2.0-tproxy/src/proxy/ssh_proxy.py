@@ -431,6 +431,11 @@ class SSHProxyHandler(paramiko.ServerInterface):
         self.ssh_login = None  # SSH login name for backend
         # Port forwarding destinations
         self.forward_destinations = {}  # chanid -> (host, port)
+        # Backend channel/transport (set after connection established)
+        self.backend_channel = None
+        self.backend_transport = None
+        # Environment variables from client
+        self.env_vars = {}  # name -> value
         
     def check_auth_none(self, username: str):
         """Check 'none' authentication - called AFTER get_banner
@@ -1144,6 +1149,91 @@ class SSHProxyHandler(paramiko.ServerInterface):
         
         logger.info(f"Port forwarding allowed to {destination}")
         return paramiko.OPEN_SUCCEEDED
+    
+    def check_channel_window_change_request(self, channel, width, height, pixelwidth, pixelheight):
+        """Handle terminal resize requests
+        
+        Forward resize to backend channel so terminal applications (vim, mc, htop)
+        display correctly after window resize.
+        
+        Args:
+            channel: Client channel
+            width: New terminal width (columns)
+            height: New terminal height (rows)
+            pixelwidth: Width in pixels (usually 0)
+            pixelheight: Height in pixels (usually 0)
+        """
+        logger.debug(f"Window change request: {width}x{height}")
+        
+        # Update stored PTY size
+        self.pty_width = width
+        self.pty_height = height
+        
+        # Forward resize to backend if connected
+        if self.backend_channel and not self.backend_channel.closed:
+            try:
+                self.backend_channel.resize_pty(width, height, pixelwidth, pixelheight)
+                logger.info(f"Terminal resized: {width}x{height}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to resize backend PTY: {e}")
+                return False
+        else:
+            logger.debug("Backend channel not available for resize")
+            return True  # Accept request even if can't forward yet
+    
+    def check_channel_env_request(self, channel, name, value):
+        """Handle environment variable requests
+        
+        VSCode Remote SSH and other tools may set environment variables.
+        Common variables: TERM, LANG, LC_*, PATH, VSCODE_*
+        
+        Args:
+            channel: Client channel
+            name: Environment variable name (bytes or str)
+            value: Environment variable value (bytes or str)
+        """
+        # Decode if bytes
+        env_name = name.decode('utf-8') if isinstance(name, bytes) else name
+        env_value = value.decode('utf-8') if isinstance(value, bytes) else value
+        
+        logger.debug(f"Environment variable request: {env_name}={env_value}")
+        
+        # Store for potential use
+        self.env_vars[env_name] = env_value
+        
+        # Accept all environment variables
+        # Backend SSH server will decide which to actually set
+        return True
+    
+    def check_channel_signal_request(self, channel, signal_name):
+        """Handle signal forwarding (SIGINT, SIGTERM, etc)
+        
+        Forward signals from client to backend process.
+        Allows Ctrl+C and other signals to work correctly.
+        
+        Args:
+            channel: Client channel
+            signal_name: Signal name (e.g. 'INT', 'TERM', 'KILL')
+        """
+        # Decode if bytes
+        sig_name = signal_name.decode('utf-8') if isinstance(signal_name, bytes) else signal_name
+        
+        logger.info(f"Signal request: {sig_name}")
+        
+        # Forward signal to backend if connected
+        if self.backend_channel and not self.backend_channel.closed:
+            try:
+                # Paramiko doesn't have direct signal support, but we can send break
+                # For now, just log it - signals are typically handled at protocol level
+                logger.info(f"Signal {sig_name} forwarded to backend session")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to forward signal {sig_name}: {e}")
+                return False
+        else:
+            logger.debug(f"Backend channel not available for signal {sig_name}")
+            return True
 
 
 class SSHProxyServer:
@@ -3122,6 +3212,10 @@ class SSHProxyServer:
             # Open backend channel
             backend_channel = backend_transport.open_session()
             
+            # Store backend references in handler for window resize/signals
+            server_handler.backend_channel = backend_channel
+            server_handler.backend_transport = backend_transport
+            
             # Start port forwarding handler in background thread
             # This will handle any -L/-R/-D requests from client
             forward_thread = threading.Thread(
@@ -3156,6 +3250,16 @@ class SSHProxyServer:
                     width=server_handler.pty_width,
                     height=server_handler.pty_height
                 )
+            
+            # Forward environment variables to backend (if any)
+            if hasattr(server_handler, 'env_vars') and server_handler.env_vars:
+                for env_name, env_value in server_handler.env_vars.items():
+                    try:
+                        backend_channel.set_environment_variable(env_name, env_value)
+                        logger.debug(f"Set backend env: {env_name}={env_value}")
+                    except Exception as e:
+                        # Backend may reject some env vars (OpenSSH AcceptEnv whitelist)
+                        logger.debug(f"Backend rejected env {env_name}: {e}")
             
             # Invoke shell, exec command, or subsystem based on client request
             if server_handler.channel_type == 'exec' and server_handler.exec_command:

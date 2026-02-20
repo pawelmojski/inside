@@ -23,7 +23,7 @@ class WebSocketRelayChannel:
     """
     
     def __init__(self, session_id: str, tower_url: str, gate_api_key: str, gate_name: str, 
-                 owner_username: str, server_name: str):
+                 owner_username: str, server_name: str, multiplexer=None):
         """Initialize relay channel
         
         Args:
@@ -33,6 +33,7 @@ class WebSocketRelayChannel:
             gate_name: Name of this gate
             owner_username: Session owner username
             server_name: Target server name
+            multiplexer: SessionMultiplexer instance (for bidirectional input)
         """
         self.session_id = session_id
         self.tower_url = tower_url
@@ -40,6 +41,7 @@ class WebSocketRelayChannel:
         self.gate_name = gate_name
         self.owner_username = owner_username
         self.server_name = server_name
+        self.multiplexer = multiplexer  # For bidirectional relay
         
         self.closed = False
         self._lock = threading.Lock()
@@ -58,6 +60,7 @@ class WebSocketRelayChannel:
         self.sio.on('connect', self._on_connect)
         self.sio.on('disconnect', self._on_disconnect)
         self.sio.on('relay_ack', self._on_relay_ack)
+        self.sio.on('gate_session_input', self._on_gate_session_input)
         
         # Connect to Tower
         try:
@@ -92,6 +95,32 @@ class WebSocketRelayChannel:
     def _on_relay_ack(self, data):
         """Called when Tower acknowledges relay registration"""
         logger.info(f"[Relay:{self.session_id}] Tower acknowledged registration: {data}")
+    
+    def _on_gate_session_input(self, data):
+        """Called when Tower sends input from browser (join mode)
+        
+        Args:
+            data: {'session_id': 'abc', 'data': [72, 101, 108, 108, 111]} (bytes as list)
+        """
+        if data.get('session_id') != self.session_id:
+            return
+        
+        input_data = data.get('data', [])
+        if not input_data:
+            return
+        
+        # Convert list back to bytes
+        input_bytes = bytes(input_data)
+        
+        logger.debug(f"[Relay:{self.session_id}] Received input from Tower: {len(input_bytes)} bytes")
+        
+        # Forward to local multiplexer (which will send to backend)
+        # Use the same watcher_id that was registered in lazy_relay_manager
+        if self.multiplexer:
+            watcher_id = f"tower_relay_{self.session_id}"
+            self.multiplexer.handle_participant_input(watcher_id, input_bytes)
+        else:
+            logger.warning(f"[Relay:{self.session_id}] No multiplexer to forward input to")
     
     # Paramiko channel interface methods
     

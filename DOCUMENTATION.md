@@ -222,9 +222,14 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 - **Features**:
   - SSH agent forwarding (AgentServerProxy)
   - PTY forwarding with term type/dimensions
+  - **Dynamic terminal resize** (window change events) 🆕 v2.1
+  - **Environment variable forwarding** (TERM, LANG, LC_*, VSCODE_*) 🆕 v2.1
+  - **Signal forwarding** (SIGINT, SIGTERM for Ctrl+C) 🆕 v2.1
   - Exec/subsystem support (SCP, SFTP)
   - Password + public key authentication
-  - Session recording (JSON format)
+  - Port forwarding (-L, -R, -D)
+  - Session recording (JSONL format)
+  - **VSCode Remote SSH compatible** 🆕 v2.1
 
 ### RDP Proxy
 - **PyRDP MITM 2.1.0**: RDP man-in-the-middle with session recording

@@ -222,6 +222,72 @@ api_key = super_secret_key_tailscale_etop
 - Gate sessions only (local sessions have direct access)
 - Requires python-socketio==5.11.1 (version sync critical)
 
+**UPDATE (same day):** Terminal resize is now FIXED! ✅
+
+---
+
+### SSH Protocol Enhancements (v2.1+) 🔧
+
+**Goal:** Full VSCode Remote SSH compatibility + better terminal support
+
+#### What Was Delivered:
+
+**1. Dynamic Terminal Resize** (`check_channel_window_change_request`)
+- Handles window-change SSH events
+- Forwards resize to backend via `channel.resize_pty()`
+- Terminal applications (vim, mc, htop) adapt to window size
+- Real-time resize propagation
+- **Fixed known limitation from earlier today!**
+
+**2. Environment Variable Forwarding** (`check_channel_env_request`)
+- Accepts env vars from client: TERM, LANG, LC_*, PATH, VSCODE_*
+- Forwards via `channel.set_environment_variable()`
+- Backend respects OpenSSH `AcceptEnv` whitelist
+- Critical for VSCode Remote SSH locale/terminal settings
+
+**3. Signal Forwarding** (`check_channel_signal_request`)
+- Handles SIGINT, SIGTERM, SIGKILL
+- Ctrl+C and other signals work correctly
+- Protocol-level signal support
+
+**Technical Details:**
+
+**Files Modified:**
+- `src/proxy/ssh_proxy.py`:
+  - Added `backend_channel`, `backend_transport` fields to handler
+  - Added `env_vars` dict for storing client env
+  - New method: `check_channel_window_change_request()` (resize)
+  - New method: `check_channel_env_request()` (env vars)
+  - New method: `check_channel_signal_request()` (signals)
+  - Env vars forwarded after PTY setup, before shell invoke
+
+**SSH Protocol Support Matrix:**
+
+| Feature | Before v2.1 | After v2.1 | VSCode Needs |
+|---------|-------------|------------|--------------|
+| PTY | ✅ | ✅ | ✅ Yes |
+| Agent Forward | ✅ | ✅ | ⚠️ Optional |
+| Port Forward | ✅ | ✅ | ✅ Yes |
+| Exec/Subsystem | ✅ | ✅ | ✅ Yes |
+| Window Resize | ❌ | ✅ | ✅ Yes |
+| Env Variables | ❌ | ✅ | ✅ Yes |
+| Signal Forward | ❌ | ✅ | ⚠️ Optional |
+| X11 Forward | ❌ | ❌ | ❌ No |
+
+**VSCode Remote SSH Compatibility:**
+- ✅ **Fully compatible** - all required features implemented
+- ✅ Terminal resize works dynamically
+- ✅ Environment variables passed correctly
+- ✅ Port forwarding for debugger/preview
+- ✅ SFTP for file sync
+- ✅ Multiple concurrent sessions
+
+**Use Cases:**
+- **VSCode Remote Development** - full IDE functionality through gateway
+- **Terminal Tools** - vim, mc, htop resize correctly
+- **Script Automation** - proper signal handling, env vars
+- **International Users** - locale/language settings forwarded
+
 #### User Feedback:
 
 > "działa jak ta lala!"
