@@ -13,7 +13,7 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 - **Roadmap**: [ROADMAP.md](ROADMAP.md) - Development history and future plans
 - **Dependencies**: See [requirements.txt](requirements.txt) and [requirements-pyrdp-converter.txt](requirements-pyrdp-converter.txt)
 
-## Architecture (Current State - v1.10 TPROXY + Standalone)
+## Architecture (Current State - v2.1 TPROXY + Standalone + WebSocket Relay)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -32,10 +32,13 @@ Inside is a transparent SSH/RDP gateway that controls when real people can be in
 │  │    • Auto-refresh every 5 seconds                         │   │
 │  │    • People Inside counter, real-time session tracking    │   │
 │  │  - Session History: List, filter, Gate/Stay columns      │   │
-│  │  - Live Session Viewer: Real-time SSH log streaming 🎯  │   │
-│  │    • ANSI colors, yellow flash for new events            │   │
-│  │    • Auto-reload on session end                           │   │
-│  │    • .rec format support (text header + JSONL)           │   │
+│  │  - Live Session Viewer: Real-time SSH streaming 🎯🔥   │   │
+│  │    • xterm.js terminal with full read-write control      │   │
+│  │    • Bidirectional: Type commands directly in browser!   │   │
+│  │    • WebSocket relay for remote gate sessions (v2.1)     │   │
+│  │    • ANSI colors, auto-resize, FitAddon support          │   │
+│  │    • Zero overhead when not watching (~5s activation)    │   │
+│  │    • Historical view: .rec format (text + JSONL)         │   │
 │  │  - RDP Session Viewer: MP4 conversion & video player     │   │
 │  │  - User Management: CRUD + multiple source IPs            │   │
 │  │  - Server Management: CRUD + IP allocation                │   │
@@ -895,7 +898,78 @@ Result: Stay #1 duration = 08:00-14:14 (6h 14min), 2 sessions total
 
 ## Session Viewer Features (v1.1+)
 
-### SSH Live View
+### SSH Live View (v2.1+) - Bidirectional WebSocket Relay 🔥
+
+**Revolutionary feature**: Type commands directly in browser to control remote SSH sessions!
+
+**Architecture (Distributed Sessions):**
+- **Tower**: Flask/SocketIO server (10.0.160.5)
+- **Gate**: SSH proxy with SessionMultiplexer (10.30.0.76, etc.)
+- **Challenge**: Sessions run on gates, need browser access from Tower
+- **Solution**: On-demand WebSocket relay (Gate ↔ Tower ↔ Browser)
+
+**Key Components:**
+1. **WebSocketRelayChannel** (`src/proxy/websocket_relay_channel.py`)
+   - Paramiko channel interface on gate
+   - Connects to Tower via socketio.Client
+   - Sends output: SessionMultiplexer → Tower → Browsers
+   - Receives input: Tower → SessionMultiplexer → Backend
+   - Mode: 'join' (full read-write access)
+
+2. **LazyRelayManager** (`src/proxy/lazy_relay_manager.py`)
+   - On-demand activation via heartbeat (5s interval)
+   - Zero overhead when not watching
+   - Automatic cleanup when all browsers disconnect
+
+3. **ProxyMultiplexer** (`src/web/proxy_multiplexer.py`)
+   - Represents gate session on Tower
+   - Adapts SocketIO ↔ Paramiko channel interface
+   - Tracks browser watchers (watch/join mode)
+
+4. **Browser Terminal** (`xterm.js 5.3.0`)
+   - Full keyboard input support
+   - Auto-resize with FitAddon
+   - Real-time output streaming
+   - Badge: "Joined (Read-Write)"
+
+**Flow (Bidirectional):**
+```
+OUTPUT: Backend → Gate Multiplexer → WebSocketRelay → Tower Proxy → Browser
+INPUT:  Browser → Tower Events → gate_session_input → Gate Relay → Multiplexer → Backend
+```
+
+**Features:**
+- ✅ Full read-write control from browser
+- ✅ Type commands, see output in real-time
+- ✅ Multiple browsers can join simultaneously
+- ✅ ~5 second activation delay (acceptable)
+- ✅ Zero overhead when not watching
+- ✅ ANSI colors, auto-resize support
+- ✅ Works with gate sessions (distributed architecture)
+- ⚠️ Terminal resize doesn't propagate to backend
+
+**Configuration (Gate):**
+```ini
+[relay]
+enabled = true
+tower_url = http://10.0.160.5:5000
+api_key = super_secret_key_tailscale_etop
+```
+
+**Dependencies:**
+- python-socketio==5.11.1 (version sync critical)
+- websocket-client>=1.6.0
+- xterm-addon-fit 0.8.0
+
+**Use Cases:**
+- Emergency troubleshooting (watch + intervene)
+- Remote support (see problem, type solution)
+- Training (demonstrate commands live)
+- Security audits (monitor + control if needed)
+
+### SSH Historical View (v1.1+)
+
+**Legacy format** - View completed sessions from .rec files:
 - **Real-time Streaming**: JSONL format, 2-second polling
 - **Terminal UI**: Dark theme, monospace font, color-coded events
 - **Event Types**: Connection, authentication, server output, client input, disconnect
