@@ -13,8 +13,10 @@ from src.core.database import Session
 
 recordings_bp = Blueprint('recordings', __name__, url_prefix='/api/v1/recordings')
 
-# Base directory for recordings
-RECORDINGS_DIR = '/opt/jumphost/logs/recordings'
+# Recordings directory - use LOG_DIR (writable) not BASE_DIR (read-only)
+# For Tower: /var/log/inside/tower/recordings (in systemd ReadWritePaths)
+LOG_DIR = os.getenv('LOG_DIR', '/var/log/jumphost')
+RECORDINGS_DIR = os.getenv('RECORDINGS_DIR', f'{LOG_DIR}/recordings')
 
 
 @recordings_bp.route('/start', methods=['POST'])
